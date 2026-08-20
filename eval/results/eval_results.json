@@ -1,0 +1,86 @@
+{
+  "policies": {
+    "No Retry": {
+      "recovery_rate_%": 0.0,
+      "recovery_rate_%_std": 0.0,
+      "retry_cost_avg": 0.0,
+      "retry_cost_avg_std": 0.0,
+      "false_retry_rate_%": 0.0,
+      "false_retry_rate_%_std": 0.0,
+      "time_to_recovery_min": null,
+      "time_to_recovery_min_std": null,
+      "\u20b9_per_\u20b91Cr_failed": 0.0,
+      "\u20b9_per_\u20b91Cr_failed_std": 0.0
+    },
+    "Fixed 3-Retry": {
+      "recovery_rate_%": 73.45,
+      "recovery_rate_%_std": 0.46,
+      "retry_cost_avg": 1.88,
+      "retry_cost_avg_std": 0.01,
+      "false_retry_rate_%": 8.03,
+      "false_retry_rate_%_std": 0.33,
+      "time_to_recovery_min": 15.0,
+      "time_to_recovery_min_std": 0.0,
+      "\u20b9_per_\u20b91Cr_failed": 7236492.4,
+      "\u20b9_per_\u20b91Cr_failed_std": 86698.07
+    },
+    "XGBoost/Rules": {
+      "recovery_rate_%": 72.78,
+      "recovery_rate_%_std": 0.38,
+      "retry_cost_avg": 1.61,
+      "retry_cost_avg_std": 0.01,
+      "false_retry_rate_%": 0.0,
+      "false_retry_rate_%_std": 0.0,
+      "time_to_recovery_min": 0.0,
+      "time_to_recovery_min_std": 0.0,
+      "\u20b9_per_\u20b91Cr_failed": 7256487.0,
+      "\u20b9_per_\u20b91Cr_failed_std": 122325.93
+    }
+  },
+  "paired_vs_baseline": {
+    "No Retry": {
+      "recovery_rate_pp": {
+        "mean_delta": -73.452,
+        "ci95_halfwidth": 0.547,
+        "ci95": [
+          -73.999,
+          -72.905
+        ],
+        "n_paired": 25000,
+        "significant": true
+      },
+      "retry_cost": {
+        "mean_delta": -1.878,
+        "ci95_halfwidth": 0.011,
+        "ci95": [
+          -1.889,
+          -1.867
+        ],
+        "n_paired": 25000,
+        "significant": true
+      }
+    },
+    "XGBoost/Rules": {
+      "recovery_rate_pp": {
+        "mean_delta": -0.668,
+        "ci95_halfwidth": 0.679,
+        "ci95": [
+          -1.347,
+          0.011
+        ],
+        "n_paired": 25000,
+        "significant": false
+      },
+      "retry_cost": {
+        "mean_delta": -0.262,
+        "ci95_halfwidth": 0.011,
+        "ci95": [
+          -0.273,
+          -0.251
+        ],
+        "n_paired": 25000,
+        "significant": true
+      }
+    }
+  }
+}

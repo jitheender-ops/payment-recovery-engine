@@ -1,0 +1,4 @@
+policy,recovery_rate_%,recovery_rate_%_std,retry_cost_avg,retry_cost_avg_std,false_retry_rate_%,false_retry_rate_%_std,time_to_recovery_min,time_to_recovery_min_std,₹_per_₹1Cr_failed,₹_per_₹1Cr_failed_std
+No Retry,0.0,0.0,0.0,0.0,0.0,0.0,inf,,0.0,0.0
+Fixed 3-Retry,73.45,0.46,1.88,0.01,8.03,0.33,15.0,0.0,7236492.4,86698.07
+XGBoost/Rules,72.78,0.38,1.61,0.01,0.0,0.0,0.0,0.0,7256487.0,122325.93

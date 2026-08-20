@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Database
+*.db
+*.sqlite3
+
+# Models
+models/*.joblib
+models/*.pkl
+
+# Eval results ARE committed on purpose — the README cites them as the evidence
+# for every number it states, so a fresh clone must contain them. Regenerate with:
+#   python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
