@@ -184,9 +184,13 @@ class EvalRunner:
                 # An "LLM Agent" row served mostly by the XGBoost fallback is a
                 # fabricated result. Track it and refuse to publish it below.
                 fallbacks = getattr(policy, "total_fallbacks", getattr(policy, "fallback_count", 0))
-                calls = getattr(policy, "call_count", 0)
+                calls = getattr(policy, "total_calls", getattr(policy, "call_count", 0))
                 if calls:
-                    self.llm_fallback_rate = fallbacks / calls
+                    self.llm_fallback_rate = min(fallbacks / calls, 1.0)
+                    if getattr(policy, "_abort_reason", None):
+                        console.print(
+                            f"    [bold red]LLM provider unusable — {policy._abort_reason}[/bold red]"
+                        )
                     if fallbacks:
                         console.print(
                             f"    [yellow]{fallbacks:,}/{calls:,} decisions "

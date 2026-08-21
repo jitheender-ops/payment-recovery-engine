@@ -60,6 +60,10 @@ class PolicyAgent:
         # results table. Callers must check it before labelling output "LLM".
         self.call_count = 0
         self.fallback_count = 0
+        # HTTP status of the last unrecoverable API failure, surfaced so callers
+        # can stop early. decide() swallows its own errors by design, so without
+        # this a bad key or empty balance is invisible above this class.
+        self.last_error_status: int | None = None
 
         logger.info("PolicyAgent initialized: provider=%s, model=%s", self._provider, self._model)
 
@@ -107,6 +111,10 @@ class PolicyAgent:
 
         except Exception as e:
             logger.exception("LLM call failed: %s", str(e))
+            status = getattr(e, "status_code", None)
+            if status in (401, 402, 403, 404):
+                self.last_error_status = status
+                self.last_error_detail = f"HTTP {status}: {str(e)[:160]}"
             self.fallback_count += 1
             return self._fallback_action(context, f"LLM error: {str(e)}")
 

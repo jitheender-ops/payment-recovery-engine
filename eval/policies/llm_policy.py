@@ -25,11 +25,28 @@ class LLMPolicy:
         self.fallback_count = 0
         # (scenario_id, attempt) -> decision, filled by prefetch().
         self._cache: dict[tuple[int, int], dict] = {}
+        # Tripped by an unrecoverable provider error (bad key, no credits,
+        # model not found). Without it a dead provider still gets one doomed
+        # request per scenario — a real run burned 7,856 calls against an
+        # HTTP 402 before finishing and reporting a meaningless row.
+        self._abort_reason: str | None = None
         try:
             from src.agent.policy_agent import PolicyAgent
             self._agent = PolicyAgent()
         except Exception:
             logger.exception("PolicyAgent could not be constructed — every decision will fall back")
+
+    @property
+    def total_calls(self) -> int:
+        """
+        Decisions the LLM was actually asked for.
+
+        PolicyAgent.call_count is the right denominator: it increments once per
+        real decide() invocation, including prefetch. LLMPolicy.call_count only
+        counts cache reads by the eval loop, which is a smaller and different
+        population — dividing by it produced fallback rates above 100%.
+        """
+        return getattr(self._agent, "call_count", 0) or self.call_count
 
     @property
     def total_fallbacks(self) -> int:
@@ -63,10 +80,28 @@ class LLMPolicy:
 
             async def one(sid: int, row: pd.Series, attempt: int):
                 async with sem:
+                    if self._abort_reason is not None:
+                        self.fallback_count += 1
+                        return (sid, attempt), self._fallback.decide(row, attempt)
                     try:
-                        return (sid, attempt), await self._decide_async(row, attempt)
-                    except Exception:
-                        logger.exception("prefetch failed for scenario=%s attempt=%s", sid, attempt)
+                        result = (sid, attempt), await self._decide_async(row, attempt)
+                        # decide() catches its own errors, so a fatal provider
+                        # failure arrives as a flag rather than an exception.
+                        if self._agent.last_error_status is not None:
+                            self._abort_reason = getattr(
+                                self._agent, "last_error_detail",
+                                f"HTTP {self._agent.last_error_status}",
+                            )
+                            logger.error("Aborting LLM prefetch — %s", self._abort_reason)
+                        return result
+                    except Exception as exc:
+                        status = getattr(exc, "status_code", None)
+                        if status in (401, 402, 403, 404):
+                            # Retrying cannot fix a key, a balance, or a model id.
+                            self._abort_reason = f"HTTP {status}: {str(exc)[:160]}"
+                            logger.error("Aborting LLM prefetch — %s", self._abort_reason)
+                        else:
+                            logger.exception("prefetch failed scenario=%s attempt=%s", sid, attempt)
                         self.fallback_count += 1
                         return (sid, attempt), self._fallback.decide(row, attempt)
 
