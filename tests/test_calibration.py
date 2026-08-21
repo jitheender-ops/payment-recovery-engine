@@ -16,7 +16,7 @@ from eval.scenario_generator import ScenarioGenerator
 from eval.simulator import BankResponseSimulator
 
 
-def test_blended_recovery_is_in_the_published_band():
+def test_blended_recovery_is_in_the_published_band() -> None:
     """
     A dumb 3-retry baseline must land in the 15-30% band that public figures
     report for failed-payment recovery. The earlier model returned ~73%, which
@@ -32,7 +32,7 @@ def test_blended_recovery_is_in_the_published_band():
     assert 15.0 <= rate <= 30.0, f"blended recovery {rate:.1f}% is outside the 15-30% band"
 
 
-def test_retry_probability_is_far_below_first_attempt_probability():
+def test_retry_probability_is_far_below_first_attempt_probability() -> None:
     """
     The core modelling fix: a retry is not a fresh payment. Whatever the bank's
     baseline approval rate, retrying an already-failed payment must be much less
@@ -46,7 +46,7 @@ def test_retry_probability_is_far_below_first_attempt_probability():
     assert retry < first / 5, f"retry {retry:.3f} too close to first attempt {first:.3f}"
 
 
-def test_waiting_helps_downtime_and_nothing_else():
+def test_waiting_helps_downtime_and_nothing_else() -> None:
     """Delay is only a lever for time-based blockers, and it is applied once."""
     profile = get_bank_profile("SBI")
 
@@ -67,7 +67,7 @@ def test_waiting_helps_downtime_and_nothing_else():
     assert p("bank_downtime", 100_000) <= ceiling + 1e-9
 
 
-def test_unmodelled_failure_class_is_pessimistic():
+def test_unmodelled_failure_class_is_pessimistic() -> None:
     """An unknown blocker must not inherit the full baseline approval rate."""
     profile = get_bank_profile("HDFC")
     assert "meteor_strike" not in CONDITION_CLEARS

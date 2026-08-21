@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Enum,
     Float,
     Index,
     Integer,
@@ -30,9 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from src.classifier.taxonomy import FailureClass
 from src.database import Base
-
 
 # ── Webhook Event Store ──────────────────────────────────────────────────────
 
@@ -47,12 +44,12 @@ class WebhookEvent(Base):
     )
     razorpay_event_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g. payment.failed
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
-    processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_webhook_events_type_received", "event_type", "received_at"),
@@ -90,31 +87,31 @@ class PaymentFailure(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     payment_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    order_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    order_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)  # in paise
     currency: Mapped[str] = mapped_column(String(10), default="INR")
     method: Mapped[str] = mapped_column(String(50), nullable=False)  # card, upi, netbanking, wallet
-    bank: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    wallet: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    vpa: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # UPI VPA
-    card_network: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    card_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    card_issuer: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    bank: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wallet: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    vpa: Mapped[str | None] = mapped_column(String(255), nullable=True)  # UPI VPA
+    card_network: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    card_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    card_issuer: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Error details from Razorpay (5-tuple)
     error_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    error_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    error_source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    error_step: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    error_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    error_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Classification
     failure_class: Mapped[str] = mapped_column(String(50), nullable=False)
     is_retryable: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
     # Customer info
-    customer_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    customer_contact: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_contact: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     # Metadata
     webhook_event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -150,31 +147,31 @@ class RetryAttempt(Base):
     action_type: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # retry_now, retry_at, switch_rail, nudge_customer, abandon
-    target_rail: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    scheduled_at: Mapped[Optional[datetime]] = mapped_column(
+    target_rail: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    agent_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    agent_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_type: Mapped[str] = mapped_column(
         String(20), default="llm"
     )  # llm, xgboost, fixed_retry
-    agent_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    agent_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Guardrail
     guardrail_passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    guardrail_rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    guardrail_rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Execution
-    executed_at: Mapped[Optional[datetime]] = mapped_column(
+    executed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    result: Mapped[Optional[str]] = mapped_column(
+    result: Mapped[str | None] = mapped_column(
         String(50), nullable=True
     )  # success, failed, pending, skipped
-    result_details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    result_details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # Nudge (if applicable)
-    nudge_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    nudge_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     nudge_sent: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -201,13 +198,13 @@ class RetryLedger(Base):
     )  # email or contact
     total_retries_24h: Mapped[int] = mapped_column(Integer, default=0)
     total_nudges_24h: Mapped[int] = mapped_column(Integer, default=0)
-    last_retry_at: Mapped[Optional[datetime]] = mapped_column(
+    last_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    last_nudge_at: Mapped[Optional[datetime]] = mapped_column(
+    last_nudge_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    blocked_until: Mapped[Optional[datetime]] = mapped_column(
+    blocked_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(

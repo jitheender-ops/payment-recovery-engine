@@ -2,11 +2,11 @@
 
 Scenarios: 5000 | Seeds: 5
 
-| Policy        |   Recovery Rate (%) |   Retry Cost (avg) |   False-Retry (%) |   Time-to-Recovery (min) | ₹ per ₹1Cr Failed   | Net ₹ per ₹1Cr   |
+| Policy        |   Recovery Rate (%) |   Retry Cost (avg) |   False-Retry (%) | Time-to-Recovery (min)   | ₹ per ₹1Cr Failed   | Net ₹ per ₹1Cr   |
 |---------------|---------------------|--------------------|-------------------|--------------------------|---------------------|------------------|
-| No Retry      |                 0   |               0    |                 0 |                      inf | ₹0                  | ₹0               |
-| Fixed 3-Retry |                19.2 |               2.73 |                 8 |                       15 | ₹1,849,489          | ₹1,795,744       |
-| XGBoost/Rules |                27.4 |               2.37 |                 0 |                        0 | ₹2,699,581          | ₹2,652,874       |
+| No Retry      |                 0   |               0    |                 0 | —                        | ₹0                  | ₹0               |
+| Fixed 3-Retry |                19.2 |               2.73 |                 8 | 15                       | ₹1,849,489          | ₹1,795,744       |
+| XGBoost/Rules |                27.4 |               2.37 |                 0 | 0                        | ₹2,699,581          | ₹2,652,874       |
 
 *Variance (±σ) shown in JSON results.*
 

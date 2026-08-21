@@ -76,6 +76,24 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Aligned calibration/fixture tables: the column alignment IS the readability.
+# Wrapping them to 100 chars makes a bank's rates unscannable across rails.
+"eval/bank_profiles.py" = ["E501"]
+"scripts/simulate_webhooks.py" = ["E501"]
+# Uppercase X for a feature matrix is universal sklearn/xgboost convention.
+"scripts/train_xgboost.py" = ["N806"]
+"src/agent/xgboost_baseline.py" = ["N803"]
+# FailureClass is (str, Enum), not StrEnum, on purpose: StrEnum would change
+# str() output from "FailureClass.x" to "x" and those values are persisted.
+"src/classifier/taxonomy.py" = ["UP042"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+# No published type stubs installed for these. pandas-stubs / types-tabulate /
+# types-PyYAML would remove this block if added to the dev extra.
+[[tool.mypy.overrides]]
+module = ["pandas.*", "tabulate.*", "yaml.*", "joblib.*", "sklearn.*", "plotly.*", "razorpay.*", "streamlit.*", "xgboost.*"]
+ignore_missing_imports = true

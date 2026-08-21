@@ -8,19 +8,21 @@ paired confidence intervals silently become nonsense while still looking fine.
 
 from __future__ import annotations
 
+import pandas as pd
+
 from eval.policies.fixed_retry import FixedRetryPolicy
 from eval.runner import EvalRunner
 from eval.scenario_generator import ScenarioGenerator
 from eval.simulator import BankResponseSimulator
 
 
-def _setup(n: int = 200):
+def _setup(n: int = 200) -> tuple[EvalRunner, pd.DataFrame]:
     runner = EvalRunner(n_scenarios=n, n_seeds=1)
     scenarios = ScenarioGenerator(seed=7).generate(n)
     return runner, scenarios
 
 
-def test_rerunning_a_policy_reproduces_every_outcome():
+def test_rerunning_a_policy_reproduces_every_outcome() -> None:
     """
     The simulator is deliberately reused without being rebuilt, so its stream is
     already advanced on the second call. Per-scenario reseeding must make that
@@ -36,7 +38,7 @@ def test_rerunning_a_policy_reproduces_every_outcome():
     assert first["attempts"].tolist() == second["attempts"].tolist()
 
 
-def test_identical_policies_have_exactly_zero_paired_delta():
+def test_identical_policies_have_exactly_zero_paired_delta() -> None:
     """Two policies that decide identically must difference to exactly zero."""
     runner, scenarios = _setup()
     sim = BankResponseSimulator(seed=7)
@@ -51,7 +53,7 @@ def test_identical_policies_have_exactly_zero_paired_delta():
     assert paired["Clone"]["recovery_rate_pp"]["significant"] is False
 
 
-def test_different_seeds_produce_different_streams():
+def test_different_seeds_produce_different_streams() -> None:
     """Sanity: reseeding is per (base_seed, scenario), not a constant."""
     a, b = BankResponseSimulator(seed=1), BankResponseSimulator(seed=2)
     a.reseed_for_scenario(0)

@@ -7,7 +7,7 @@ Used when the LLM is unavailable or times out. Messages are kept under
 
 from __future__ import annotations
 
-from jinja2 import Environment, BaseLoader
+from jinja2 import BaseLoader, Environment
 
 _env = Environment(loader=BaseLoader())
 

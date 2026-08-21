@@ -6,8 +6,6 @@ Suggests alternative payment rails based on the current method and failure class
 
 from __future__ import annotations
 
-from typing import Optional
-
 ALL_RAILS = ["upi", "card", "netbanking", "wallet"]
 
 
@@ -18,9 +16,9 @@ def get_available_rails(current_method: str) -> list[str]:
 
 def select_alternative_rail(
     current_method: str,
-    bank: Optional[str] = None,
+    bank: str | None = None,
     failure_class: str = "",
-) -> Optional[str]:
+) -> str | None:
     """
     Select the best alternative payment rail based on failure context.
 

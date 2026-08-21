@@ -1,10 +1,12 @@
 """Integration tests for the orchestrator (mocked externals)."""
 
+from datetime import UTC
+
 from src.classifier.mapper import ClassifierMapper
 from src.classifier.taxonomy import FailureClass
 
 
-def test_classifier_pipeline():
+def test_classifier_pipeline() -> None:
     """Classifier correctly maps a known error code."""
     mapper = ClassifierMapper()
     fc, retryable = mapper.classify(
@@ -18,7 +20,7 @@ def test_classifier_pipeline():
     assert retryable is True
 
 
-def test_hard_decline_skips_agent():
+def test_hard_decline_skips_agent() -> None:
     """Hard declines should be classified as non-retryable."""
     mapper = ClassifierMapper()
     fc, retryable = mapper.classify(
@@ -29,9 +31,10 @@ def test_hard_decline_skips_agent():
     assert fc.is_hard_decline is True
 
 
-def test_full_classify_to_guardrail():
+def test_full_classify_to_guardrail() -> None:
     """End-to-end: classify → build action → validate guardrail."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from src.agent.actions import FailureContext, RetryAction
     from src.agent.xgboost_baseline import XGBoostBaseline
     from src.guardrail.gate import GuardrailGate
@@ -40,7 +43,7 @@ def test_full_classify_to_guardrail():
     fc, retryable = mapper.classify("GATEWAY_ERROR", error_reason="bank_technical_error")
     assert fc == FailureClass.BANK_DOWNTIME
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ctx = FailureContext(
         payment_id="pay_integ_001", failure_class=fc.value,
         error_code="GATEWAY_ERROR", amount=50000, method="netbanking",
@@ -58,12 +61,12 @@ def test_full_classify_to_guardrail():
     assert result.passed is True
 
 
-def test_eval_harness_runs():
+def test_eval_harness_runs() -> None:
     """Smoke test: eval harness can generate scenarios and run policies."""
-    from eval.scenario_generator import ScenarioGenerator
-    from eval.simulator import BankResponseSimulator
     from eval.policies.no_retry import NoRetryPolicy
     from eval.runner import EvalRunner
+    from eval.scenario_generator import ScenarioGenerator
+    from eval.simulator import BankResponseSimulator
 
     gen = ScenarioGenerator(seed=42)
     scenarios = gen.generate(100)

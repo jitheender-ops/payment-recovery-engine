@@ -9,10 +9,9 @@ No freeform output is ever accepted.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
-
 
 ActionType = Literal[
     "retry_now",
@@ -37,11 +36,11 @@ class RetryAction(BaseModel):
         ...,
         description="The recovery action to take. Must be one of the fixed set.",
     )
-    rail: Optional[PaymentRail] = Field(
+    rail: PaymentRail | None = Field(
         default=None,
         description="Target payment rail. Required for 'switch_rail', optional otherwise.",
     )
-    retry_at: Optional[datetime] = Field(
+    retry_at: datetime | None = Field(
         default=None,
         description="Scheduled retry time (UTC). Required for 'retry_at' action.",
     )
@@ -51,7 +50,7 @@ class RetryAction(BaseModel):
         max_length=500,
         description="Agent's reasoning for this action. Logged for audit, not shown to customer.",
     )
-    confidence: Optional[float] = Field(
+    confidence: float | None = Field(
         default=None,
         ge=0.0,
         le=1.0,
@@ -67,25 +66,25 @@ class FailureContext(BaseModel):
 
     # Failure details
     payment_id: str
-    order_id: Optional[str] = None
+    order_id: str | None = None
     failure_class: str  # FailureClass value
     error_code: str
-    error_description: Optional[str] = None
-    error_source: Optional[str] = None
-    error_reason: Optional[str] = None
+    error_description: str | None = None
+    error_source: str | None = None
+    error_reason: str | None = None
 
     # Payment details
     amount: int  # in paise
     currency: str = "INR"
     method: str  # card, upi, netbanking, wallet
-    bank: Optional[str] = None
-    card_network: Optional[str] = None
-    card_type: Optional[str] = None
+    bank: str | None = None
+    card_network: str | None = None
+    card_type: str | None = None
 
     # Customer context
-    customer_id: Optional[str] = None  # email or contact
-    customer_email: Optional[str] = None
-    customer_contact: Optional[str] = None
+    customer_id: str | None = None  # email or contact
+    customer_email: str | None = None
+    customer_contact: str | None = None
     retry_count_24h: int = 0
     nudge_count_24h: int = 0
     previous_retry_outcomes: list[str] = Field(default_factory=list)
@@ -98,4 +97,4 @@ class FailureContext(BaseModel):
 
     # Metadata
     is_retryable: bool = True
-    original_failure_id: Optional[str] = None
+    original_failure_id: str | None = None

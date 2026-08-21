@@ -8,7 +8,7 @@ falls back to Jinja2 templates. Never blocks the retry decision.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any
 
 from src.config import get_settings
 from src.messaging.templates import render_fallback
@@ -31,9 +31,11 @@ class NudgeGenerator:
 
     def __init__(self) -> None:
         self._settings = get_settings()
-        self._client = None
+        # Anthropic and OpenAI clients have unrelated shapes; the provider is
+        # selected by a str setting, which cannot narrow a union.
+        self._client: Any = None
 
-    def _get_client(self):
+    def _get_client(self) -> Any:
         """Lazy-initialize LLM client."""
         if self._client is not None:
             return self._client
@@ -62,7 +64,7 @@ class NudgeGenerator:
         amount: int,
         method: str,
         next_step: str,
-        customer_name: Optional[str] = None,
+        customer_name: str | None = None,
         merchant_name: str = "the merchant",
     ) -> str:
         """
@@ -104,12 +106,12 @@ class NudgeGenerator:
 
     async def _generate_llm(
         self,
-        client,
+        client: Any,
         failure_class: str,
         amount_display: str,
         method: str,
         next_step: str,
-        customer_name: Optional[str],
+        customer_name: str | None,
         merchant_name: str,
     ) -> str:
         """Call LLM to generate a personalized nudge."""
@@ -131,7 +133,7 @@ class NudgeGenerator:
                 system=_NUDGE_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
-            return response.content[0].text.strip()
+            return str(response.content[0].text).strip()
 
         elif settings.llm_provider == "openai":
             response = await client.chat.completions.create(

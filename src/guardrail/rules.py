@@ -9,8 +9,7 @@ This is the answer to "what stops it from doing something stupid with real money
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 from src.classifier.taxonomy import FailureClass
 from src.config import get_settings
@@ -26,7 +25,7 @@ class GuardrailRules:
 
     def check_hard_decline_blocklist(
         self, failure_class_str: str
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Hard declines and fraud blocks must NEVER be retried."""
         try:
             fc = FailureClass(failure_class_str)
@@ -39,7 +38,7 @@ class GuardrailRules:
 
     def check_max_retries_per_payment(
         self, payment_id: str, current_attempts: int
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """No more than N retries per payment."""
         limit = self._settings.max_retries_per_payment
         if current_attempts >= limit:
@@ -51,7 +50,7 @@ class GuardrailRules:
 
     def check_max_retries_per_customer(
         self, customer_retries_24h: int
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """No more than N retries per customer per 24h."""
         limit = self._settings.max_retries_per_customer_24h
         if customer_retries_24h >= limit:
@@ -61,7 +60,7 @@ class GuardrailRules:
             )
         return True, None
 
-    def check_amount_ceiling(self, amount_paise: int) -> tuple[bool, Optional[str]]:
+    def check_amount_ceiling(self, amount_paise: int) -> tuple[bool, str | None]:
         """No retry for amounts above the ceiling without explicit consent."""
         ceiling = self._settings.amount_ceiling_inr
         if amount_paise > ceiling:
@@ -73,16 +72,16 @@ class GuardrailRules:
 
     def check_consent_window(
         self, failed_at: datetime, current_time: datetime
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """No retry after the consent window has expired."""
         window_hours = self._settings.consent_window_hours
         deadline = failed_at + timedelta(hours=window_hours)
 
         # Ensure timezone-aware comparison
         if current_time.tzinfo is None:
-            current_time = current_time.replace(tzinfo=timezone.utc)
+            current_time = current_time.replace(tzinfo=UTC)
         if failed_at.tzinfo is None:
-            failed_at = failed_at.replace(tzinfo=timezone.utc)
+            failed_at = failed_at.replace(tzinfo=UTC)
             deadline = failed_at + timedelta(hours=window_hours)
 
         if current_time > deadline:
@@ -94,7 +93,7 @@ class GuardrailRules:
 
     def check_customer_nudge_rate_limit(
         self, nudges_24h: int
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Max nudge messages per customer per 24h."""
         limit = self._settings.max_nudges_per_customer_24h
         if nudges_24h >= limit:
@@ -105,7 +104,7 @@ class GuardrailRules:
 
     def check_time_of_day_blackout(
         self, current_hour: int
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """No retries during the blackout window (bank success rates crater)."""
         start = self._settings.retry_blackout_start_hour
         end = self._settings.retry_blackout_end_hour
@@ -124,8 +123,8 @@ class GuardrailRules:
         return True, None
 
     def check_idempotency_key(
-        self, idempotency_key: Optional[str]
-    ) -> tuple[bool, Optional[str]]:
+        self, idempotency_key: str | None
+    ) -> tuple[bool, str | None]:
         """Every retry attempt MUST have an idempotency key."""
         if not idempotency_key or not idempotency_key.strip():
             return False, "Missing idempotency key — every retry must be idempotent"

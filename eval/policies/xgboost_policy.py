@@ -1,27 +1,36 @@
 """XGBoost / rule-based policy for the eval harness."""
 
 from __future__ import annotations
-from typing import Optional
+
+from typing import Any
+
 import pandas as pd
 
-NON_RETRYABLE = {"hard_decline", "fraud_block", "customer_cancelled", "invalid_card", "expired_instrument"}
+NON_RETRYABLE = {
+    "hard_decline",
+    "fraud_block",
+    "customer_cancelled",
+    "invalid_card",
+    "expired_instrument",
+}
 
 
 class XGBoostPolicy:
     """Uses trained XGBoost model or rule-based heuristic fallback."""
 
-    def __init__(self, model_path: Optional[str] = None) -> None:
+    def __init__(self, model_path: str | None = None) -> None:
         self._model = None
         if model_path:
             try:
-                import joblib
                 from pathlib import Path
+
+                import joblib
                 if Path(model_path).exists():
                     self._model = joblib.load(model_path)
             except Exception:
                 pass
 
-    def decide(self, scenario: pd.Series, attempt: int = 0) -> dict:
+    def decide(self, scenario: pd.Series, attempt: int = 0) -> dict[str, Any]:
         if attempt >= 3:
             return {"action": "abandon", "rail": None, "delay_minutes": 0, "reason": "Max attempts"}
 

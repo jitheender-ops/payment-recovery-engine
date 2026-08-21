@@ -9,7 +9,6 @@ This is the answer to "what stops it from doing something stupid with real money
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -24,7 +23,7 @@ class GuardrailResult(BaseModel):
     """Result of guardrail validation."""
 
     passed: bool
-    action: Optional[RetryAction] = None
+    action: RetryAction | None = None
     rejection_reasons: list[str] = []
     rules_checked: int = 0
     rules_failed: int = 0
@@ -84,7 +83,7 @@ class GuardrailGate:
         rules_checked += 1
         passed, reason = self._rules.check_hard_decline_blocklist(context.failure_class)
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # 3. Max retries per payment
         rules_checked += 1
@@ -92,7 +91,7 @@ class GuardrailGate:
             context.payment_id, current_attempts
         )
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # 4. Max retries per customer (24h)
         rules_checked += 1
@@ -100,13 +99,13 @@ class GuardrailGate:
             context.retry_count_24h
         )
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # 5. Amount ceiling
         rules_checked += 1
         passed, reason = self._rules.check_amount_ceiling(context.amount)
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # 6. Consent window
         rules_checked += 1
@@ -114,7 +113,7 @@ class GuardrailGate:
             context.failed_at, context.current_time
         )
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # 7. Nudge rate limit (only for nudge actions)
         if action.action == "nudge_customer":
@@ -123,19 +122,19 @@ class GuardrailGate:
                 context.nudge_count_24h
             )
             if not passed:
-                violations.append(reason)
+                violations.append(reason or "unspecified guardrail violation")
 
         # 8. Time-of-day blackout
         rules_checked += 1
         passed, reason = self._rules.check_time_of_day_blackout(context.hour_of_day)
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # 9. Idempotency key
         rules_checked += 1
         passed, reason = self._rules.check_idempotency_key(idempotency_key)
         if not passed:
-            violations.append(reason)
+            violations.append(reason or "unspecified guardrail violation")
 
         # Final result
         all_passed = len(violations) == 0

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,15 +28,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _process_event_background(event_id: str, event_type: str, payload: dict) -> None:
+async def _process_event_background(
+    event_id: str, event_type: str, payload: dict[str, Any]
+) -> None:
     """Background task: process the webhook event through the recovery pipeline."""
     async with async_session_factory() as session:
         try:
             if event_type == "payment.failed":
-                from src.orchestrator import process_payment_failure
-
                 # Retrieve the stored event
                 from sqlalchemy import select
+
+                from src.orchestrator import process_payment_failure
                 result = await session.execute(
                     select(WebhookEvent).where(WebhookEvent.razorpay_event_id == event_id)
                 )
@@ -54,6 +57,7 @@ async def _process_event_background(event_id: str, event_type: str, payload: dic
                 payment_id = payment_entity.get("id")
                 if payment_id:
                     from sqlalchemy import update
+
                     from src.models import RetryAttempt
                     await session.execute(
                         update(RetryAttempt)
@@ -61,7 +65,7 @@ async def _process_event_background(event_id: str, event_type: str, payload: dic
                             RetryAttempt.payment_id == payment_id,
                             RetryAttempt.result == "pending",
                         )
-                        .values(result="superseded", executed_at=datetime.now(timezone.utc))
+                        .values(result="superseded", executed_at=datetime.now(UTC))
                     )
                     await session.commit()
                     logger.info(
@@ -107,7 +111,9 @@ async def receive_razorpay_webhook(
         logger.warning("Webhook received without X-Razorpay-Signature header")
         return Response(status_code=401, content="Missing signature")
 
-    if not verify_webhook_signature(raw_body, x_razorpay_signature, settings.razorpay_webhook_secret):
+    if not verify_webhook_signature(
+        raw_body, x_razorpay_signature, settings.razorpay_webhook_secret
+    ):
         logger.warning("Webhook signature verification failed")
         return Response(status_code=401, content="Invalid signature")
 
@@ -141,7 +147,7 @@ async def receive_razorpay_webhook(
         razorpay_event_id=event_id,
         event_type=event_type,
         payload=payload,
-        received_at=datetime.now(timezone.utc),
+        received_at=datetime.now(UTC),
         processed=False,
     )
     session.add(webhook_event)

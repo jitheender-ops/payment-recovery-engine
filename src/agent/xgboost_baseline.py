@@ -11,24 +11,31 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, get_args
 
 import numpy as np
+from numpy.typing import NDArray
 
-from src.agent.actions import FailureContext, RetryAction
+from src.agent.actions import ActionType, FailureContext, PaymentRail, RetryAction
 from src.classifier.taxonomy import FailureClass
 
 logger = logging.getLogger(__name__)
 
-# Action labels (must match the order used during training)
-ACTION_LABELS = ["retry_now", "retry_at", "switch_rail", "nudge_customer", "abandon"]
+# Class index → action label. The ORDER is the label encoding the model was
+# trained with; reordering it silently remaps every prediction.
+#
+# Derived from ActionType rather than restated, so the labels cannot drift from
+# the action space RetryAction accepts. A sixth action added to only one of the
+# two would otherwise reach pydantic as an invalid literal — an exception raised
+# from inside the ML path, at prediction time, in production.
+ACTION_LABELS: list[ActionType] = list(get_args(ActionType))
 
 # Feature indices for FailureClass one-hot
 FAILURE_CLASSES = [fc.value for fc in FailureClass]
 METHODS = ["upi", "card", "netbanking", "wallet"]
 
 
-def extract_features(context: FailureContext) -> np.ndarray:
+def extract_features(context: FailureContext) -> NDArray[np.float32]:
     """
     Convert a FailureContext into a feature vector for XGBoost.
 
@@ -82,7 +89,7 @@ class XGBoostBaseline:
     Falls back to rule-based heuristics if no trained model is available.
     """
 
-    def __init__(self, model_path: Optional[str] = None) -> None:
+    def __init__(self, model_path: str | None = None) -> None:
         self._model = None
         if model_path and Path(model_path).exists():
             try:
@@ -106,21 +113,22 @@ class XGBoostBaseline:
             RetryAction from the fixed action space.
         """
         if self._model is not None:
-            return self._predict_ml(context)
+            return self._predict_ml(context, self._model)
         return self._predict_heuristic(context)
 
-    def _predict_ml(self, context: FailureContext) -> RetryAction:
-        """Use the trained XGBoost model."""
+    def _predict_ml(self, context: FailureContext, model: Any) -> RetryAction:
+        """Use the trained XGBoost model. Model is passed in, never re-read from
+        self, so this cannot be reached without one."""
         features = extract_features(context).reshape(1, -1)
-        pred_idx = int(self._model.predict(features)[0])
+        pred_idx = int(model.predict(features)[0])
         action_label = ACTION_LABELS[pred_idx]
 
         # Confidence from probability
-        proba = self._model.predict_proba(features)[0]
+        proba = model.predict_proba(features)[0]
         confidence = float(proba[pred_idx])
 
         # Determine rail for switch_rail
-        rail = None
+        rail: PaymentRail | None = None
         if action_label == "switch_rail":
             rail = "upi" if context.method != "upi" else "card"
 
@@ -238,10 +246,10 @@ class XGBoostBaseline:
             confidence=0.5,
         )
 
-    def train(self, X: np.ndarray, y: np.ndarray, save_path: str) -> None:
-        """Train the XGBoost model and save to disk."""
-        import xgboost as xgb
+    def train(self, X: NDArray[np.float32], y: NDArray[np.int_], save_path: str) -> Any:
+        """Train the XGBoost model, save to disk, and return the fitted model."""
         import joblib
+        import xgboost as xgb
 
         model = xgb.XGBClassifier(
             n_estimators=200,
@@ -259,3 +267,6 @@ class XGBoostBaseline:
         joblib.dump(model, save_path)
         self._model = model
         logger.info("XGBoost model trained and saved to %s", save_path)
+        # Returned so callers can score without reaching into self._model, which
+        # is Optional and would need a None-check they have no way to satisfy.
+        return model

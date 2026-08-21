@@ -8,9 +8,7 @@ guardrail validation → execute/nudge → log everything.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from functools import lru_cache
-from typing import Optional
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,11 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
 from src.classifier.mapper import ClassifierMapper
-from src.classifier.taxonomy import FailureClass
-from src.config import get_settings
+from src.executor.retry_executor import RetryExecutor
 from src.guardrail.gate import GuardrailGate
 from src.messaging.nudge_generator import NudgeGenerator
-from src.executor.retry_executor import RetryExecutor
 from src.models import PaymentFailure, RetryAttempt, RetryLedger, WebhookEvent
 
 logger = logging.getLogger(__name__)
@@ -39,10 +35,10 @@ class PaymentRecoveryOrchestrator:
         self._guardrail = GuardrailGate()
         self._nudge_gen = NudgeGenerator()
         self._executor = RetryExecutor()
-        self._agent: Optional[PolicyAgent] = None
+        self._agent: PolicyAgent | None = None
 
-    def _get_agent(self) -> PolicyAgent:
-        """Lazy-init agent (needs API keys at runtime)."""
+    def _get_agent(self) -> PolicyAgent | None:
+        """Lazy-init agent (needs API keys at runtime). None if init failed."""
         if self._agent is None:
             try:
                 self._agent = PolicyAgent()
@@ -112,7 +108,7 @@ class PaymentRecoveryOrchestrator:
             customer_contact=payment_entity.get("contact"),
             webhook_event_id=event.id,
             failed_at=datetime.fromtimestamp(
-                payment_entity.get("created_at", 0), tz=timezone.utc
+                payment_entity.get("created_at", 0), tz=UTC
             ),
         )
         session.add(failure_record)
@@ -213,7 +209,7 @@ class PaymentRecoveryOrchestrator:
             ),
         )
 
-        nudge_message: Optional[str] = None
+        nudge_message: str | None = None
 
         if guardrail_result.passed:
             # ── Step 10: Generate nudge if needed ─────────────────────────
@@ -240,7 +236,7 @@ class PaymentRecoveryOrchestrator:
                         idempotency_key=idem_key,
                         nudge_message=nudge_message,
                     )
-                    attempt.executed_at = datetime.now(timezone.utc)
+                    attempt.executed_at = datetime.now(UTC)
                     attempt.result = "success" if exec_result.get("success") else "failed"
                     attempt.result_details = exec_result
                     if nudge_message:
@@ -275,7 +271,7 @@ class PaymentRecoveryOrchestrator:
         self, failure: PaymentFailure, session: AsyncSession
     ) -> FailureContext:
         """Assemble FailureContext from payment record + DB lookups."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         customer_id = failure.customer_email or failure.customer_contact
 
         # Query customer retry history
@@ -354,7 +350,7 @@ class PaymentRecoveryOrchestrator:
         )
         ledger = result.scalar_one_or_none()
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         if ledger is None:
             ledger = RetryLedger(customer_id=customer_id)

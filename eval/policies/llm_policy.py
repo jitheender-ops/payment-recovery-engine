@@ -1,13 +1,25 @@
 """LLM policy wrapper for eval harness. Optional — requires API keys."""
 
 from __future__ import annotations
+
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
 import pandas as pd
 
 from eval.policies.xgboost_policy import XGBoostPolicy
+
+if TYPE_CHECKING:
+    # Type-only: the runtime import stays inside __init__ so that a missing
+    # anthropic/openai package degrades to the fallback instead of making this
+    # module unimportable.
+    from src.agent.policy_agent import PolicyAgent
+
+# What every policy's decide() returns: action / rail / delay_minutes / reason.
+# Named because it appears in five signatures in this file.
+Decision = dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +28,7 @@ class LLMPolicy:
     """Wraps the PolicyAgent for eval. Falls back to XGBoost on failure."""
 
     def __init__(self) -> None:
-        self._agent = None
+        self._agent: PolicyAgent | None = None
         self._fallback = XGBoostPolicy()
         # Counted so a silently-degraded run cannot be reported as an LLM result.
         # A row labelled "LLM Agent" that was actually served by the fallback is
@@ -24,7 +36,7 @@ class LLMPolicy:
         self.call_count = 0
         self.fallback_count = 0
         # (scenario_id, attempt) -> decision, filled by prefetch().
-        self._cache: dict[tuple[int, int], dict] = {}
+        self._cache: dict[tuple[int, int], Decision] = {}
         # Tripped by an unrecoverable provider error (bad key, no credits,
         # model not found). Without it a dead provider still gets one doomed
         # request per scenario — a real run burned 7,856 calls against an
@@ -59,7 +71,9 @@ class LLMPolicy:
         """
         return self.fallback_count + getattr(self._agent, "fallback_count", 0)
 
-    def prefetch(self, scenarios: pd.DataFrame, max_attempt: int = 3, concurrency: int = 10) -> None:
+    def prefetch(
+        self, scenarios: pd.DataFrame, max_attempt: int = 3, concurrency: int = 10
+    ) -> None:
         """
         Precompute every (scenario, attempt) decision concurrently.
 
@@ -75,22 +89,30 @@ class LLMPolicy:
         if self._agent is None:
             return
 
-        async def run():
+        # Bound once here rather than read off self inside the closure: the
+        # None-check above is what makes the attribute accesses below safe, and
+        # a local keeps that guarantee visible to the reader and the type
+        # checker instead of relying on self._agent never being reassigned.
+        agent = self._agent
+
+        async def run() -> list[tuple[tuple[int, int], Decision]]:
             sem = asyncio.Semaphore(concurrency)
 
-            async def one(sid: int, row: pd.Series, attempt: int):
+            async def one(
+                sid: int, row: pd.Series, attempt: int
+            ) -> tuple[tuple[int, int], Decision]:
                 async with sem:
                     if self._abort_reason is not None:
                         self.fallback_count += 1
                         return (sid, attempt), self._fallback.decide(row, attempt)
                     try:
-                        result = (sid, attempt), await self._decide_async(row, attempt)
+                        result = (sid, attempt), await self._decide_async(agent, row, attempt)
                         # decide() catches its own errors, so a fatal provider
                         # failure arrives as a flag rather than an exception.
-                        if self._agent.last_error_status is not None:
+                        if agent.last_error_status is not None:
                             self._abort_reason = getattr(
-                                self._agent, "last_error_detail",
-                                f"HTTP {self._agent.last_error_status}",
+                                agent, "last_error_detail",
+                                f"HTTP {agent.last_error_status}",
                             )
                             logger.error("Aborting LLM prefetch — %s", self._abort_reason)
                         return result
@@ -114,7 +136,7 @@ class LLMPolicy:
         for key, decision in asyncio.run(run()):
             self._cache[key] = decision
 
-    def decide(self, scenario: pd.Series, attempt: int = 0) -> dict:
+    def decide(self, scenario: pd.Series, attempt: int = 0) -> Decision:
         """Synchronous wrapper around async agent."""
         if attempt >= 3:
             return {"action": "abandon", "rail": None, "delay_minutes": 0, "reason": "Max attempts"}
@@ -136,16 +158,19 @@ class LLMPolicy:
             # blanket `except Exception` below and silently returned the XGBoost
             # fallback for every single scenario. The eval would have completed,
             # reported an "LLM Agent" row, and never called the LLM once.
-            return asyncio.run(self._decide_async(scenario, attempt))
+            return asyncio.run(self._decide_async(self._agent, scenario, attempt))
         except Exception:
             logger.exception("LLM policy call failed — using XGBoost fallback")
             self.fallback_count += 1
             return self._fallback.decide(scenario, attempt)
 
-    async def _decide_async(self, scenario: pd.Series, attempt: int) -> dict:
+    async def _decide_async(
+        self, agent: PolicyAgent, scenario: pd.Series, attempt: int
+    ) -> Decision:
+        """Agent is passed in, not read from self, so this cannot run without one."""
         from src.agent.actions import FailureContext
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         context = FailureContext(
             payment_id=scenario.get("payment_id", "unknown"),
             order_id=scenario.get("order_id"),
@@ -165,7 +190,7 @@ class LLMPolicy:
             is_retryable=bool(scenario.get("is_retryable", True)),
         )
 
-        action = await self._agent.decide(context)
+        action = await agent.decide(context)
         delay = 0
         if action.action == "retry_at" and action.retry_at:
             delay = max(0, int((action.retry_at - now).total_seconds() / 60))

@@ -5,21 +5,26 @@ Run with: streamlit run dashboard/app.py
 
 from __future__ import annotations
 
-import streamlit as st
+from typing import TYPE_CHECKING, Any
+
 import pandas as pd
-import plotly.express as px
-from datetime import datetime, timedelta
-import json
-from pathlib import Path
+import streamlit as st
+
+if TYPE_CHECKING:
+    # Type-only: create_engine is imported inside get_db_engine so the dashboard
+    # still loads (degraded to mock metrics) when sqlalchemy or the DB is absent.
+    # A module-level runtime import here would defeat that.
+    from sqlalchemy.engine import Engine
 
 st.set_page_config(page_title="Payment Recovery Engine", page_icon="🔄", layout="wide")
 
 # ── DB Connection ────────────────────────────────────────────────────────
 @st.cache_resource
-def get_db_engine():
+def get_db_engine() -> Engine | None:
     """Try to connect to Postgres. Returns None if unavailable."""
     try:
         import os
+
         from sqlalchemy import create_engine
         url = os.getenv("DATABASE_URL_SYNC", "postgresql://recovery:recovery@localhost:5432/payment_recovery")
         engine = create_engine(url)
@@ -30,7 +35,7 @@ def get_db_engine():
 
 
 @st.cache_data(ttl=30)
-def query_db(query: str):
+def query_db(query: str) -> pd.DataFrame | None:
     engine = get_db_engine()
     if engine is None:
         return None
@@ -40,14 +45,21 @@ def query_db(query: str):
         return None
 
 
-def get_mock_metrics():
+def get_mock_metrics() -> dict[str, Any]:
     """Demo metrics when DB is unavailable."""
-    return {"total_failures": 1247, "recovery_rate": 34.2, "active_retries": 18, "recovered_amount": 425680}
+    return {
+        "total_failures": 1247,
+        "recovery_rate": 34.2,
+        "active_retries": 18,
+        "recovered_amount": 425680,
+    }
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────
 st.sidebar.title("🔄 Recovery Engine")
-page = st.sidebar.radio("Navigate", ["Overview", "Recovery Funnel", "Bank Breakdown", "Eval Results"])
+page = st.sidebar.radio(
+    "Navigate", ["Overview", "Recovery Funnel", "Bank Breakdown", "Eval Results"]
+)
 
 # ── Overview Page ────────────────────────────────────────────────────────
 if page == "Overview":
@@ -62,7 +74,11 @@ if page == "Overview":
         failures_df = query_db("SELECT COUNT(*) as cnt FROM payment_failures")
         retries_df = query_db("SELECT COUNT(*) as cnt FROM retry_attempts WHERE result='success'")
         active_df = query_db("SELECT COUNT(*) as cnt FROM retry_attempts WHERE result='pending'")
-        amount_df = query_db("SELECT COALESCE(SUM(pf.amount),0) as total FROM retry_attempts ra JOIN payment_failures pf ON ra.payment_failure_id=pf.id WHERE ra.result='success'")
+        amount_df = query_db(
+            "SELECT COALESCE(SUM(pf.amount),0) as total FROM retry_attempts ra "
+            "JOIN payment_failures pf ON ra.payment_failure_id=pf.id "
+            "WHERE ra.result='success'"
+        )
 
         total = int(failures_df["cnt"].iloc[0]) if failures_df is not None else 0
         recovered = int(retries_df["cnt"].iloc[0]) if retries_df is not None else 0
@@ -70,7 +86,9 @@ if page == "Overview":
             "total_failures": total,
             "recovery_rate": (recovered / total * 100) if total > 0 else 0,
             "active_retries": int(active_df["cnt"].iloc[0]) if active_df is not None else 0,
-            "recovered_amount": int(amount_df["total"].iloc[0]) / 100 if amount_df is not None else 0,
+            "recovered_amount": (
+                int(amount_df["total"].iloc[0]) / 100 if amount_df is not None else 0
+            ),
         }
 
     c1, c2, c3, c4 = st.columns(4)

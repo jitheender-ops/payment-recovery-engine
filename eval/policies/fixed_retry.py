@@ -1,6 +1,9 @@
 """Fixed 3-retry baseline policy — dumb fixed schedule."""
 
 from __future__ import annotations
+
+from typing import Any
+
 import pandas as pd
 
 
@@ -12,7 +15,7 @@ class FixedRetryPolicy:
         self.max_retries = max_retries
         self.delay_minutes = delay_minutes
 
-    def decide(self, scenario: pd.Series, attempt: int = 0) -> dict:
+    def decide(self, scenario: pd.Series, attempt: int = 0) -> dict[str, Any]:
         if attempt >= self.max_retries:
             return {
                 "action": "abandon",

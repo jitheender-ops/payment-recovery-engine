@@ -6,7 +6,8 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ def webhook_secret() -> str:
 
 
 @pytest.fixture
-def sample_webhook_payload() -> dict:
+def sample_webhook_payload() -> dict[str, Any]:
     """Realistic payment.failed webhook payload."""
     return {
         "entity": "event",
@@ -58,7 +59,7 @@ def sample_webhook_payload() -> dict:
 
 
 @pytest.fixture
-def sample_captured_payload() -> dict:
+def sample_captured_payload() -> dict[str, Any]:
     return {
         "entity": "event",
         "event": "payment.captured",
@@ -80,7 +81,9 @@ def sample_captured_payload() -> dict:
 
 
 @pytest.fixture
-def signed_payload(webhook_secret: str, sample_webhook_payload: dict) -> tuple[bytes, str]:
+def signed_payload(
+    webhook_secret: str, sample_webhook_payload: dict[str, Any]
+) -> tuple[bytes, str]:
     """Returns (raw_body_bytes, valid_signature)."""
     raw = json.dumps(sample_webhook_payload).encode("utf-8")
     sig = hmac.new(webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
@@ -89,7 +92,7 @@ def signed_payload(webhook_secret: str, sample_webhook_payload: dict) -> tuple[b
 
 @pytest.fixture
 def sample_failure_context() -> FailureContext:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return FailureContext(
         payment_id="pay_test_ctx_001",
         order_id="order_test_001",

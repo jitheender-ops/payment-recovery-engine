@@ -8,6 +8,14 @@ structured input the model can reason over.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Type-only: prompts.py is imported by policy_agent.py, which also imports
+    # actions.py. Keeping this out of runtime avoids adding a second import path
+    # into the same module for the sake of one annotation.
+    from src.agent.actions import FailureContext
+
 SYSTEM_PROMPT = """\
 You are a payment retry policy agent for an Indian payment gateway. Your job is to decide
 the optimal recovery action for a failed payment.
@@ -109,7 +117,7 @@ Respond with ONLY a JSON object matching the RetryAction schema. No other text.
 """
 
 
-def format_user_prompt(context) -> str:
+def format_user_prompt(context: FailureContext) -> str:
     """Format a FailureContext into the user prompt string."""
     day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     amount_display = f"{context.amount / 100:,.2f}"

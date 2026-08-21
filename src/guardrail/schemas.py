@@ -8,7 +8,8 @@ additional semantic checks (e.g., rail required for switch_rail).
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from datetime import UTC
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -18,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 def validate_action_schema(
-    action_dict: dict,
-) -> tuple[bool, Optional[RetryAction], Optional[str]]:
+    action_dict: dict[str, Any],
+) -> tuple[bool, RetryAction | None, str | None]:
     """
     Validate an action dictionary against the RetryAction schema.
 
@@ -41,8 +42,8 @@ def validate_action_schema(
         return False, None, "retry_at action requires a retry_at timestamp"
 
     if action.action == "retry_at" and action.retry_at is not None:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        from datetime import datetime
+        now = datetime.now(UTC)
         if action.retry_at < now:
             return False, None, f"retry_at timestamp is in the past: {action.retry_at}"
 

@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -24,7 +26,7 @@ from rich.table import Table
 from eval.metrics import (
     COST_PER_RETRY_INR,
     compute_all_metrics,
-    format_results_table,
+    fmt_minutes,
     format_results_table_markdown,
 )
 from eval.policies.fixed_retry import FixedRetryPolicy
@@ -35,10 +37,8 @@ from eval.simulator import BankResponseSimulator
 
 console = Console()
 
-NON_RETRYABLE = {"hard_decline", "fraud_block", "customer_cancelled", "invalid_card", "expired_instrument"}
 
-
-def _json_safe(obj):
+def _json_safe(obj: Any) -> Any:
     """Replace Infinity/NaN with null so the output is valid JSON for any parser."""
     if isinstance(obj, dict):
         return {k: _json_safe(v) for k, v in obj.items()}
@@ -65,15 +65,15 @@ class EvalRunner:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.skip_llm = skip_llm
-        self.paired: dict = {}
-        self.economics: dict = {}
+        self.paired: dict[str, Any] = {}
+        self.economics: dict[str, Any] = {}
         self.retry_cost_inr = retry_cost_inr
         self.llm_fallback_rate: float | None = None
 
     def run_policy(
         self,
         policy_name: str,
-        policy,
+        policy: Any,
         scenarios: pd.DataFrame,
         simulator: BankResponseSimulator,
     ) -> pd.DataFrame:
@@ -142,9 +142,9 @@ class EvalRunner:
 
         return pd.DataFrame(results)
 
-    def run_with_variance(self) -> dict[str, dict]:
+    def run_with_variance(self) -> dict[str, dict[str, Any]]:
         """Run all policies across multiple seeds and compute mean ± std."""
-        policies_factory = {
+        policies_factory: dict[str, Callable[[], Any]] = {
             "No Retry": lambda: NoRetryPolicy(),
             "Fixed 3-Retry": lambda: FixedRetryPolicy(max_retries=3, delay_minutes=15),
             "XGBoost/Rules": lambda: XGBoostPolicy(),
@@ -157,13 +157,15 @@ class EvalRunner:
             except Exception:
                 console.print("[yellow]Skipping LLM policy (import failed)[/yellow]")
 
-        all_seed_metrics: dict[str, list[dict]] = {name: [] for name in policies_factory}
+        all_seed_metrics: dict[str, list[dict[str, Any]]] = {name: [] for name in policies_factory}
         # Per-scenario outcomes, kept for the paired comparison below.
         per_scenario: dict[str, list[pd.DataFrame]] = {name: [] for name in policies_factory}
 
         for seed_idx in range(self.n_seeds):
             seed = 42 + seed_idx
-            console.print(f"\n[bold blue]═══ Seed {seed} ({seed_idx + 1}/{self.n_seeds}) ═══[/bold blue]")
+            console.print(
+                f"\n[bold blue]═══ Seed {seed} ({seed_idx + 1}/{self.n_seeds}) ═══[/bold blue]"
+            )
 
             gen = ScenarioGenerator(seed=seed)
             scenarios = gen.generate(self.n_scenarios)
@@ -187,9 +189,11 @@ class EvalRunner:
                 calls = getattr(policy, "total_calls", getattr(policy, "call_count", 0))
                 if calls:
                     self.llm_fallback_rate = min(fallbacks / calls, 1.0)
-                    if getattr(policy, "_abort_reason", None):
+                    abort_reason = getattr(policy, "_abort_reason", None)
+                    if abort_reason:
                         console.print(
-                            f"    [bold red]LLM provider unusable — {policy._abort_reason}[/bold red]"
+                            f"    [bold red]LLM provider unusable — "
+                            f"{abort_reason}[/bold red]"
                         )
                     if fallbacks:
                         console.print(
@@ -207,7 +211,7 @@ class EvalRunner:
                 )
 
         # Aggregate: mean ± std
-        aggregated: dict[str, dict] = {}
+        aggregated: dict[str, dict[str, Any]] = {}
         for policy_name, seed_metrics_list in all_seed_metrics.items():
             agg = {}
             for key in seed_metrics_list[0]:
@@ -233,7 +237,7 @@ class EvalRunner:
         self.economics = self._break_even(aggregated)
         return aggregated
 
-    def _break_even(self, aggregated: dict[str, dict]) -> dict:
+    def _break_even(self, aggregated: dict[str, dict[str, Any]]) -> dict[str, Any]:
         """
         At what cost per retry attempt does each policy overtake the baseline?
 
@@ -252,7 +256,7 @@ class EvalRunner:
         if not base:
             return {}
 
-        out: dict[str, dict] = {}
+        out: dict[str, dict[str, Any]] = {}
         for policy, m in aggregated.items():
             if policy == self.BASELINE or policy == "No Retry":
                 continue
@@ -286,7 +290,7 @@ class EvalRunner:
     # ── Paired comparison ────────────────────────────────────────────────
     BASELINE = "Fixed 3-Retry"
 
-    def _paired_comparison(self, per_scenario: dict[str, list[pd.DataFrame]]) -> dict:
+    def _paired_comparison(self, per_scenario: dict[str, list[pd.DataFrame]]) -> dict[str, Any]:
         """
         Compare each policy against the baseline scenario-by-scenario.
 
@@ -304,7 +308,7 @@ class EvalRunner:
             return {}
 
         base = pd.concat(per_scenario[self.BASELINE], ignore_index=True)
-        out: dict[str, dict] = {}
+        out: dict[str, dict[str, Any]] = {}
 
         for policy_name, frames in per_scenario.items():
             if policy_name == self.BASELINE or not frames:
@@ -333,7 +337,7 @@ class EvalRunner:
 
         return out
 
-    def save_results(self, results: dict, output_dir: Path | None = None) -> None:
+    def save_results(self, results: dict[str, Any], output_dir: Path | None = None) -> None:
         """Save results to JSON and generate markdown table."""
         out = output_dir or self.output_dir
 
@@ -457,7 +461,7 @@ class EvalRunner:
                 )
         console.print(table)
 
-    def print_results(self, results: dict) -> None:
+    def print_results(self, results: dict[str, Any]) -> None:
         """Print a professional results table using rich."""
         table = Table(
             title="🔄 Payment Recovery Eval Results",
@@ -475,7 +479,9 @@ class EvalRunner:
             recovery = f"{m['recovery_rate_%']:.1f} ± {m.get('recovery_rate_%_std', 0):.1f}"
             cost = f"{m['retry_cost_avg']:.2f} ± {m.get('retry_cost_avg_std', 0):.2f}"
             false_r = f"{m['false_retry_rate_%']:.1f} ± {m.get('false_retry_rate_%_std', 0):.1f}"
-            ttr = f"{m['time_to_recovery_min']:.0f} ± {m.get('time_to_recovery_min_std', 0):.0f}"
+            ttr = fmt_minutes(
+                m["time_to_recovery_min"], m.get("time_to_recovery_min_std")
+            )
             rev = f"₹{m['₹_per_₹1Cr_failed']:,.0f} ± {m.get('₹_per_₹1Cr_failed_std', 0):,.0f}"
             table.add_row(policy, recovery, cost, false_r, ttr, rev)
 
@@ -501,13 +507,17 @@ def main() -> None:
     parser.add_argument("--scenarios", type=int, default=5000, help="Number of scenarios")
     parser.add_argument("--seeds", type=int, default=5, help="Number of random seeds")
     parser.add_argument("--output", type=str, default="eval/results", help="Output directory")
-    parser.add_argument("--skip-llm", action="store_true", help="Skip LLM policy (no API keys needed)")
+    parser.add_argument(
+        "--skip-llm", action="store_true", help="Skip LLM policy (no API keys needed)"
+    )
     parser.add_argument("--retry-cost-inr", type=float, default=COST_PER_RETRY_INR,
                         help="Cost charged per retry attempt, in rupees")
     args = parser.parse_args()
 
     console.print("[bold cyan]🔄 Payment Failure Recovery — Eval Harness[/bold cyan]")
-    console.print(f"Scenarios: {args.scenarios} | Seeds: {args.seeds} | Skip LLM: {args.skip_llm}\n")
+    console.print(
+        f"Scenarios: {args.scenarios} | Seeds: {args.seeds} | Skip LLM: {args.skip_llm}\n"
+    )
 
     runner = EvalRunner(
         n_scenarios=args.scenarios,

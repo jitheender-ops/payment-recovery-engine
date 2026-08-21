@@ -11,9 +11,9 @@ import hmac
 import json
 import time
 import uuid
+from typing import Any
 
 import httpx
-
 
 SAMPLE_FAILURES = [
     {"error_code": "BAD_REQUEST_ERROR", "error_reason": "insufficient_funds", "error_source": "customer", "error_step": "payment_authorization", "method": "card", "bank": "HDFC"},
@@ -29,7 +29,7 @@ SAMPLE_FAILURES = [
 ]
 
 
-def make_payload(failure: dict, idx: int) -> dict:
+def make_payload(failure: dict[str, Any], idx: int) -> dict[str, Any]:
     payment_id = f"pay_test_{uuid.uuid4().hex[:12]}"
     return {
         "entity": "event",
@@ -66,7 +66,7 @@ def sign_payload(payload_bytes: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Simulate Razorpay webhooks")
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--host", type=str, default="http://localhost:8000")

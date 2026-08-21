@@ -8,7 +8,6 @@ NOTE: These are synthetic estimates, NOT derived from real bank data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 # ── Bank market share weights ────────────────────────────────────────────
 BANK_WEIGHTS: dict[str, float] = {

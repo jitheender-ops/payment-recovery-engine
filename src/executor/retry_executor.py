@@ -9,7 +9,7 @@ In test mode, no real money moves.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any
 
 import razorpay
 
@@ -33,10 +33,10 @@ class RetryExecutor:
         self,
         payment_failure: PaymentFailure,
         action_type: str,
-        target_rail: Optional[str],
+        target_rail: str | None,
         idempotency_key: str,
-        nudge_message: Optional[str] = None,
-    ) -> dict:
+        nudge_message: str | None = None,
+    ) -> dict[str, Any]:
         """
         Execute a recovery action via Razorpay API.
 
@@ -80,35 +80,35 @@ class RetryExecutor:
     async def _create_payment_link(
         self,
         failure: PaymentFailure,
-        target_rail: Optional[str],
+        target_rail: str | None,
         idempotency_key: str,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Create a Razorpay Payment Link for retry."""
-        link_data = {
+        customer: dict[str, str] = {}
+        if failure.customer_email:
+            customer["email"] = failure.customer_email
+        if failure.customer_contact:
+            customer["contact"] = failure.customer_contact
+
+        link_data: dict[str, Any] = {
             "amount": failure.amount,
             "currency": failure.currency,
             "description": f"Retry payment for order {failure.order_id or failure.payment_id}",
-            "customer": {},
+            "customer": customer,
             "notify": {"sms": False, "email": False},  # We handle notifications ourselves
             "notes": {
                 "original_payment_id": failure.payment_id,
                 "retry_idempotency_key": idempotency_key,
                 "failure_class": failure.failure_class,
+                # razorpay-python exposes no idempotency header, so this note is
+                # an audit breadcrumb only — it does NOT stop Razorpay creating a
+                # second link. The actual double-charge guarantee is enforced
+                # upstream: the key is deterministic and the orchestrator checks
+                # retry_attempts (UNIQUE on idempotency_key) before calling this
+                # method. See PaymentRecoveryOrchestrator._attempt_exists.
+                "idempotency_key": idempotency_key,
             },
         }
-
-        if failure.customer_email:
-            link_data["customer"]["email"] = failure.customer_email
-        if failure.customer_contact:
-            link_data["customer"]["contact"] = failure.customer_contact
-
-        # razorpay-python exposes no idempotency header, so this note is an audit
-        # breadcrumb only — it does NOT stop Razorpay creating a second link.
-        # The actual double-charge guarantee is enforced upstream: the key is
-        # deterministic and the orchestrator checks retry_attempts (UNIQUE on
-        # idempotency_key) before calling this method. See
-        # PaymentRecoveryOrchestrator._attempt_exists.
-        link_data["notes"]["idempotency_key"] = idempotency_key
 
         result = self._client.payment_link.create(link_data)
 
@@ -130,8 +130,8 @@ class RetryExecutor:
         self,
         failure: PaymentFailure,
         idempotency_key: str,
-        message: Optional[str],
-    ) -> dict:
+        message: str | None,
+    ) -> dict[str, Any]:
         """Create a Payment Link and notify the customer."""
         # First create the payment link
         link_result = await self._create_payment_link(failure, None, idempotency_key)

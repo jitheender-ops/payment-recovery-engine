@@ -4,6 +4,8 @@ Eval harness metrics — the numbers that matter.
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 from tabulate import tabulate
 
@@ -27,14 +29,14 @@ def recovery_rate(results: pd.DataFrame) -> float:
     """% of scenarios where payment was eventually recovered."""
     if len(results) == 0:
         return 0.0
-    return results["recovered"].mean() * 100
+    return float(results["recovered"].mean()) * 100
 
 
 def retry_cost(results: pd.DataFrame) -> float:
     """Average retry attempts per scenario (including failures)."""
     if len(results) == 0:
         return 0.0
-    return results["attempts"].mean()
+    return float(results["attempts"].mean())
 
 
 def false_retry_rate(results: pd.DataFrame) -> float:
@@ -50,8 +52,13 @@ def time_to_recovery(results: pd.DataFrame) -> float:
     """Median minutes from first failure to recovery (recovered payments only)."""
     recovered = results[results["recovered"]]
     if len(recovered) == 0:
-        return float("inf")
-    return recovered["time_to_recovery_minutes"].median()
+        # Undefined, not infinite: a policy that recovers nothing has no
+        # time-to-recovery to report. inf would survive aggregation as
+        # inf - inf = nan and print "inf ± nan"; nan is the float that means
+        # "no data", passes through mean/std silently, and serialises to
+        # null/empty rather than a number no reader can act on.
+        return float("nan")
+    return float(recovered["time_to_recovery_minutes"].median())
 
 
 def revenue_recovered_per_crore(results: pd.DataFrame) -> float:
@@ -65,7 +72,7 @@ def revenue_recovered_per_crore(results: pd.DataFrame) -> float:
     recovered_inr = total_recovered / 100  # paise to INR
     if crores_failed == 0:
         return 0.0
-    return recovered_inr / crores_failed
+    return float(recovered_inr / crores_failed)
 
 
 def attempts_per_crore(results: pd.DataFrame) -> float:
@@ -76,7 +83,7 @@ def attempts_per_crore(results: pd.DataFrame) -> float:
     crores_failed = total_failed / 1_000_000_000
     if crores_failed == 0:
         return 0.0
-    return float(results["attempts"].sum()) / crores_failed
+    return float(results["attempts"].sum()) / float(crores_failed)
 
 
 def net_revenue_per_crore(
@@ -109,34 +116,21 @@ def compute_all_metrics(
     }
 
 
-def format_results_table(all_policy_results: dict[str, dict]) -> str:
-    """Format results as a professional ASCII table."""
-    headers = [
-        "Policy",
-        "Recovery Rate (%)",
-        "Retry Cost (avg)",
-        "False-Retry (%)",
-        "Time-to-Recovery (min)",
-        "₹ per ₹1Cr Failed",
-        "Net ₹ per ₹1Cr",
-    ]
-    rows = []
-    for policy, metrics in all_policy_results.items():
-        row = [
-            policy,
-            f"{metrics.get('recovery_rate_%', 0):.1f}",
-            f"{metrics.get('retry_cost_avg', 0):.2f}",
-            f"{metrics.get('false_retry_rate_%', 0):.1f}",
-            f"{metrics.get('time_to_recovery_min', 0):.0f}",
-            f"₹{metrics.get('₹_per_₹1Cr_failed', 0):,.0f}",
-            f"₹{metrics.get('net_₹_per_₹1Cr_failed', 0):,.0f}",
-        ]
-        rows.append(row)
+def fmt_minutes(value: float, std: float | None = None) -> str:
+    """
+    Render a time-to-recovery figure, or an em dash when it is undefined.
 
-    return tabulate(rows, headers=headers, tablefmt="grid")
+    Printing "nan" invites the reader to treat a missing measurement as a
+    broken one. A policy that recovered nothing genuinely has no median.
+    """
+    if not math.isfinite(value):
+        return "—"
+    if std is None or not math.isfinite(std):
+        return f"{value:.0f}"
+    return f"{value:.0f} ± {std:.0f}"
 
 
-def format_results_table_markdown(all_policy_results: dict[str, dict]) -> str:
+def format_results_table_markdown(all_policy_results: dict[str, dict[str, float]]) -> str:
     """Format results as a markdown table."""
     headers = [
         "Policy",
@@ -154,10 +148,10 @@ def format_results_table_markdown(all_policy_results: dict[str, dict]) -> str:
             f"{metrics.get('recovery_rate_%', 0):.1f}",
             f"{metrics.get('retry_cost_avg', 0):.2f}",
             f"{metrics.get('false_retry_rate_%', 0):.1f}",
-            f"{metrics.get('time_to_recovery_min', 0):.0f}",
+            fmt_minutes(metrics.get("time_to_recovery_min", float("nan"))),
             f"₹{metrics.get('₹_per_₹1Cr_failed', 0):,.0f}",
             f"₹{metrics.get('net_₹_per_₹1Cr_failed', 0):,.0f}",
         ]
         rows.append(row)
 
-    return tabulate(rows, headers=headers, tablefmt="github")
+    return str(tabulate(rows, headers=headers, tablefmt="github"))

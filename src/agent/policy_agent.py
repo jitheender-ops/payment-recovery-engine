@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Any
 
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.prompts import SYSTEM_PROMPT, format_user_prompt
@@ -26,7 +26,7 @@ class PolicyAgent:
     Constrained to the fixed RetryAction action space — never freeform.
     """
 
-    def __init__(self, provider: Optional[str] = None) -> None:
+    def __init__(self, provider: str | None = None) -> None:
         settings = get_settings()
         self._provider = provider or settings.llm_provider
         self._model = settings.llm_model
@@ -35,6 +35,10 @@ class PolicyAgent:
         self._max_tokens = settings.llm_max_tokens
         self._timeout = settings.llm_timeout_seconds
 
+        # Two SDK clients with entirely different shapes. The branch below keys
+        # off self._provider (a str), which mypy cannot use to narrow a union,
+        # so a union type here would need a cast at every call site.
+        self._client: Any
         if self._provider == "anthropic":
             import anthropic
             self._client = anthropic.AsyncAnthropic(
@@ -160,14 +164,14 @@ class PolicyAgent:
         raise ValueError(f"Unsupported provider: {self._provider}")
 
     @staticmethod
-    def _parse_response(raw: str) -> Optional[RetryAction]:
+    def _parse_response(raw: str) -> RetryAction | None:
         """Parse LLM response into a validated RetryAction."""
         try:
             # Strip markdown code fences if present
             text = raw.strip()
             if text.startswith("```"):
                 lines = text.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
+                lines = [ln for ln in lines if not ln.strip().startswith("```")]
                 text = "\n".join(lines)
 
             data = json.loads(text)
