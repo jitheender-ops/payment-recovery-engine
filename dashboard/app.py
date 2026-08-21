@@ -1,6 +1,25 @@
 """
 Payment Recovery Engine — Streamlit Dashboard.
-Run with: streamlit run dashboard/app.py
+
+Run from the repository root with:
+
+    python -m streamlit run dashboard/app.py
+
+`-m`, and from the root, because `streamlit run` puts the *script's* directory
+on sys.path (web/bootstrap.py) — not the working directory — so a bare
+`streamlit run dashboard/app.py` cannot import the `dashboard` package the two
+lines below need. run.sh and docker-compose.yml both use the `-m` form.
+
+Password-gated: this renders live payment data next to a service that is
+published through a public tunnel, and Streamlit binds a port like any other
+server. The gate is the first thing that runs after set_page_config, so no query
+reaches the database until it passes.
+
+The sub-pages live in dashboard/views/, NOT dashboard/pages/. Streamlit
+auto-registers every module under a directory literally named `pages/` as its
+own routable URL, which would have handed out /bank_breakdown and friends with
+this gate bypassed entirely — and served them broken, since each is a render()
+function with no top-level body to execute.
 """
 
 from __future__ import annotations
@@ -10,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 import streamlit as st
 
+from dashboard.auth import dashboard_password, password_is_correct
+
 if TYPE_CHECKING:
     # Type-only: create_engine is imported inside get_db_engine so the dashboard
     # still loads (degraded to mock metrics) when sqlalchemy or the DB is absent.
@@ -17,6 +38,43 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 st.set_page_config(page_title="Payment Recovery Engine", page_icon="🔄", layout="wide")
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────
+def require_password() -> None:
+    """
+    Render the login form and stop the script unless already authenticated.
+
+    st.stop() rather than an early return: this module is a script, and every
+    caller of every helper below it is at module scope. Stopping is the only way
+    to guarantee nothing further executes.
+    """
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("🔄 Payment Recovery Engine")
+    if not dashboard_password():
+        st.error(
+            "DASHBOARD_PASSWORD is not set, so this dashboard cannot be unlocked. "
+            "Set it in .env and restart — `./run.sh` generates one for you."
+        )
+        st.stop()
+
+    with st.form("login"):
+        supplied = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in")
+    if submitted:
+        if password_is_correct(supplied):
+            # The password itself is never kept — only the fact that it matched.
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password")
+    st.stop()
+
+
+require_password()
+
 
 # ── DB Connection ────────────────────────────────────────────────────────
 @st.cache_resource
@@ -118,11 +176,11 @@ if page == "Overview":
         st.dataframe(demo_data, use_container_width=True)
 
 elif page == "Recovery Funnel":
-    from dashboard.pages import recovery_funnel
+    from dashboard.views import recovery_funnel
     recovery_funnel.render()
 elif page == "Bank Breakdown":
-    from dashboard.pages import bank_breakdown
+    from dashboard.views import bank_breakdown
     bank_breakdown.render()
 elif page == "Eval Results":
-    from dashboard.pages import eval_results
+    from dashboard.views import eval_results
     eval_results.render()

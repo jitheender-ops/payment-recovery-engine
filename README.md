@@ -120,7 +120,7 @@ a public tunnel — then prints the webhook URL to paste into Razorpay:
 ```
   API          http://127.0.0.1:8000
   API docs     http://127.0.0.1:8000/docs
-  Dashboard    http://127.0.0.1:8501
+  Dashboard    http://127.0.0.1:8501  (password from .env)
   Public URL   https://<random>.trycloudflare.com
 
   Paste this into the Razorpay dashboard → Settings → Webhooks:
@@ -129,6 +129,16 @@ a public tunnel — then prints the webhook URL to paste into Razorpay:
 
 It refuses to expose anything until the three checks pass, so a green public URL
 means the build is actually clean. Ctrl-C stops everything.
+
+**Two things are gated, because the tunnel is public:**
+
+- **The dashboard** needs `DASHBOARD_PASSWORD`. Leave it blank and `run.sh`
+  generates one into `.env` and prints it once. It reads live payment data, and
+  Streamlit binds a port like anything else.
+- **`/docs`, `/redoc` and `/openapi.json`** exist only when
+  `APP_ENV=development` — they enumerate every route and schema. Set
+  `APP_ENV=staging` and `API_KEY` to close them; `/openapi.json` then needs
+  `X-API-Key`. `run.sh` warns if you leave them open under a live tunnel.
 
 | | |
 |---|---|

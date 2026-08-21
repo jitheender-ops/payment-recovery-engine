@@ -4,11 +4,21 @@ System and user prompts for the LLM policy agent.
 The system prompt constrains the model to a fixed action space and provides
 decision heuristics. The user prompt template formats FailureContext into a
 structured input the model can reason over.
+
+Everything below leaves the building. The prompt is sent to a third-party
+inference provider, so no directly identifying customer field may appear in it
+verbatim — FailureContext.customer_email and .customer_contact are deliberately
+absent from the template, and customer_id (which is one of those two) is
+pseudonymised by mask_customer_id() before interpolation.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from typing import TYPE_CHECKING
+
+from src.config import get_settings
 
 if TYPE_CHECKING:
     # Type-only: prompts.py is imported by policy_agent.py, which also imports
@@ -117,6 +127,34 @@ Respond with ONLY a JSON object matching the RetryAction schema. No other text.
 """
 
 
+def mask_customer_id(customer_id: str | None) -> str:
+    """
+    Pseudonymise the customer identifier before it leaves for the LLM provider.
+
+    customer_id is a raw email address or phone number — the only directly
+    identifying field anywhere in the prompt. The model needs it purely as a
+    stable handle, never as a contactable address: every fact it actually
+    reasons over (retry counts, previous outcomes, timing) is passed separately.
+
+    Keyed, not a bare sha256. The input space is small enough to enumerate: any
+    plain hash of an Indian mobile number falls to 10^10 guesses, and a hash of
+    an email address falls to any breach list. The webhook secret doubles as the
+    key with a domain separator prefix, so this needs no extra config to
+    configure wrong — and require_razorpay_credentials() already guarantees it
+    is non-empty in any environment that serves traffic.
+    """
+    if not customer_id:
+        return "unknown"
+    digest = hmac.new(
+        get_settings().razorpay_webhook_secret.encode("utf-8"),
+        b"pii-mask|customer_id|" + customer_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    # 64 bits: collision-free across any realistic customer base, and four
+    # tokens instead of forty.
+    return f"cust_{digest[:16]}"
+
+
 def format_user_prompt(context: FailureContext) -> str:
     """Format a FailureContext into the user prompt string."""
     day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -137,7 +175,9 @@ def format_user_prompt(context: FailureContext) -> str:
         error_source=context.error_source or "N/A",
         error_reason=context.error_reason or "N/A",
         is_retryable=context.is_retryable,
-        customer_id=context.customer_id or "Unknown",
+        # Masked here, at the one place every caller funnels through, rather
+        # than at the call sites — a caller that forgets is a data leak.
+        customer_id=mask_customer_id(context.customer_id),
         retry_count_24h=context.retry_count_24h,
         nudge_count_24h=context.nudge_count_24h,
         previous_retry_outcomes=", ".join(context.previous_retry_outcomes) or "None",

@@ -6,12 +6,48 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
+import src.models  # noqa: F401  — defining the classes is what registers the tables
 from src.agent.actions import FailureContext, RetryAction
+from src.database import Base
+
+
+# ── Database harness ─────────────────────────────────────────────────────
+# The models declare Postgres JSONB, which the SQLite type compiler cannot
+# render. This one shim makes the whole schema portable so DB-touching code can
+# be tested without a Postgres server. UUID columns need no shim: SQLAlchemy
+# 2.x's postgresql.UUID subclasses the generic Uuid type.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_on_sqlite(type_: Any, compiler: Any, **kw: Any) -> str:
+    return "JSON"
+
+
+@pytest.fixture
+async def db_sessionmaker(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """
+    A real async sessionmaker over a throwaway SQLite file.
+
+    File-backed rather than :memory: deliberately. SQLAlchemy gives a memory
+    SQLite engine a single shared connection, so two sessions would sit inside
+    the same transaction and a test could not distinguish a flush from a
+    commit — which is exactly the distinction the write-ahead tests rest on.
+
+    expire_on_commit=False mirrors src/database.py.
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await engine.dispose()
 
 
 @pytest.fixture

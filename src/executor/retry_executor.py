@@ -8,15 +8,39 @@ In test mode, no real money moves.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import razorpay
+import requests
 
 from src.config import get_settings
 from src.models import PaymentFailure
 
 logger = logging.getLogger(__name__)
+
+
+class _TimeoutSession(requests.Session):  # type: ignore[misc]
+    """
+    A requests Session that applies a default timeout to every request.
+
+    requests has no default timeout and razorpay-python never sets one, so a
+    hung connection blocks its caller forever. The default belongs here rather
+    than at each call site: Client.request() dispatches through
+    getattr(self.session, verb) and every requests verb funnels into
+    Session.request, so overriding this one method covers every SDK resource —
+    including ones a future SDK version adds. A per-call timeout would have to
+    be re-remembered by whoever writes the next API call.
+    """
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__()
+        self._timeout = timeout
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", self._timeout)
+        return super().request(*args, **kwargs)
 
 
 class RetryExecutor:
@@ -25,7 +49,8 @@ class RetryExecutor:
     def __init__(self) -> None:
         settings = get_settings()
         self._client = razorpay.Client(
-            auth=(settings.razorpay_key_id, settings.razorpay_key_secret)
+            session=_TimeoutSession(settings.razorpay_timeout_seconds),
+            auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
         )
         logger.info("RetryExecutor initialized (key_id=%s...)", settings.razorpay_key_id[:12])
 
@@ -110,7 +135,13 @@ class RetryExecutor:
             },
         }
 
-        result = self._client.payment_link.create(link_data)
+        # razorpay-python is synchronous `requests`. Calling it directly from a
+        # coroutine blocks the whole event loop: one slow Razorpay response
+        # freezes every other in-flight webhook and /health along with them.
+        # ponytail: shares the default asyncio executor (min(32, cpu+4) workers),
+        # so sustained concurrency above that queues — give it a dedicated
+        # executor if retry volume ever approaches it.
+        result = await asyncio.to_thread(self._client.payment_link.create, link_data)
 
         logger.info(
             "Payment link created: id=%s, short_url=%s, payment=%s",
@@ -143,11 +174,16 @@ class RetryExecutor:
         link_id = link_result.get("payment_link_id")
         if link_id:
             try:
+                # Off the event loop for the same reason as payment_link.create.
                 if failure.customer_contact:
-                    self._client.payment_link.notifyBy(link_id, "sms")
+                    await asyncio.to_thread(
+                        self._client.payment_link.notifyBy, link_id, "sms"
+                    )
                     logger.info("SMS notification sent for link %s", link_id)
                 if failure.customer_email:
-                    self._client.payment_link.notifyBy(link_id, "email")
+                    await asyncio.to_thread(
+                        self._client.payment_link.notifyBy, link_id, "email"
+                    )
                     logger.info("Email notification sent for link %s", link_id)
             except Exception:
                 logger.warning("Failed to send notification for link %s", link_id)

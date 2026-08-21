@@ -228,6 +228,24 @@ class PaymentRecoveryOrchestrator:
 
             # ── Step 11: Execute ──────────────────────────────────────────
             if action.action != "abandon":
+                # Write-ahead intent log. This row MUST be committed BEFORE the
+                # Razorpay call, not after it. Recording the attempt afterwards
+                # leaves a window where money has moved and nothing in our
+                # database says so: crash between the API call and the commit and
+                # the attempt vanishes, the count-derived idem_key stays free,
+                # and the next payment.failed for this payment reuses the same
+                # slot and charges the customer a second time.
+                #
+                # Committing first makes the failure mode a recorded unknown
+                # instead of a silent one — the row survives as "pending", it
+                # occupies its attempt slot, and it counts against
+                # max_retries_per_payment so a crash-looping payment stops
+                # rather than being hammered. Resolving a pending row to
+                # success/failed is reconciliation's job, not this path's.
+                attempt.result = "pending"
+                session.add(attempt)
+                await session.commit()
+
                 try:
                     exec_result = await self._executor.execute_retry(
                         payment_failure=failure_record,
@@ -254,6 +272,9 @@ class PaymentRecoveryOrchestrator:
                 payment_id, guardrail_result.rejection_reasons,
             )
 
+        # No-op for the executed path (already added and committed above); this
+        # is what persists the abandon / guardrail-rejected rows, which never
+        # touch Razorpay and so need no write-ahead.
         session.add(attempt)
 
         # ── Step 12: Update ledger ────────────────────────────────────────
@@ -357,11 +378,15 @@ class PaymentRecoveryOrchestrator:
             session.add(ledger)
 
         if action.action in ("retry_now", "retry_at", "switch_rail"):
-            ledger.total_retries_24h += 1
+            # `default=0` on the column is a FLUSH-time default, so a ledger
+            # constructed a few lines above still holds None here and `+= 1`
+            # raises TypeError — deterministically, on the first retry for every
+            # new customer. `or 0` also covers rows already NULL in the table.
+            ledger.total_retries_24h = (ledger.total_retries_24h or 0) + 1
             ledger.last_retry_at = now
 
         if action.action == "nudge_customer":
-            ledger.total_nudges_24h += 1
+            ledger.total_nudges_24h = (ledger.total_nudges_24h or 0) + 1
             ledger.last_nudge_at = now
 
 

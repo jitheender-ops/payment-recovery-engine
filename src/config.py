@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
+    # Per-request timeout for the Razorpay SDK. requests defaults to no timeout
+    # at all, so without this a single hung connection blocks a worker forever.
+    # Payment-link creation is a fast call; 10s is generous, not tight.
+    razorpay_timeout_seconds: float = 10.0
 
     # ── LLM ──────────────────────────────────────────────────────────────
     llm_provider: Literal["anthropic", "openai"] = "anthropic"
@@ -68,6 +72,15 @@ class Settings(BaseSettings):
     # and those include customer_email / customer_contact / vpa on every
     # payment_failures insert. Never tie this to an env that defaults to on.
     sql_echo: bool = False
+
+    # ── API access ───────────────────────────────────────────────────────
+    # Guards the non-webhook surface (see src/auth.py). Empty means DENY, not
+    # allow — same reasoning as the Razorpay secrets above. The webhook route is
+    # deliberately NOT covered by this: Razorpay cannot be told to send a custom
+    # header, so that endpoint authenticates by HMAC over the raw body instead.
+    api_key: str = ""
+    # Gates the Streamlit dashboard. Empty means the dashboard refuses to render.
+    dashboard_password: str = ""
 
     # ── Application ──────────────────────────────────────────────────────
     app_env: Literal["development", "staging", "production"] = "development"

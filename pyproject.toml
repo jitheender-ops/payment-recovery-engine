@@ -95,5 +95,5 @@ strict = true
 # No published type stubs installed for these. pandas-stubs / types-tabulate /
 # types-PyYAML would remove this block if added to the dev extra.
 [[tool.mypy.overrides]]
-module = ["pandas.*", "tabulate.*", "yaml.*", "joblib.*", "sklearn.*", "plotly.*", "razorpay.*", "streamlit.*", "xgboost.*"]
+module = ["pandas.*", "tabulate.*", "yaml.*", "joblib.*", "sklearn.*", "plotly.*", "razorpay.*", "requests.*", "streamlit.*", "xgboost.*"]
 ignore_missing_imports = true

@@ -58,7 +58,12 @@ services:
         condition: service_healthy
     volumes:
       - .:/app
-    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    # `python -m`, not a bare `streamlit run`: streamlit puts the *script's*
+    # directory on sys.path, not the working directory, so `dashboard.auth` and
+    # `dashboard.views` would not import. -m adds the CWD (/app). run.sh does
+    # the same. --server.address 0.0.0.0 is correct here (bind inside the
+    # container so the published port reaches it), unlike on the host.
+    command: python -m streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
 
 volumes:
   pgdata:

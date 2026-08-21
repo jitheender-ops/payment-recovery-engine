@@ -68,6 +68,32 @@ APP_PORT="${APP_PORT:-8000}"
 STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
 [[ "${SQL_ECHO:-false}" == "false" ]] || warn "SQL_ECHO is on — it logs customer email/phone/VPA. Turn it off outside debugging."
 
+# The dashboard refuses to render without a password, so an unset one would
+# break "one command" for anyone whose .env predates the variable. Generated
+# rather than defaulted — a default in a shipped script is a publicly known
+# password. Printed exactly once, at generation: after that it is in .env and
+# gets the same char-count treatment as every other secret above.
+if [[ -z "${DASHBOARD_PASSWORD:-}" ]]; then
+  DASHBOARD_PASSWORD="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(18))')"
+  export DASHBOARD_PASSWORD
+  if grep -q '^DASHBOARD_PASSWORD=' .env; then
+    # awk, not `sed -i`: the -i flag takes an argument on BSD and not on GNU.
+    # umask 077 because mv would otherwise hand .env the default permissions of
+    # the temp file, quietly widening a file full of secrets.
+    ( umask 077
+      awk -v pw="$DASHBOARD_PASSWORD" \
+        '/^DASHBOARD_PASSWORD=/{print "DASHBOARD_PASSWORD=" pw; next} {print}' .env > .env.tmp
+    ) && mv .env.tmp .env
+  else
+    printf '\nDASHBOARD_PASSWORD=%s\n' "$DASHBOARD_PASSWORD" >> .env
+  fi
+  warn "no DASHBOARD_PASSWORD — generated one and saved it to .env. It is shown"
+  warn "  once, here, and nowhere else:"
+  printf '\n      \033[1m%s\033[0m\n\n' "$DASHBOARD_PASSWORD"
+else
+  ok "DASHBOARD_PASSWORD set (${#DASHBOARD_PASSWORD} chars)"
+fi
+
 # ── 3. Virtualenv ────────────────────────────────────────────────────────
 # Deliberately NOT --system-site-packages, and the probe below enforces that:
 # it checks not just that the imports resolve, but that they resolve to files
@@ -270,13 +296,26 @@ if $TUNNEL; then
 fi
 
 # ── 8. Where things are ──────────────────────────────────────────────────
+# The docs trio only exists when APP_ENV=development (src/main.py decides it at
+# FastAPI() construction), so printing the URL unconditionally would advertise a
+# 404 — and under a tunnel it advertises a public route enumeration.
+if [[ "${APP_ENV:-development}" == "development" ]]; then
+  DOCS_LINE="    API docs     http://127.0.0.1:$APP_PORT/docs"
+  [[ -z "$PUBLIC_URL" ]] || {
+    warn "APP_ENV=development, so /docs, /redoc and /openapi.json are open to"
+    warn "  anyone with the tunnel URL — they enumerate every route and schema."
+    warn "  Set APP_ENV=staging and API_KEY in .env to close them."
+  }
+else
+  DOCS_LINE="    API docs     disabled (APP_ENV=$APP_ENV); /openapi.json needs X-API-Key"
+fi
 cat <<BANNER
 
   $(printf '\033[1;32m●\033[0m') Payment Failure Recovery Engine is up
 
     API          http://127.0.0.1:$APP_PORT
-    API docs     http://127.0.0.1:$APP_PORT/docs
-    Dashboard    http://127.0.0.1:$STREAMLIT_PORT
+$DOCS_LINE
+    Dashboard    http://127.0.0.1:$STREAMLIT_PORT  (password from .env)
 BANNER
 if [[ -n "$PUBLIC_URL" ]]; then
   cat <<BANNER
