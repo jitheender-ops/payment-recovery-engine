@@ -42,17 +42,49 @@ HOUR_MODIFIERS: dict[int, float] = {
     23: 0.88,
 }
 
-# ── Failure-class retry success modifiers ────────────────────────────────
-FAILURE_RETRY_MODIFIERS: dict[str, dict[str, float]] = {
-    "insufficient_funds":  {"same_rail": 0.30, "diff_rail": 0.25, "after_nudge": 0.45},
-    "bank_downtime":       {"same_rail": 0.70, "diff_rail": 0.85, "after_delay_30m": 0.80, "after_delay_2h": 0.92},
-    "network_error":       {"same_rail": 0.85, "diff_rail": 0.88, "immediate": 0.85},
-    "3ds_dropoff":         {"same_rail": 0.55, "diff_rail": 0.78, "to_upi": 0.82},
-    "upi_collect_timeout": {"same_rail": 0.50, "diff_rail": 0.60, "after_nudge": 0.70},
-    "issuer_decline":      {"same_rail": 0.20, "diff_rail": 0.60, "to_upi": 0.65},
-    "payment_timeout":     {"same_rail": 0.75, "diff_rail": 0.80, "immediate": 0.78},
-    "card_limit_exceeded": {"same_rail": 0.10, "diff_rail": 0.55, "after_nudge": 0.50},
+# ── Probability the underlying failure condition has CLEARED ─────────────
+#
+# This is the model's central assumption, and the earlier version got it wrong.
+# A retry is not a fresh payment. The payment already failed for a specific
+# reason, so the bank's baseline approval rate (0.85-0.94, calibrated on random
+# new payments) says almost nothing about whether a retry works. What matters is
+# whether the *cause* went away:
+#
+#   P(retry succeeds) = P(condition cleared) x P(payment clears | condition gone)
+#
+# The second term is the bank/rail/hour baseline. The first term is below, and
+# it is much smaller than the old modifiers implied — which is why the old model
+# reported ~73% blended recovery against a real world nearer 15-30%.
+#
+# Reading the numbers: insufficient_funds barely improves on an immediate retry
+# because the customer's balance has not changed; it improves a lot after a nudge
+# because the nudge is what prompts them to top up. card_limit_exceeded is near
+# hopeless on the same card and fine on another rail. network_error is genuinely
+# transient, so it clears on its own.
+CONDITION_CLEARS: dict[str, dict[str, float]] = {
+    "insufficient_funds":  {"same_rail": 0.05, "diff_rail": 0.05, "after_nudge": 0.26},
+    "bank_downtime":       {"same_rail": 0.20, "diff_rail": 0.58},
+    "network_error":       {"same_rail": 0.60, "diff_rail": 0.62},
+    "3ds_dropoff":         {"same_rail": 0.13, "diff_rail": 0.32, "after_nudge": 0.40},
+    "upi_collect_timeout": {"same_rail": 0.16, "diff_rail": 0.21, "after_nudge": 0.44},
+    "issuer_decline":      {"same_rail": 0.07, "diff_rail": 0.30},
+    "payment_timeout":     {"same_rail": 0.46, "diff_rail": 0.50},
+    "card_limit_exceeded": {"same_rail": 0.04, "diff_rail": 0.32, "after_nudge": 0.14},
 }
+
+# Global calibration knob. The per-class numbers above encode *relative* ordering
+# (which failures are recoverable and by what lever); this scales all of them to
+# land the blended fixed-3-retry recovery rate inside the 15-30% band that public
+# figures report. Tune this, not the individual classes, when re-anchoring to a
+# new source — the relative structure is the part worth preserving.
+#
+# ponytail: single global scalar, per-class calibration if real bank data lands.
+RETRY_CALIBRATION: float = 0.62
+
+# How much of the remaining gap a wait closes for bank downtime. Replaces the old
+# model, which applied a delay multiplier AND an additive delay bonus — rewarding
+# the same wait twice and mixing additive with multiplicative for no stated reason.
+DOWNTIME_RECOVERY_HALFLIFE_MINUTES: float = 45.0
 
 
 @dataclass
@@ -77,30 +109,39 @@ class BankProfile:
 
         Returns a float in [0, 1].
         """
-        # Base rate for this rail
+        # P(payment clears | the original blocker is gone) — the bank's baseline.
         base = self.base_rates.get(rail, 0.80)
-
-        # Time-of-day modifier
         time_mod = HOUR_MODIFIERS.get(hour % 24, 0.95)
-
         prob = base * time_mod
 
-        # Apply failure-class retry modifier
-        if is_retry and failure_class in FAILURE_RETRY_MODIFIERS:
-            mods = FAILURE_RETRY_MODIFIERS[failure_class]
+        if not is_retry:
+            return min(max(prob, 0.0), 1.0)
 
-            if after_nudge and "after_nudge" in mods:
-                prob *= mods["after_nudge"]
-            elif switched_rail and "diff_rail" in mods:
-                prob *= mods["diff_rail"]
-            elif failure_class == "bank_downtime" and delay_minutes >= 120:
-                prob *= mods.get("after_delay_2h", 0.92)
-            elif failure_class == "bank_downtime" and delay_minutes >= 30:
-                prob *= mods.get("after_delay_30m", 0.80)
-            elif "same_rail" in mods:
-                prob *= mods["same_rail"]
+        # P(the original blocker is gone).
+        clears = CONDITION_CLEARS.get(failure_class)
+        if clears is None:
+            # Unmodelled failure class — assume mostly unrecoverable rather than
+            # silently inheriting the full baseline, which is what made unknown
+            # classes look as recoverable as a transient network blip.
+            return min(max(prob * 0.15 * RETRY_CALIBRATION, 0.0), 1.0)
 
-        return min(max(prob, 0.0), 1.0)
+        if after_nudge and "after_nudge" in clears:
+            p_clear = clears["after_nudge"]
+        elif switched_rail:
+            p_clear = clears["diff_rail"]
+        else:
+            p_clear = clears["same_rail"]
+
+        # Waiting only helps when the blocker is time-based. Bank downtime ends
+        # on its own schedule, so a wait closes the gap toward the switched-rail
+        # ceiling on an exponential curve. Applied once — never stacked on top of
+        # a separate delay multiplier.
+        if failure_class == "bank_downtime" and delay_minutes > 0:
+            ceiling = clears["diff_rail"]
+            recovered_fraction = 1.0 - 0.5 ** (delay_minutes / DOWNTIME_RECOVERY_HALFLIFE_MINUTES)
+            p_clear += (ceiling - p_clear) * recovered_fraction
+
+        return min(max(prob * p_clear * RETRY_CALIBRATION, 0.0), 1.0)
 
 
 def get_bank_profile(bank_name: str) -> BankProfile:

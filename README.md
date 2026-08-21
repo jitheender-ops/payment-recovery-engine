@@ -10,45 +10,56 @@ Indian checkout success rates sit in the high 80s. Every failed payment is real,
 Run: python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
 ```
 
+> **₹8.5L additional net revenue per ₹1Cr of failed volume vs. a fixed 3-retry
+> baseline, at 13% fewer retry attempts and zero false retries.**
+
 5,000 scenarios × 5 seeds (mean ± σ). These are the exact contents of
 `eval/results/` — reproduce them with the command above.
 
-| Policy | Recovery Rate | Retry Cost (avg) | False-Retry % | ₹ per ₹1Cr Failed |
-|--------|-------------|-------------------|---------------|---------------------|
-| No Retry | 0.0% | 0.00 | 0.0% | ₹0 |
-| Fixed 3-Retry | 73.5% ± 0.5 | 1.88 ± 0.01 | 8.0% ± 0.3 | ₹72,36,492 |
-| XGBoost/Rules | 72.8% ± 0.4 | 1.61 ± 0.01 | 0.0% ± 0.0 | ₹72,56,487 |
-| LLM Agent | not yet run | — | — | — |
+| Policy | Recovery Rate | Retry Cost (avg) | False-Retry % | ₹ per ₹1Cr | Net ₹ per ₹1Cr |
+|--------|-------------|-------------------|---------------|------------|----------------|
+| No Retry | 0.0% | 0.00 | 0.0% | ₹0 | ₹0 |
+| Fixed 3-Retry | 19.2% ± 0.7 | 2.73 ± 0.01 | 8.0% ± 0.3 | ₹18,49,489 | ₹17,95,744 |
+| XGBoost/Rules | 27.4% ± 0.6 | 2.37 ± 0.01 | 0.0% ± 0.0 | ₹26,99,581 | ₹26,52,874 |
+| LLM Agent | not yet run | — | — | — | — |
 
-**The comparison above cannot resolve a sub-1pp difference, so don't read one
-into it.** 73.5% vs 72.8% with σ ≈ 0.5 is two overlapping intervals. To actually
-answer "is the agent better," the harness runs every policy under **common
-random numbers** — the same scenario draws the identical random sequence
-regardless of which policy is deciding — and differences outcomes one-to-one:
+### Is that difference real?
+
+Two overlapping ± ranges can't answer that, so the harness doesn't try. Every
+policy runs under **common random numbers** — the same scenario draws the
+identical random sequence no matter which policy is deciding — and outcomes are
+differenced one-to-one, giving a confidence interval on the *difference*:
 
 | vs. Fixed 3-Retry | Δ | 95% CI | n | Real? |
 |---|---|---|---|---|
-| Recovery rate | −0.67pp | [−1.35, +0.01] | 25,000 | **no — inside noise** |
-| Retry attempts | −0.262 | [−0.273, −0.251] | 25,000 | **yes** |
+| Recovery rate | **+8.22pp** | [+7.77, +8.67] | 25,000 | **yes** |
+| Retry attempts | **−0.357** | [−0.369, −0.346] | 25,000 | **yes** |
 
-**The honest claim: no measurable recovery difference, and a statistically
-significant 14% reduction in retry attempts (1.61 vs 1.88), at zero false
-retries vs 8%.** The agent never retries a hard decline, a fraud block, or an
-expired instrument. That is a cost win, not a recovery win, and it is stated
-that way deliberately.
+### Why net, and why you don't have to trust our cost number
 
-Three known gaps, named rather than hidden:
+Recovery rate alone makes brute force optimal by construction — if attempts are
+free, "retry everything, always" wins. So the headline is **net of retry cost**,
+defaulting to ₹2.00/attempt (`--retry-cost-inr` to change it).
 
-1. **The headline metric doesn't price a retry.** Recovery rate alone makes
-   brute force optimal by construction, so selectivity cannot show up as a win
-   until retry attempts carry their real cost — gateway fees, decline-ratio
-   penalties, customer goodwill. See `docs/eval_methodology.md`.
-2. **73% blended recovery is higher than the real world.** Published recovery
-   rates for failed payments sit closer to 15–30%. The bank simulator is
-   currently too generous on retry success. This is a calibration gap, not a
-   result.
-3. **The LLM policy has no recorded run.** That row is blank because it has not
-   been run end-to-end, not because it scored badly.
+That default is a floor: it prices gateway and ops cost only, not decline-ratio
+penalties or customer goodwill, neither of which we can source honestly. So the
+harness also reports the **break-even** — the retry cost at which the two
+policies would tie. Here the agent recovers *more* while attempting *fewer*, so
+it **dominates at any retry cost including ₹0**, and the assumption never has to
+be argued.
+
+### What the model assumes
+
+The bank simulator is synthetic — stated plainly, because it's the number a
+payments person will challenge first. Its central assumption: **a retry is not a
+fresh payment.** The payment already failed for a reason, so the bank's baseline
+approval rate says little; what matters is `P(the blocker cleared)`, which is
+modelled per failure class in `eval/bank_profiles.py`. Blended baseline recovery
+lands at 19.2%, inside the 15–30% band public figures report, and
+`tests/test_calibration.py` fails if a change pushes it out.
+
+**Remaining gap:** the LLM policy row is blank because it has not been run
+end-to-end — not because it scored badly.
 
 No number in this README was written by hand; every one comes from
 `eval/runner.py`.

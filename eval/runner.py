@@ -21,7 +21,12 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from eval.metrics import compute_all_metrics, format_results_table, format_results_table_markdown
+from eval.metrics import (
+    COST_PER_RETRY_INR,
+    compute_all_metrics,
+    format_results_table,
+    format_results_table_markdown,
+)
 from eval.policies.fixed_retry import FixedRetryPolicy
 from eval.policies.no_retry import NoRetryPolicy
 from eval.policies.xgboost_policy import XGBoostPolicy
@@ -53,6 +58,7 @@ class EvalRunner:
         n_seeds: int = 5,
         output_dir: str = "eval/results",
         skip_llm: bool = False,
+        retry_cost_inr: float = COST_PER_RETRY_INR,
     ) -> None:
         self.n_scenarios = n_scenarios
         self.n_seeds = n_seeds
@@ -60,6 +66,8 @@ class EvalRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.skip_llm = skip_llm
         self.paired: dict = {}
+        self.economics: dict = {}
+        self.retry_cost_inr = retry_cost_inr
 
     def run_policy(
         self,
@@ -164,7 +172,7 @@ class EvalRunner:
                 t0 = time.time()
                 policy = factory()
                 results_df = self.run_policy(policy_name, policy, scenarios, simulator)
-                metrics = compute_all_metrics(results_df)
+                metrics = compute_all_metrics(results_df, self.retry_cost_inr)
                 elapsed = time.time() - t0
 
                 all_seed_metrics[policy_name].append(metrics)
@@ -189,7 +197,58 @@ class EvalRunner:
             aggregated[policy_name] = agg
 
         self.paired = self._paired_comparison(per_scenario)
+        self.economics = self._break_even(aggregated)
         return aggregated
+
+    def _break_even(self, aggregated: dict[str, dict]) -> dict:
+        """
+        At what cost per retry attempt does each policy overtake the baseline?
+
+        The point of this is to make the conclusion independent of our cost
+        estimate. Rather than asserting a retry costs ₹2 and hoping nobody
+        challenges it, solve for the cost at which the two policies tie:
+
+            net(p) = revenue(p) - c * attempts(p)
+            tie  =>  c* = (revenue_p - revenue_base) / (attempts_p - attempts_base)
+
+        A policy that recovers *more* while attempting *fewer* needs no such
+        argument — it wins at every possible cost, including zero. Say so
+        explicitly rather than printing a meaningless negative number.
+        """
+        base = aggregated.get(self.BASELINE)
+        if not base:
+            return {}
+
+        out: dict[str, dict] = {}
+        for policy, m in aggregated.items():
+            if policy == self.BASELINE or policy == "No Retry":
+                continue
+            d_rev = m["₹_per_₹1Cr_failed"] - base["₹_per_₹1Cr_failed"]
+            d_att = m["attempts_per_₹1Cr"] - base["attempts_per_₹1Cr"]
+
+            if d_rev >= 0 and d_att <= 0:
+                verdict, break_even = "dominates at any retry cost (incl. ₹0)", None
+            elif d_rev <= 0 and d_att >= 0:
+                verdict, break_even = "dominated at any retry cost", None
+            elif d_att == 0:
+                verdict, break_even = "same attempt count — compare revenue directly", None
+            else:
+                break_even = d_rev / d_att
+                verdict = (
+                    f"wins once a retry costs more than ₹{break_even:,.2f}"
+                    if d_att < 0
+                    else f"wins only while a retry costs less than ₹{break_even:,.2f}"
+                )
+
+            out[policy] = {
+                "delta_revenue_per_crore": round(d_rev, 0),
+                "delta_attempts_per_crore": round(d_att, 0),
+                "break_even_cost_per_retry_inr": (
+                    round(break_even, 2) if break_even is not None else None
+                ),
+                "verdict": verdict,
+            }
+        return out
 
     # ── Paired comparison ────────────────────────────────────────────────
     BASELINE = "Fixed 3-Retry"
@@ -248,7 +307,12 @@ class EvalRunner:
         # JSON. allow_nan=False so Infinity/NaN raise here instead of silently
         # producing a file that only Python can parse — sanitize first.
         json_path = out / "eval_results.json"
-        payload = {"policies": _json_safe(results), "paired_vs_baseline": _json_safe(self.paired)}
+        payload = {
+            "retry_cost_inr": self.retry_cost_inr,
+            "policies": _json_safe(results),
+            "paired_vs_baseline": _json_safe(self.paired),
+            "economics_vs_baseline": _json_safe(self.economics),
+        }
         with open(json_path, "w") as f:
             json.dump(payload, f, indent=2, allow_nan=False)
 
@@ -261,6 +325,7 @@ class EvalRunner:
             f.write(md_table)
             f.write("\n\n*Variance (±σ) shown in JSON results.*\n")
             f.write(self._paired_markdown())
+            f.write(self._economics_markdown())
 
         # CSV summary
         rows = []
@@ -293,6 +358,51 @@ class EvalRunner:
                     f"{'yes' if d['significant'] else 'no — inside noise'} |"
                 )
         return "\n".join(lines) + "\n"
+
+    def _economics_markdown(self) -> str:
+        """Render the break-even analysis as markdown."""
+        if not self.economics:
+            return ""
+        lines = [
+            f"\n## Retry economics vs. {self.BASELINE}\n",
+            f"Net figures charge ₹{self.retry_cost_inr:,.2f} per retry attempt. The break-even",
+            "column removes that assumption: it is the cost at which the two policies tie,",
+            "so the conclusion holds without agreeing on what a retry actually costs.\n",
+            "| Policy | Δ revenue /Cr | Δ attempts /Cr | Break-even /retry | Verdict |",
+            "|---|---|---|---|---|",
+        ]
+        for policy, e in self.economics.items():
+            be = e["break_even_cost_per_retry_inr"]
+            lines.append(
+                f"| {policy} | ₹{e['delta_revenue_per_crore']:+,.0f} | "
+                f"{e['delta_attempts_per_crore']:+,.0f} | "
+                f"{'—' if be is None else f'₹{be:,.2f}'} | {e['verdict']} |"
+            )
+        return "\n".join(lines) + "\n"
+
+    def print_economics(self) -> None:
+        """Print the break-even analysis."""
+        if not self.economics:
+            return
+        table = Table(
+            title=f"Retry economics vs. {self.BASELINE} (@ ₹{self.retry_cost_inr:,.2f}/attempt)",
+            title_style="bold cyan", show_lines=True,
+        )
+        table.add_column("Policy", style="bold")
+        table.add_column("Δ revenue /Cr", justify="right")
+        table.add_column("Δ attempts /Cr", justify="right")
+        table.add_column("Break-even", justify="right")
+        table.add_column("Verdict")
+        for policy, e in self.economics.items():
+            be = e["break_even_cost_per_retry_inr"]
+            table.add_row(
+                policy,
+                f"₹{e['delta_revenue_per_crore']:+,.0f}",
+                f"{e['delta_attempts_per_crore']:+,.0f}",
+                "—" if be is None else f"₹{be:,.2f}",
+                e["verdict"],
+            )
+        console.print(table)
 
     def print_paired(self) -> None:
         """Print the paired comparison table."""
@@ -338,11 +448,18 @@ class EvalRunner:
 
         console.print(table)
 
-        # Print headline metric
-        if "XGBoost/Rules" in results and "No Retry" in results:
-            xgb = results["XGBoost/Rules"]["₹_per_₹1Cr_failed"]
+        # Print headline metric — net of retry cost, and stated against the
+        # baseline rather than against zero. "₹X recovered" on its own is not a
+        # result; the baseline already recovers most of it.
+        agent, base = results.get("XGBoost/Rules"), results.get(self.BASELINE)
+        if agent and base:
+            delta_net = agent["net_₹_per_₹1Cr_failed"] - base["net_₹_per_₹1Cr_failed"]
+            fewer = base["retry_cost_avg"] - agent["retry_cost_avg"]
+            pct = (fewer / base["retry_cost_avg"] * 100) if base["retry_cost_avg"] else 0.0
             console.print(
-                f"\n[bold green]Headline: ₹{xgb:,.0f} recovered per ₹1Cr of failed volume[/bold green]"
+                f"\n[bold green]Headline: ₹{delta_net:+,.0f} net per ₹1Cr of failed volume "
+                f"vs. the {self.BASELINE} baseline, at {pct:.0f}% fewer retry attempts "
+                f"(₹{self.retry_cost_inr:,.2f}/retry).[/bold green]"
             )
 
 
@@ -352,6 +469,8 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, default=5, help="Number of random seeds")
     parser.add_argument("--output", type=str, default="eval/results", help="Output directory")
     parser.add_argument("--skip-llm", action="store_true", help="Skip LLM policy (no API keys needed)")
+    parser.add_argument("--retry-cost-inr", type=float, default=COST_PER_RETRY_INR,
+                        help="Cost charged per retry attempt, in rupees")
     args = parser.parse_args()
 
     console.print("[bold cyan]🔄 Payment Failure Recovery — Eval Harness[/bold cyan]")
@@ -362,11 +481,13 @@ def main() -> None:
         n_seeds=args.seeds,
         output_dir=args.output,
         skip_llm=args.skip_llm,
+        retry_cost_inr=args.retry_cost_inr,
     )
 
     results = runner.run_with_variance()
     runner.print_results(results)
     runner.print_paired()
+    runner.print_economics()
     runner.save_results(results)
 
 
