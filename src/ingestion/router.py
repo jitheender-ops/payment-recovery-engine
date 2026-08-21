@@ -145,7 +145,16 @@ async def receive_razorpay_webhook(
         processed=False,
     )
     session.add(webhook_event)
-    await session.flush()  # get the ID assigned
+    # COMMIT, not flush. The background task below opens its own session and
+    # looks this row up by razorpay_event_id. A flush leaves the row invisible
+    # outside this transaction, so the task raced the commit in get_session()'s
+    # teardown and logged "Event not found in store" for every single webhook —
+    # the event was persisted, then the entire recovery pipeline was skipped.
+    # Committing here is also correct on its own terms: we are about to return
+    # 200 to Razorpay, and we must not acknowledge an event we have not durably
+    # stored, or a delivery we drop is never re-sent.
+    await session.commit()
+    await session.refresh(webhook_event)
 
     # 6. Trigger async processing
     if event_type in ("payment.failed", "payment.captured"):

@@ -151,16 +151,26 @@ class PaymentRecoveryOrchestrator:
 
         # ── Step 6: Agent decision ────────────────────────────────────────
         agent = self._get_agent()
+        # agent_type must record who ACTUALLY decided, not who was configured to.
+        # PolicyAgent.decide() catches its own LLM errors and returns a heuristic
+        # action, so "an agent object exists" says nothing about whether the LLM
+        # answered. Comparing its fallback counter across the call is what
+        # distinguishes a real LLM decision from a silent degradation — without
+        # it the audit trail claims an LLM made calls it never saw.
         if agent:
+            fallbacks_before = agent.fallback_count
             try:
                 action = await agent.decide(context)
+                agent_type = "llm" if agent.fallback_count == fallbacks_before else "llm_fallback"
             except Exception:
                 logger.exception("Agent failed, using XGBoost fallback")
                 from src.agent.xgboost_baseline import XGBoostBaseline
                 action = XGBoostBaseline().predict(context)
+                agent_type = "xgboost"
         else:
             from src.agent.xgboost_baseline import XGBoostBaseline
             action = XGBoostBaseline().predict(context)
+            agent_type = "xgboost"
 
         # ── Step 7: Idempotency key ───────────────────────────────────────
         # Deterministic by construction: (payment, attempt number) fully
@@ -194,7 +204,7 @@ class PaymentRecoveryOrchestrator:
             target_rail=action.rail,
             scheduled_at=action.retry_at,
             agent_reasoning=action.reason,
-            agent_type="llm" if agent else "xgboost",
+            agent_type=agent_type,
             agent_confidence=action.confidence,
             guardrail_passed=guardrail_result.passed,
             guardrail_rejection_reason=(
