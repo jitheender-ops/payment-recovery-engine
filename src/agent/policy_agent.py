@@ -30,7 +30,8 @@ class PolicyAgent:
         settings = get_settings()
         self._provider = provider or settings.llm_provider
         self._model = settings.llm_model
-        self._temperature = settings.llm_temperature
+        self._temperature = settings.llm_temperature  # OpenAI path only
+        self._effort = settings.llm_effort
         self._max_tokens = settings.llm_max_tokens
         self._timeout = settings.llm_timeout_seconds
 
@@ -44,10 +45,21 @@ class PolicyAgent:
             import openai
             self._client = openai.AsyncOpenAI(
                 api_key=settings.openai_api_key,
+                # Empty base_url means api.openai.com; set it to point the same
+                # client at any OpenAI-compatible host (OpenRouter, Ollama, ...).
+                base_url=settings.llm_base_url or None,
                 timeout=self._timeout,
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {self._provider}")
+
+        # Counts decisions that came from _fallback_action rather than the LLM.
+        # PolicyAgent.decide() swallows LLM errors and returns a heuristic action
+        # that is indistinguishable from a real decision at the call site — so
+        # without this counter a totally dead LLM still yields a full, plausible
+        # results table. Callers must check it before labelling output "LLM".
+        self.call_count = 0
+        self.fallback_count = 0
 
         logger.info("PolicyAgent initialized: provider=%s, model=%s", self._provider, self._model)
 
@@ -62,6 +74,7 @@ class PolicyAgent:
             RetryAction — validated, constrained action from the fixed action space.
         """
         user_prompt = format_user_prompt(context)
+        self.call_count += 1
 
         try:
             raw_response = await self._call_llm(user_prompt)
@@ -79,6 +92,7 @@ class PolicyAgent:
 
             if action is None:
                 logger.error("LLM failed to produce valid action after retry — falling back")
+                self.fallback_count += 1
                 return self._fallback_action(context, "LLM output could not be parsed")
 
             logger.info(
@@ -93,6 +107,7 @@ class PolicyAgent:
 
         except Exception as e:
             logger.exception("LLM call failed: %s", str(e))
+            self.fallback_count += 1
             return self._fallback_action(context, f"LLM error: {str(e)}")
 
     async def _call_llm(self, user_prompt: str) -> str:
@@ -101,11 +116,26 @@ class PolicyAgent:
             response = await self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
-                temperature=self._temperature,
-                system=SYSTEM_PROMPT,
+                # No temperature: sampling params were removed on current Claude
+                # models and return a 400. Depth is controlled by effort.
+                output_config={"effort": self._effort},
+                # The system prompt is byte-identical on every call, so cache it.
+                # Across an eval run of thousands of decisions this is the
+                # difference between full price and ~10% on the bulk of the input.
+                system=[
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 messages=[{"role": "user", "content": user_prompt}],
             )
-            return response.content[0].text
+            # Thinking is on by default; the JSON is in the text block, which is
+            # not necessarily content[0].
+            return next(
+                (b.text for b in response.content if b.type == "text"), ""
+            )
 
         elif self._provider == "openai":
             response = await self._client.chat.completions.create(

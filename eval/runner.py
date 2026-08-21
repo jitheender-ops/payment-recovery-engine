@@ -68,6 +68,7 @@ class EvalRunner:
         self.paired: dict = {}
         self.economics: dict = {}
         self.retry_cost_inr = retry_cost_inr
+        self.llm_fallback_rate: float | None = None
 
     def run_policy(
         self,
@@ -171,9 +172,26 @@ class EvalRunner:
             for policy_name, factory in policies_factory.items():
                 t0 = time.time()
                 policy = factory()
+                # LLM-backed policies issue their calls concurrently up front;
+                # the eval loop itself stays sequential and just reads the cache.
+                if hasattr(policy, "prefetch"):
+                    console.print(f"  [dim]{policy_name}: prefetching decisions...[/dim]")
+                    policy.prefetch(scenarios)
                 results_df = self.run_policy(policy_name, policy, scenarios, simulator)
                 metrics = compute_all_metrics(results_df, self.retry_cost_inr)
                 elapsed = time.time() - t0
+
+                # An "LLM Agent" row served mostly by the XGBoost fallback is a
+                # fabricated result. Track it and refuse to publish it below.
+                fallbacks = getattr(policy, "total_fallbacks", getattr(policy, "fallback_count", 0))
+                calls = getattr(policy, "call_count", 0)
+                if calls:
+                    self.llm_fallback_rate = fallbacks / calls
+                    if fallbacks:
+                        console.print(
+                            f"    [yellow]{fallbacks:,}/{calls:,} decisions "
+                            f"({fallbacks / calls:.1%}) fell back to XGBoost[/yellow]"
+                        )
 
                 all_seed_metrics[policy_name].append(metrics)
                 per_scenario[policy_name].append(results_df)
@@ -195,6 +213,17 @@ class EvalRunner:
                 agg[key] = round(float(mean_val), 2)
                 agg[f"{key}_std"] = round(float(std_val), 2)
             aggregated[policy_name] = agg
+
+        # Guard: a mostly-fallback LLM row is not an LLM result. Drop it rather
+        # than publish a number the label misdescribes.
+        if self.llm_fallback_rate is not None and self.llm_fallback_rate > 0.05:
+            console.print(
+                f"\n[bold red]Dropping the LLM Agent row: "
+                f"{self.llm_fallback_rate:.1%} of its decisions came from the XGBoost "
+                f"fallback, so it does not measure the LLM.[/bold red]"
+            )
+            aggregated.pop("LLM Agent", None)
+            per_scenario.pop("LLM Agent", None)
 
         self.paired = self._paired_comparison(per_scenario)
         self.economics = self._break_even(aggregated)

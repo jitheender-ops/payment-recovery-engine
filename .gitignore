@@ -20,9 +20,10 @@ env/
 *.swo
 *~
 
-# Environment
+# Environment — any .env variant, incl. editor/script backups
 .env
-.env.local
+.env.*
+!.env.example
 
 # Database
 *.db

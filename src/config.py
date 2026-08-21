@@ -37,10 +37,28 @@ class Settings(BaseSettings):
     llm_provider: Literal["anthropic", "openai"] = "anthropic"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
-    llm_model: str = "claude-sonnet-4-20250514"
+    # Any OpenAI-compatible endpoint. Set this to use OpenRouter, Together,
+    # Groq, a local Ollama/vLLM server, etc. through the existing "openai"
+    # provider branch — the wire format is identical, only the host differs.
+    #   OpenRouter: https://openrouter.ai/api/v1
+    #   Ollama:     http://localhost:11434/v1
+    # Leave empty for api.openai.com.
+    llm_base_url: str = ""
+    # Model IDs on current Claude models carry no date suffix — the previous
+    # "claude-sonnet-4-20250514" was a dated snapshot of a superseded model.
+    llm_model: str = "claude-opus-5"
+    # Thinking depth / token spend. This is a constrained classification into a
+    # 5-action space, not open-ended reasoning, so "low" is the right tier and
+    # keeps 1000s of eval calls affordable. Raise it if decisions look shallow.
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
+    # OpenAI only. Sampling params (temperature/top_p/top_k) were REMOVED on
+    # current Claude models and return a 400 — the Anthropic path must not send
+    # temperature at all. Depth is controlled by llm_effort instead.
     llm_temperature: float = 0.1
-    llm_max_tokens: int = 1024
-    llm_timeout_seconds: float = 10.0
+    # Thinking is on by default on Claude Opus 5 and its tokens count toward
+    # max_tokens, so 1024 risked truncating the JSON mid-object.
+    llm_max_tokens: int = 2048
+    llm_timeout_seconds: float = 30.0
 
     # ── Database ─────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://recovery:recovery@localhost:5432/payment_recovery"
