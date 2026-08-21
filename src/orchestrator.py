@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
 from src.classifier.mapper import ClassifierMapper
+from src.executor.rail_selector import resolve_target_rail
 from src.executor.retry_executor import RetryExecutor
 from src.guardrail.gate import GuardrailGate
 from src.messaging.nudge_generator import NudgeGenerator
@@ -167,6 +168,30 @@ class PaymentRecoveryOrchestrator:
             from src.agent.xgboost_baseline import XGBoostBaseline
             action = XGBoostBaseline().predict(context)
             agent_type = "xgboost"
+
+        # ── Step 6b: Resolve the target rail ──────────────────────────────
+        # Before the guardrail, so Layer 4 validates the action that actually
+        # executes rather than the one the agent first proposed. Every decision
+        # path funnels through here — LLM, LLM-fallback and XGBoost — so this is
+        # the one place it has to hold.
+        if action.action == "switch_rail":
+            resolved = resolve_target_rail(
+                context.method, action.rail, context.failure_class
+            )
+            if resolved != action.rail:
+                # Logged, not silent: the agent's original choice is otherwise
+                # unrecoverable from the ledger, which stores only the rail used.
+                logger.info(
+                    "Rail override: payment=%s agent_chose=%s using=%s (just failed on %s)",
+                    payment_id,
+                    action.rail,
+                    resolved,
+                    context.method,
+                )
+                # None is possible in principle and correct to write: the
+                # guardrail's schema check then rejects the switch outright,
+                # which is the fail-closed answer when there is no rail to move to.
+                action.rail = resolved
 
         # ── Step 7: Idempotency key ───────────────────────────────────────
         # Deterministic by construction: (payment, attempt number) fully
