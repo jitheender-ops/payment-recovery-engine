@@ -15,6 +15,10 @@ import numpy as np
 
 from eval.bank_profiles import get_bank_profile
 
+# Probability multiplier applied per prior failed attempt. Each failure is
+# evidence the blocker is persistent rather than transient.
+RETRY_ATTEMPT_DECAY: float = 0.6
+
 
 class BankResponseSimulator:
     """
@@ -112,14 +116,15 @@ class BankResponseSimulator:
             after_nudge=after_nudge,
         )
 
-        # Retry decay: each subsequent attempt has 0.9x probability
-        retry_decay = 0.9 ** (attempt_number - 1)
-        prob *= retry_decay
+        # Each failed attempt is evidence the blocker is the persistent kind, so
+        # the next attempt is worth materially less. The old 0.9 decay was far too
+        # gentle — it let a dumb 3x retry brute-force its way to a high recovery
+        # rate, which is most of why the baseline looked unbeatable.
+        prob *= RETRY_ATTEMPT_DECAY ** (attempt_number - 1)
 
-        # Delay bonus for bank downtime
-        if failure_class == "bank_downtime" and delay_minutes > 0:
-            delay_bonus = min(delay_minutes / 120.0, 0.3)  # up to 30% bonus
-            prob = min(prob + delay_bonus, 0.95)
+        # NOTE: no additive delay bonus here. Waiting is already priced into
+        # get_success_probability via the downtime recovery curve; adding a second
+        # bonus rewarded the same wait twice.
 
         # Amount penalty
         if amount > 500_000:
