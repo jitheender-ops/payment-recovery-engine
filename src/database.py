@@ -29,7 +29,7 @@ _settings = get_settings()
 
 engine = create_async_engine(
     _settings.database_url,
-    echo=(_settings.app_env == "development"),
+    echo=_settings.sql_echo,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,

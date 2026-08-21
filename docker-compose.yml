@@ -5,9 +5,16 @@ services:
     environment:
       POSTGRES_DB: payment_recovery
       POSTGRES_USER: recovery
-      POSTGRES_PASSWORD: recovery
-    ports:
-      - "5432:5432"
+      # Required — no default. A hardcoded password on a service holding
+      # customer emails, phone numbers and VPAs is a credential published
+      # in source control.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # NOT published to the host. app and dashboard reach Postgres over the
+    # compose network as `postgres:5432`. Publishing "5432:5432" binds to
+    # 0.0.0.0, exposing the payments database to the whole local network.
+    # For ad-hoc psql access, uncomment the loopback-only binding below.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,6 +29,11 @@ services:
       dockerfile: Dockerfile
     container_name: recovery-app
     env_file: .env
+    environment:
+      # Overrides the .env value, which points at localhost — inside a
+      # container that resolves to the container itself, not Postgres.
+      DATABASE_URL: postgresql+asyncpg://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
+      DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:
@@ -37,6 +49,8 @@ services:
       dockerfile: Dockerfile
     container_name: recovery-dashboard
     env_file: .env
+    environment:
+      DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
     ports:
       - "${STREAMLIT_PORT:-8501}:8501"
     depends_on:

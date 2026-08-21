@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: init DB. Shutdown: close connections."""
     logger.info("Starting Payment Recovery Engine (env=%s)", settings.app_env)
+    settings.require_razorpay_credentials()
     await init_db()
     logger.info("Database tables initialized")
     yield

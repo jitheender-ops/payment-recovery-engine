@@ -100,8 +100,11 @@ if page == "Overview":
         st.dataframe(demo_data, use_container_width=True)
 
 elif page == "Recovery Funnel":
-    exec(open("dashboard/pages/recovery_funnel.py").read())
+    from dashboard.pages import recovery_funnel
+    recovery_funnel.render()
 elif page == "Bank Breakdown":
-    exec(open("dashboard/pages/bank_breakdown.py").read())
+    from dashboard.pages import bank_breakdown
+    bank_breakdown.render()
 elif page == "Eval Results":
-    exec(open("dashboard/pages/eval_results.py").read())
+    from dashboard.pages import eval_results
+    eval_results.render()
