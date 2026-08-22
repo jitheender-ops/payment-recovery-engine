@@ -1,0 +1,107 @@
+{
+  "retry_cost_inr": 2.0,
+  "policies": {
+    "No Retry": {
+      "recovery_rate_%": 0.0,
+      "recovery_rate_%_std": 0.0,
+      "retry_cost_avg": 0.0,
+      "retry_cost_avg_std": 0.0,
+      "false_retry_rate_%": 0.0,
+      "false_retry_rate_%_std": 0.0,
+      "time_to_recovery_min": null,
+      "time_to_recovery_min_std": null,
+      "\u20b9_per_\u20b91Cr_failed": 0.0,
+      "\u20b9_per_\u20b91Cr_failed_std": 0.0,
+      "attempts_per_\u20b91Cr": 0.0,
+      "attempts_per_\u20b91Cr_std": 0.0,
+      "net_\u20b9_per_\u20b91Cr_failed": 0.0,
+      "net_\u20b9_per_\u20b91Cr_failed_std": 0.0
+    },
+    "Fixed 3-Retry": {
+      "recovery_rate_%": 19.21,
+      "recovery_rate_%_std": 0.66,
+      "retry_cost_avg": 2.73,
+      "retry_cost_avg_std": 0.01,
+      "false_retry_rate_%": 8.03,
+      "false_retry_rate_%_std": 0.33,
+      "time_to_recovery_min": 15.0,
+      "time_to_recovery_min_std": 0.0,
+      "\u20b9_per_\u20b91Cr_failed": 1849489.0,
+      "\u20b9_per_\u20b91Cr_failed_std": 84214.84,
+      "attempts_per_\u20b91Cr": 26872.8,
+      "attempts_per_\u20b91Cr_std": 485.17,
+      "net_\u20b9_per_\u20b91Cr_failed": 1795743.6,
+      "net_\u20b9_per_\u20b91Cr_failed_std": 83842.82
+    },
+    "XGBoost/Rules": {
+      "recovery_rate_%": 27.43,
+      "recovery_rate_%_std": 0.58,
+      "retry_cost_avg": 2.37,
+      "retry_cost_avg_std": 0.01,
+      "false_retry_rate_%": 0.0,
+      "false_retry_rate_%_std": 0.0,
+      "time_to_recovery_min": 0.0,
+      "time_to_recovery_min_std": 0.0,
+      "\u20b9_per_\u20b91Cr_failed": 2699581.2,
+      "\u20b9_per_\u20b91Cr_failed_std": 156655.88,
+      "attempts_per_\u20b91Cr": 23353.6,
+      "attempts_per_\u20b91Cr_std": 456.08,
+      "net_\u20b9_per_\u20b91Cr_failed": 2652874.0,
+      "net_\u20b9_per_\u20b91Cr_failed_std": 156580.77
+    }
+  },
+  "paired_vs_baseline": {
+    "No Retry": {
+      "recovery_rate_pp": {
+        "mean_delta": -19.212,
+        "ci95_halfwidth": 0.488,
+        "ci95": [
+          -19.7,
+          -18.724
+        ],
+        "n_paired": 25000,
+        "significant": true
+      },
+      "retry_cost": {
+        "mean_delta": -2.729,
+        "ci95_halfwidth": 0.008,
+        "ci95": [
+          -2.737,
+          -2.721
+        ],
+        "n_paired": 25000,
+        "significant": true
+      }
+    },
+    "XGBoost/Rules": {
+      "recovery_rate_pp": {
+        "mean_delta": 8.22,
+        "ci95_halfwidth": 0.452,
+        "ci95": [
+          7.768,
+          8.672
+        ],
+        "n_paired": 25000,
+        "significant": true
+      },
+      "retry_cost": {
+        "mean_delta": -0.357,
+        "ci95_halfwidth": 0.012,
+        "ci95": [
+          -0.369,
+          -0.346
+        ],
+        "n_paired": 25000,
+        "significant": true
+      }
+    }
+  },
+  "economics_vs_baseline": {
+    "XGBoost/Rules": {
+      "delta_revenue_per_crore": 850092.0,
+      "delta_attempts_per_crore": -3519.0,
+      "break_even_cost_per_retry_inr": null,
+      "verdict": "dominates at any retry cost (incl. \u20b90)"
+    }
+  }
+}

@@ -1,0 +1,230 @@
+# Razorpay error code → failure class mapping rules.
+# Matched in priority order (highest first). First match wins.
+# Uses Razorpay's 5-tuple: (error_code, error_source, error_step, error_reason, description_pattern)
+
+rules:
+  # ── Fraud / Hard Decline (highest priority) ──────────────────────────
+  - error_reason: "payment_risk_check_failed"
+    failure_class: "fraud_block"
+    retryable: false
+    priority: 100
+
+  - error_reason: "card_stolen"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 100
+
+  - error_reason: "card_blocked"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 100
+
+  - error_reason: "account_closed"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 100
+
+  - error_reason: "do_not_honor"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 95
+
+  # ── Customer Cancelled ────────────────────────────────────────────────
+  - error_reason: "payment_cancelled"
+    failure_class: "customer_cancelled"
+    retryable: false
+    priority: 90
+
+  - error_reason: "payment_cancelled_by_customer"
+    failure_class: "customer_cancelled"
+    retryable: false
+    priority: 90
+
+  # ── Invalid / Expired Instrument ─────────────────────────────────────
+  - error_reason: "invalid_card_details"
+    failure_class: "invalid_card"
+    retryable: false
+    priority: 85
+
+  - error_reason: "invalid_card_number"
+    failure_class: "invalid_card"
+    retryable: false
+    priority: 85
+
+  - error_reason: "invalid_cvv"
+    failure_class: "invalid_card"
+    retryable: false
+    priority: 85
+
+  - error_reason: "card_expired"
+    failure_class: "expired_instrument"
+    retryable: false
+    priority: 85
+
+  - error_reason: "card_not_activated"
+    failure_class: "expired_instrument"
+    retryable: false
+    priority: 85
+
+  # ── 3DS / Authentication Drop-off ────────────────────────────────────
+  - error_reason: "invalid_otp"
+    error_step: "payment_authentication"
+    failure_class: "3ds_dropoff"
+    retryable: true
+    priority: 80
+
+  - error_reason: "otp_timeout"
+    error_step: "payment_authentication"
+    failure_class: "3ds_dropoff"
+    retryable: true
+    priority: 80
+
+  - error_reason: "3ds_authentication_failed"
+    failure_class: "3ds_dropoff"
+    retryable: true
+    priority: 80
+
+  - error_reason: "authentication_failed"
+    error_step: "payment_authentication"
+    failure_class: "3ds_dropoff"
+    retryable: true
+    priority: 80
+
+  # ── Insufficient Funds ───────────────────────────────────────────────
+  - error_reason: "insufficient_funds"
+    failure_class: "insufficient_funds"
+    retryable: true
+    priority: 75
+
+  - error_reason: "insufficient_balance"
+    failure_class: "insufficient_funds"
+    retryable: true
+    priority: 75
+
+  # ── Card Limit Exceeded ──────────────────────────────────────────────
+  - error_reason: "card_limit_exceeded"
+    failure_class: "card_limit_exceeded"
+    retryable: true
+    priority: 75
+
+  - error_reason: "daily_limit_exceeded"
+    failure_class: "card_limit_exceeded"
+    retryable: true
+    priority: 75
+
+  - error_reason: "transaction_limit_exceeded"
+    failure_class: "card_limit_exceeded"
+    retryable: true
+    priority: 75
+
+  # ── UPI Collect Timeout ──────────────────────────────────────────────
+  - error_reason: "upi_collect_timeout"
+    failure_class: "upi_collect_timeout"
+    retryable: true
+    priority: 70
+
+  - error_reason: "vpa_not_found"
+    failure_class: "invalid_card"
+    retryable: false
+    priority: 70
+
+  # ── Payment Timeout ──────────────────────────────────────────────────
+  - error_reason: "payment_timed_out"
+    failure_class: "payment_timeout"
+    retryable: true
+    priority: 65
+
+  - error_reason: "timeout"
+    failure_class: "payment_timeout"
+    retryable: true
+    priority: 65
+
+  # ── Bank / Issuer Downtime ───────────────────────────────────────────
+  - error_reason: "issuer_down"
+    failure_class: "bank_downtime"
+    retryable: true
+    priority: 60
+
+  - error_reason: "bank_technical_error"
+    failure_class: "bank_downtime"
+    retryable: true
+    priority: 60
+
+  - error_reason: "bank_unavailable"
+    failure_class: "bank_downtime"
+    retryable: true
+    priority: 60
+
+  - error_reason: "psp_error"
+    failure_class: "bank_downtime"
+    retryable: true
+    priority: 60
+
+  # ── Issuer Decline (generic) ─────────────────────────────────────────
+  - error_reason: "issuer_decline"
+    failure_class: "issuer_decline"
+    retryable: true
+    priority: 55
+
+  - error_reason: "declined_by_issuer"
+    failure_class: "issuer_decline"
+    retryable: true
+    priority: 55
+
+  # ── Network / Gateway Errors ─────────────────────────────────────────
+  - error_code: "GATEWAY_ERROR"
+    error_source: "gateway"
+    failure_class: "network_error"
+    retryable: true
+    priority: 40
+
+  - error_code: "SERVER_ERROR"
+    error_source: "razorpay"
+    failure_class: "network_error"
+    retryable: true
+    priority: 40
+
+  - error_code: "SERVER_ERROR"
+    error_source: "internal"
+    failure_class: "network_error"
+    retryable: true
+    priority: 40
+
+  # ── Business Errors (non-retryable config issues) ────────────────────
+  - error_reason: "international_cards_not_supported"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
+
+  - error_reason: "upi_not_enabled"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
+
+  - error_reason: "bank_not_enabled"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
+
+  # ── Broad error_code fallbacks (lowest priority) ─────────────────────
+  - error_code: "BAD_REQUEST_ERROR"
+    error_source: "customer"
+    failure_class: "issuer_decline"
+    retryable: true
+    priority: 10
+
+  - error_code: "BAD_REQUEST_ERROR"
+    error_source: "business"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 10
+
+  - error_code: "GATEWAY_ERROR"
+    failure_class: "network_error"
+    retryable: true
+    priority: 5
+
+  - error_code: "SERVER_ERROR"
+    failure_class: "network_error"
+    retryable: true
+    priority: 5
