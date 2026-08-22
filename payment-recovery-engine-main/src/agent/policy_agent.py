@@ -40,11 +40,19 @@ class PolicyAgent:
         # so a union type here would need a cast at every call site.
         self._client: Any
         if self._provider == "anthropic":
-            import anthropic
-            self._client = anthropic.AsyncAnthropic(
-                api_key=reveal(settings.anthropic_api_key),
-                timeout=self._timeout,
-            )
+            if settings.aws_access_key_id and settings.aws_secret_access_key:
+                from anthropic import AsyncAnthropicBedrock
+                self._client = AsyncAnthropicBedrock(
+                    aws_access_key=reveal(settings.aws_access_key_id),
+                    aws_secret_key=reveal(settings.aws_secret_access_key),
+                    aws_region=settings.aws_region,
+                )
+            else:
+                import anthropic
+                self._client = anthropic.AsyncAnthropic(
+                    api_key=reveal(settings.anthropic_api_key),
+                    timeout=self._timeout,
+                )
         elif self._provider == "openai":
             import openai
             self._client = openai.AsyncOpenAI(

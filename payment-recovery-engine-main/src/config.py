@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     llm_provider: Literal["anthropic", "openai"] = "anthropic"
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
+    
+    # AWS Bedrock Support
+    aws_access_key_id: SecretStr | None = None
+    aws_secret_access_key: SecretStr | None = None
+    aws_region: str = "us-east-1"
     # Any OpenAI-compatible endpoint. Set this to use OpenRouter, Together,
     # Groq, a local Ollama/vLLM server, etc. through the existing "openai"
     # provider branch — the wire format is identical, only the host differs.
