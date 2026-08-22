@@ -1,3 +1,9 @@
+# Frozen from Python 3.13. pip ignores these comment lines.
+#
+# Pins below can carry a MINIMUM Python of their own (numpy 2.5 needs
+# >=3.12), so anything installing this file must use a matching
+# interpreter. The Dockerfile pins the same version deliberately; CI
+# resolves from pyproject.toml on any other version instead.
 alembic==1.19.1
 altair==6.2.2
 annotated-doc==0.0.5

@@ -151,7 +151,16 @@ else
     "$VPY" -m pip install --quiet -e ".[dev]" || { restore; die "install failed — is PyPI reachable?"; }
     # Written from what actually installed. Hand-authored pins would be guesses;
     # these are the exact versions this build was verified against.
-    "$VPY" -m pip freeze --exclude-editable > requirements.lock.txt
+    # The interpreter goes in the file. A bare freeze is silently tied to
+    # whatever Python produced it — pins like numpy 2.5 require >=3.12 — and
+    # the Dockerfile and CI both install from here. Recording it is what makes
+    # the mismatch findable instead of a build failure three layers down.
+    {
+      printf '# Frozen from Python %s. pip ignores these comment lines.\n' \
+        "$("$VPY" -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+      printf '#\n# Anything installing this file must use a matching interpreter.\n'
+      "$VPY" -m pip freeze --exclude-editable
+    } > requirements.lock.txt
     ok "wrote requirements.lock.txt — commit it to pin future builds"
   fi
   probe || { restore; die "install finished but imports still do not resolve inside .venv"; }
@@ -215,12 +224,38 @@ ok "pytest"
 ok "mypy --strict"
 "$VPY" scripts/seed_error_codes.py >/dev/null && ok "error-code taxonomy validated"
 
+# The XGBoost baseline needs a trained model or it silently runs the rule
+# heuristic instead — which is the state the repo shipped in, with the README
+# comparing an LLM against a pile of if-statements while calling it XGBoost.
+# The artefact is gitignored (1MB binary), so a fresh clone trains its own.
+MODEL_PATH="${XGBOOST_MODEL_PATH:-models/xgboost_baseline.joblib}"
+if [[ -f "$MODEL_PATH" ]]; then
+  ok "XGBoost model present ($MODEL_PATH)"
+else
+  say "Training XGBoost baseline (no model at $MODEL_PATH)"
+  mkdir -p "$(dirname "$MODEL_PATH")"
+  "$VPY" scripts/train_xgboost.py --n-samples 10000 --output "$MODEL_PATH" >/dev/null 2>&1 \
+    || die "XGBoost training failed"
+  ok "XGBoost model trained"
+fi
+
 if $VERIFY_ONLY; then
   say "Verify-only: clean build confirmed. Nothing started."
   exit 0
 fi
 
-# ── 6. Run ───────────────────────────────────────────────────────────────
+# ── 6. Schema ────────────────────────────────────────────────────────────
+# After the verify-only exit on purpose: this is the one step that needs
+# Postgres, and --verify-only is the CI path that deliberately runs without it.
+#
+# Alembic, not init_db()'s create_all — which is development-only in
+# src/main.py now, and which never added a missing COLUMN anyway, so it was
+# never an upgrade path for a database that already existed.
+say "Applying migrations"
+"$VPY" -m alembic upgrade head || die "alembic upgrade failed"
+ok "schema at head"
+
+# ── 7. Run ───────────────────────────────────────────────────────────────
 PIDS=()
 cleanup() {
   printf '\n'
@@ -262,7 +297,7 @@ else
   ok "starting on :$STREAMLIT_PORT"
 fi
 
-# ── 7. Public URL ────────────────────────────────────────────────────────
+# ── 8. Public URL ────────────────────────────────────────────────────────
 # ngrok if it is already authed (its URL is readable from the local API);
 # otherwise cloudflared, which needs no account.
 PUBLIC_URL=""
@@ -295,7 +330,7 @@ if $TUNNEL; then
   [[ -n "$PUBLIC_URL" ]] && ok "$PUBLIC_URL" || warn "tunnel did not report a URL — see .ngrok.log / .cloudflared.log"
 fi
 
-# ── 8. Where things are ──────────────────────────────────────────────────
+# ── 9. Where things are ──────────────────────────────────────────────────
 # The docs trio only exists when APP_ENV=development (src/main.py decides it at
 # FastAPI() construction), so printing the URL unconditionally would advertise a
 # 404 — and under a tunnel it advertises a public route enumeration.

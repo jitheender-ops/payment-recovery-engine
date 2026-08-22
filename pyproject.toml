@@ -57,6 +57,11 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
+    # The test harness runs the real schema over a throwaway SQLite file
+    # (tests/conftest.py) so DB-touching code needs no Postgres. Undeclared
+    # until now, which meant every DB test errored on a venv built from this
+    # file alone — the suite only passed where aiosqlite happened to be present.
+    "aiosqlite>=0.20.0",
 ]
 
 [build-system]
@@ -89,8 +94,13 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "src/classifier/taxonomy.py" = ["UP042"]
 
 [tool.mypy]
-python_version = "3.11"
 strict = true
+# No python_version pin. It used to say "3.11", which is below what numpy's
+# bundled stubs parse (they use PEP 695 `type` statements, 3.12+) — so mypy
+# aborted on the stub with "errors prevented further checking" and type-checked
+# nothing at all. A gate that exits non-zero having inspected zero files reads
+# as a strict gate and is the opposite. Unpinned, mypy uses the interpreter the
+# venv was built with, which is the one the code actually runs on.
 
 # No published type stubs installed for these. pandas-stubs / types-tabulate /
 # types-PyYAML would remove this block if added to the dev extra.
