@@ -10,6 +10,7 @@ build/
 
 # Virtual environments
 .venv/
+.venv.bak/
 venv/
 env/
 
@@ -20,9 +21,10 @@ env/
 *.swo
 *~
 
-# Environment
+# Environment — any .env variant, incl. editor/script backups
 .env
-.env.local
+.env.*
+!.env.example
 
 # Database
 *.db

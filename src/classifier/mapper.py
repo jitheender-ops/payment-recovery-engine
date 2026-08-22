@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import yaml
 
@@ -33,7 +33,7 @@ class ClassifierMapper:
         with open(path) as f:
             data = yaml.safe_load(f)
 
-        self._rules: list[dict] = sorted(
+        self._rules: list[dict[str, Any]] = sorted(
             data.get("rules", []),
             key=lambda r: r.get("priority", 0),
             reverse=True,
@@ -43,10 +43,10 @@ class ClassifierMapper:
     def classify(
         self,
         error_code: str,
-        error_description: Optional[str] = None,
-        error_source: Optional[str] = None,
-        error_step: Optional[str] = None,
-        error_reason: Optional[str] = None,
+        error_description: str | None = None,
+        error_source: str | None = None,
+        error_step: str | None = None,
+        error_reason: str | None = None,
     ) -> tuple[FailureClass, bool]:
         """
         Classify a payment failure based on Razorpay error fields.
@@ -95,11 +95,11 @@ class ClassifierMapper:
 
     @staticmethod
     def _matches(
-        rule: dict,
+        rule: dict[str, Any],
         error_code: str,
-        error_source: Optional[str],
-        error_step: Optional[str],
-        error_reason: Optional[str],
+        error_source: str | None,
+        error_step: str | None,
+        error_reason: str | None,
     ) -> bool:
         """Check if all fields specified in a rule match the input."""
         if "error_reason" in rule:

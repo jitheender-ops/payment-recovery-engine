@@ -7,10 +7,10 @@ Indian checkout success rates sit in the high 80s. Every failed payment is real,
 ## 📊 Headline Result
 
 ```
-Run: python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
+Run: .venv/bin/python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
 ```
 
-> **₹8.5L additional net revenue per ₹1Cr of failed volume vs. a fixed 3-retry
+> **₹8.57L additional net revenue per ₹1Cr of failed volume vs. a fixed 3-retry
 > baseline, at 13% fewer retry attempts and zero false retries.**
 
 5,000 scenarios × 5 seeds (mean ± σ). These are the exact contents of
@@ -107,50 +107,87 @@ This is the first question a fintech panel will ask. Here's the answer:
 
 ## 🚀 Quick Start
 
-### Without Docker
 ```bash
-# Clone and install
-git clone <repo-url> && cd payment-recovery-engine
-pip install -e ".[dev]"
-
-# Configure
-cp .env.example .env
-# Edit .env with your Razorpay test-mode keys and LLM API key
-
-# Start Postgres (or use Docker just for the DB)
-docker run -d --name recovery-pg -p 5432:5432 \
-  -e POSTGRES_DB=payment_recovery \
-  -e POSTGRES_USER=recovery \
-  -e POSTGRES_PASSWORD=recovery \
-  postgres:15-alpine
-
-# Run the API
-uvicorn src.main:app --reload
-
-# Run the dashboard (separate terminal)
-streamlit run dashboard/app.py
+cp .env.example .env    # fill in your Razorpay test keys + LLM key
+./run.sh
 ```
+
+That is the whole thing. `run.sh` builds a clean isolated venv, installs
+dependencies, creates the Postgres role and database if they don't exist, runs
+`ruff` + `pytest` + `mypy --strict`, starts the API and the dashboard, and opens
+a public tunnel — then prints the webhook URL to paste into Razorpay:
+
+```
+  API          http://127.0.0.1:8000
+  API docs     http://127.0.0.1:8000/docs
+  Dashboard    http://127.0.0.1:8501  (password from .env)
+  Public URL   https://<random>.trycloudflare.com
+
+  Paste this into the Razorpay dashboard → Settings → Webhooks:
+    https://<random>.trycloudflare.com/webhooks/razorpay
+```
+
+It refuses to expose anything until the three checks pass, so a green public URL
+means the build is actually clean. Ctrl-C stops everything.
+
+**Two things are gated, because the tunnel is public:**
+
+- **The dashboard** needs `DASHBOARD_PASSWORD`. Leave it blank and `run.sh`
+  generates one into `.env` and prints it once. It reads live payment data, and
+  Streamlit binds a port like anything else.
+- **`/docs`, `/redoc` and `/openapi.json`** exist only when
+  `APP_ENV=development` — they enumerate every route and schema. Set
+  `APP_ENV=staging` and `API_KEY` to close them; `/openapi.json` then needs
+  `X-API-Key`. `run.sh` warns if you leave them open under a live tunnel.
+
+| | |
+|---|---|
+| `./run.sh --verify-only` | build + all three checks, start nothing (this is the CI command — needs no Postgres) |
+| `./run.sh --no-tunnel` | run locally without a public URL |
+| `PY=python3.12 ./run.sh` | pin the interpreter, when `python3` isn't the one with working wheels |
+
+**Requirements:** Python ≥ 3.11, Postgres (`brew services start postgresql@15`
+or `docker compose up -d postgres`), and `cloudflared` or `ngrok` for the public
+URL. Everything else the script installs itself.
+
+**On the venv:** the build is isolated on purpose — no `--system-site-packages`.
+The script verifies this by checking that imports resolve to files *inside*
+`.venv`, not merely that they import. A venv built with system site-packages
+passes a plain `import fastapi` while owning nothing, so `pip freeze` writes a
+lockfile of packages it doesn't have and a clean machine gets `ImportError` at
+startup. If it finds such a venv it rebuilds it, and restores the old one if the
+rebuild can't reach PyPI.
+
+**On the lockfile:** the first successful build writes `requirements.lock.txt`
+from what actually installed, and later builds install from it. Commit it — the
+pins are then the exact versions the checks passed against, rather than guesses.
 
 ### With Docker Compose
+
 ```bash
-cp .env.example .env  # fill in your keys
+cp .env.example .env    # fill in your keys, incl. POSTGRES_PASSWORD
 docker compose up
 ```
+
+Compose has no public tunnel and no verify step — it's the plain local stack.
+Note it does **not** publish Postgres' port: the app reaches it over the compose
+network, because binding 5432 to `0.0.0.0` would expose a database holding
+customer emails, phone numbers and VPAs to the whole local network.
 
 ## 📈 Run the Eval Harness
 
 ```bash
 # Fast mode — no API keys needed, uses XGBoost/rule-based policies
-python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
+.venv/bin/python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
 
-# Full mode — includes LLM policy (requires ANTHROPIC_API_KEY)
-python -m eval.runner --scenarios 5000 --seeds 5
+# Full mode — includes LLM policy (requires an LLM key in .env)
+.venv/bin/python -m eval.runner --scenarios 5000 --seeds 5
 
 # Train XGBoost baseline
-python scripts/train_xgboost.py --n-samples 10000
+.venv/bin/python scripts/train_xgboost.py --n-samples 10000
 
-# Simulate webhooks
-python scripts/simulate_webhooks.py --count 20
+# Simulate webhooks against the running API
+.venv/bin/python scripts/simulate_webhooks.py --count 20
 ```
 
 ## 📁 Project Structure
@@ -173,6 +210,7 @@ python scripts/simulate_webhooks.py --count 20
 ├── dashboard/            # Streamlit dashboard
 ├── tests/                # Pytest test suite
 ├── scripts/              # Utility scripts
+├── run.sh                # One command: clean build → verify → run → public URL
 └── docs/                 # Architecture, failure cases, eval methodology
 ```
 
