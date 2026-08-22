@@ -45,5 +45,19 @@ Thumbs.db
 # Docker
 *.log
 
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
 # Jupyter
 .ipynb_checkpoints/
+
+# A downloaded zip of this repo extracted inside itself. Committed once by
+# accident (108 files, identical to the root) and it broke ruff and mypy with
+# duplicate-module errors until it was removed.
+payment-recovery-engine-main/
+*-main/
+
+# Machine-local Claude Code settings — not shared config.
+.claude/settings.local.json
