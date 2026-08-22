@@ -57,8 +57,11 @@ def upgrade() -> None:
             sa.Column("razorpay_event_id", sa.String(255), nullable=False),
             sa.Column("event_type", sa.String(100), nullable=False),
             sa.Column("payload", JSON_TYPE, nullable=False),
-            sa.Column("received_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-            sa.Column("processed", sa.Boolean(), server_default=sa.false()),
+            sa.Column(
+                "received_at", sa.DateTime(timezone=True),
+                server_default=sa.func.now(), nullable=False,
+            ),
+            sa.Column("processed", sa.Boolean(), server_default=sa.false(), nullable=False),
             sa.Column("processing_error", sa.Text(), nullable=True),
         )
         op.create_index(
@@ -73,7 +76,10 @@ def upgrade() -> None:
             "processed_events",
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
             sa.Column("razorpay_event_id", sa.String(255), nullable=False),
-            sa.Column("processed_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+            sa.Column(
+                "processed_at", sa.DateTime(timezone=True),
+                server_default=sa.func.now(), nullable=False,
+            ),
             # The webhook dedup guarantee. The fast-path SELECT cannot close the
             # window between "not found" and "inserted"; this constraint is what
             # actually decides a race between two deliveries.
@@ -87,7 +93,7 @@ def upgrade() -> None:
             sa.Column("payment_id", sa.String(255), nullable=False),
             sa.Column("order_id", sa.String(255), nullable=True),
             sa.Column("amount", sa.Integer(), nullable=False),  # paise
-            sa.Column("currency", sa.String(10), server_default="INR"),
+            sa.Column("currency", sa.String(10), server_default="INR", nullable=False),
             sa.Column("method", sa.String(50), nullable=False),
             sa.Column("bank", sa.String(100), nullable=True),
             sa.Column("wallet", sa.String(100), nullable=True),
@@ -106,7 +112,10 @@ def upgrade() -> None:
             sa.Column("customer_contact", sa.String(20), nullable=True),
             sa.Column("webhook_event_id", UUID_TYPE, nullable=False),
             sa.Column("failed_at", sa.DateTime(timezone=True), nullable=False),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+            sa.Column(
+                "created_at", sa.DateTime(timezone=True),
+                server_default=sa.func.now(), nullable=False,
+            ),
         )
         op.create_index("ix_payment_failures_payment_id", "payment_failures", ["payment_id"])
         op.create_index("ix_payment_failures_order_id", "payment_failures", ["order_id"])
@@ -132,7 +141,7 @@ def upgrade() -> None:
             sa.Column("target_rail", sa.String(50), nullable=True),
             sa.Column("scheduled_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("agent_reasoning", sa.Text(), nullable=True),
-            sa.Column("agent_type", sa.String(20), server_default="llm"),
+            sa.Column("agent_type", sa.String(20), server_default="llm", nullable=False),
             sa.Column("agent_confidence", sa.Float(), nullable=True),
             sa.Column("guardrail_passed", sa.Boolean(), nullable=False),
             sa.Column("guardrail_rejection_reason", sa.Text(), nullable=True),
@@ -140,8 +149,11 @@ def upgrade() -> None:
             sa.Column("result", sa.String(50), nullable=True),
             sa.Column("result_details", JSON_TYPE, nullable=True),
             sa.Column("nudge_message", sa.Text(), nullable=True),
-            sa.Column("nudge_sent", sa.Boolean(), server_default=sa.false()),
-            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+            sa.Column("nudge_sent", sa.Boolean(), server_default=sa.false(), nullable=False),
+            sa.Column(
+                "created_at", sa.DateTime(timezone=True),
+                server_default=sa.func.now(), nullable=False,
+            ),
         )
         op.create_index("ix_retry_attempts_payment_id", "retry_attempts", ["payment_id"])
         op.create_index(
@@ -153,9 +165,14 @@ def upgrade() -> None:
         op.create_table(
             "retry_ledger",
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-            sa.Column("customer_id", sa.String(255), nullable=False, unique=True),
-            sa.Column("total_retries_24h", sa.Integer(), server_default="0"),
-            sa.Column("total_nudges_24h", sa.Integer(), server_default="0"),
+            # One row per customer is the invariant the rate limits rest on, and
+            # it is enforced by the unique INDEX below, not a table constraint —
+            # the model says `unique=True, index=True`, which SQLAlchemy renders
+            # as a single unique index. Declaring both here produced an extra
+            # unnamed UNIQUE that a create_all database does not have.
+            sa.Column("customer_id", sa.String(255), nullable=False),
+            sa.Column("total_retries_24h", sa.Integer(), server_default="0", nullable=False),
+            sa.Column("total_nudges_24h", sa.Integer(), server_default="0", nullable=False),
             sa.Column("last_retry_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("last_nudge_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("blocked_until", sa.DateTime(timezone=True), nullable=True),

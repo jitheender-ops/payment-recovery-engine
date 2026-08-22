@@ -48,6 +48,13 @@ def _needs_column(table: str, column: str) -> bool:
     return column not in {c["name"] for c in inspector.get_columns(table)}
 
 
+def _has_index(table: str, index: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if table not in inspector.get_table_names():
+        return False
+    return index in {i["name"] for i in inspector.get_indexes(table)}
+
+
 def _has_column(table: str, column: str) -> bool:
     inspector = sa.inspect(op.get_bind())
     if table not in inspector.get_table_names():
@@ -66,7 +73,7 @@ def upgrade() -> None:
             sa.Column("subject_ref", sa.String(255), nullable=False),
             sa.Column("customer_id", sa.String(255), nullable=True),
             sa.Column("amount_at_risk", sa.Integer(), nullable=False),
-            sa.Column("currency", sa.String(10), nullable=True, server_default="INR"),
+            sa.Column("currency", sa.String(10), nullable=False, server_default="INR"),
             sa.Column(
                 "amount_recovered", sa.Integer(), nullable=False, server_default="0"
             ),
@@ -89,13 +96,13 @@ def upgrade() -> None:
             sa.Column(
                 "opened_at",
                 sa.DateTime(timezone=True),
-                nullable=True,
+                nullable=False,
                 server_default=sa.func.now(),
             ),
             sa.Column(
                 "updated_at",
                 sa.DateTime(timezone=True),
-                nullable=True,
+                nullable=False,
                 server_default=sa.func.now(),
             ),
             # Re-ingesting one failure must find the existing case. Two cases for
@@ -163,6 +170,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Indexes before their columns. Postgres cascades an index drop when the
+    # column it covers goes away; SQLite does not, and fails the DROP COLUMN
+    # with "error in index ix_retry_attempts_external_ref after drop column".
+    # This was invisible until the test harness started applying migrations on
+    # SQLite — the Postgres-only check this was originally verified against
+    # cannot see it.
+    for table, index in (
+        ("retry_attempts", "ix_retry_attempts_external_ref"),
+        ("retry_attempts", "ix_retry_attempts_case"),
+    ):
+        if _has_index(table, index):
+            op.drop_index(index, table_name=table)
+
     for table, column in (
         ("retry_ledger", "updated_at"),
         ("retry_ledger", "opted_out_at"),

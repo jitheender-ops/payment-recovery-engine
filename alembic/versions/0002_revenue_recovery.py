@@ -29,6 +29,12 @@ down_revision = "0001_recovery_cases"
 branch_labels = None
 depends_on = None
 
+# Same variants as 0000. Postgres is what deploys; SQLite is what CI can reach
+# without a service container, and CI is the only place the empty-database path
+# gets tested — which is the path that shipped broken.
+JSON_TYPE = postgresql.JSONB().with_variant(sa.JSON(), "sqlite")
+UUID_TYPE = postgresql.UUID(as_uuid=True).with_variant(sa.Uuid(), "sqlite")
+
 
 def _has_table(name: str) -> bool:
     return name in sa.inspect(op.get_bind()).get_table_names()
@@ -56,19 +62,24 @@ def upgrade() -> None:
     # ── The unblocker ────────────────────────────────────────────────────
     # Dropping NOT NULL, not adding it, so this is safe on populated data: every
     # existing row keeps its payment id, and only the new risk types write NULL.
-    for column in ("payment_failure_id", "payment_id"):
-        col = _column("retry_attempts", column)
-        if col is not None and not col.get("nullable", True):
-            op.alter_column(
-                "retry_attempts",
-                column,
-                existing_type=(
-                    postgresql.UUID(as_uuid=True)
-                    if column == "payment_failure_id"
-                    else sa.String(255)
-                ),
-                nullable=True,
-            )
+    to_relax = [
+        (name, coltype)
+        for name, coltype in (
+            ("payment_failure_id", UUID_TYPE),
+            ("payment_id", sa.String(255)),
+        )
+        if (col := _column("retry_attempts", name)) is not None
+        and not col.get("nullable", True)
+    ]
+    if to_relax:
+        # batch_alter_table rather than a bare alter_column: SQLite has no
+        # ALTER COLUMN at all, so alembic recreates the table there and emits the
+        # ordinary ALTER on Postgres. A bare alter_column made the whole chain
+        # unrunnable on the only database CI can reach without a service
+        # container — which is why the empty-database path shipped untested.
+        with op.batch_alter_table("retry_attempts") as batch:
+            for name, coltype in to_relax:
+                batch.alter_column(name, existing_type=coltype, nullable=True)
 
     # ── Outreach channel, for per-channel contact limits ─────────────────
     if _needs_column("retry_attempts", "channel"):
@@ -96,14 +107,14 @@ def upgrade() -> None:
     if not _has_table("promises_to_pay"):
         op.create_table(
             "promises_to_pay",
-            sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False),
-            sa.Column("recovery_case_id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column("id", UUID_TYPE, primary_key=True, nullable=False),
+            sa.Column("recovery_case_id", UUID_TYPE, nullable=False),
             sa.Column("customer_id", sa.String(255), nullable=True),
             sa.Column("amount_promised", sa.Integer(), nullable=False),
             sa.Column(
                 "promised_at",
                 sa.DateTime(timezone=True),
-                nullable=True,
+                nullable=False,
                 server_default=sa.func.now(),
             ),
             sa.Column("due_at", sa.DateTime(timezone=True), nullable=False),
@@ -117,7 +128,7 @@ def upgrade() -> None:
             sa.Column(
                 "created_at",
                 sa.DateTime(timezone=True),
-                nullable=True,
+                nullable=False,
                 server_default=sa.func.now(),
             ),
         )
@@ -133,14 +144,14 @@ def upgrade() -> None:
         op.create_table(
             "case_events",
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-            sa.Column("recovery_case_id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column("recovery_case_id", UUID_TYPE, nullable=False),
             sa.Column("event_type", sa.String(40), nullable=False),
             sa.Column("actor", sa.String(40), nullable=False, server_default="system"),
-            sa.Column("detail", postgresql.JSONB(), nullable=True),
+            sa.Column("detail", JSON_TYPE, nullable=True),
             sa.Column(
                 "created_at",
                 sa.DateTime(timezone=True),
-                nullable=True,
+                nullable=False,
                 server_default=sa.func.now(),
             ),
         )
@@ -172,12 +183,17 @@ def downgrade() -> None:
     # Restoring NOT NULL fails outright if any non-payment attempt was written.
     # Left as a hard error rather than deleting those rows: they are attempts
     # against real money, and a downgrade must not quietly destroy them.
-    for column, coltype in (
-        ("payment_id", sa.String(255)),
-        ("payment_failure_id", postgresql.UUID(as_uuid=True)),
-    ):
-        col = _column("retry_attempts", column)
-        if col is not None and col.get("nullable", False):
-            op.alter_column(
-                "retry_attempts", column, existing_type=coltype, nullable=False
-            )
+    to_restore = [
+        (name, coltype)
+        for name, coltype in (
+            ("payment_id", sa.String(255)),
+            ("payment_failure_id", UUID_TYPE),
+        )
+        if (col := _column("retry_attempts", name)) is not None
+        and col.get("nullable", False)
+    ]
+    if to_restore:
+        # Batch mode for the same reason as upgrade(): SQLite has no ALTER COLUMN.
+        with op.batch_alter_table("retry_attempts") as batch:
+            for name, coltype in to_restore:
+                batch.alter_column(name, existing_type=coltype, nullable=False)
