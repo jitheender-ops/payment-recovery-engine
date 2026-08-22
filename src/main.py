@@ -7,6 +7,7 @@ Run with: uvicorn src.main:app --reload
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI
 
+from src import scheduler
 from src.auth import require_api_key
 from src.config import get_settings
 from src.database import close_db, init_db
@@ -28,14 +30,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# asyncio holds only a weak reference to a running task, so a bare local would
+# be collectable mid-await. The set is what keeps the scheduler alive.
+_background: set[asyncio.Task[None]] = set()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Startup: init DB. Shutdown: close connections."""
+    """Startup: init DB, start the scheduler. Shutdown: stop both."""
     logger.info("Starting Payment Recovery Engine (env=%s)", settings.app_env)
     settings.require_razorpay_credentials()
-    await init_db()
-    logger.info("Database tables initialized")
+    # create_all only in development. It creates missing TABLES and silently
+    # ignores missing COLUMNS, so on any database that predates a model change
+    # it "succeeds" and the first write to the money path fails with
+    # UndefinedColumn. Everywhere else the schema is Alembic's job, applied
+    # before the process starts (docker-entrypoint.sh, run.sh).
+    if settings.app_env == "development":
+        await init_db()
+        logger.info("Database tables initialized (create_all — development only)")
+    else:
+        logger.info(
+            "Skipping create_all (env=%s) — schema is expected to be at "
+            "alembic head. Run 'alembic upgrade head' if startup fails on a "
+            "missing column.",
+            settings.app_env,
+        )
+    # Fires deferred retry_at attempts, reconciles webhook events whose
+    # BackgroundTask never ran, and expires promises to pay. Without it all
+    # three are written to the database and never acted on.
+    task = scheduler.start(_background)
     yield
+    await scheduler.stop(task)
     await close_db()
     logger.info("Shutdown complete")
 

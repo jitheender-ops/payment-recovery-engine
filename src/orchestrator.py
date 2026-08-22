@@ -11,16 +11,18 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
+from src.cases import attach_attempt, close_case, log_event, open_case, stop_reason
 from src.classifier.mapper import ClassifierMapper
 from src.executor.rail_selector import resolve_target_rail
 from src.executor.retry_executor import RetryExecutor
 from src.guardrail.gate import GuardrailGate
 from src.messaging.nudge_generator import NudgeGenerator
-from src.models import PaymentFailure, RetryAttempt, RetryLedger, WebhookEvent
+from src.models import PaymentFailure, RecoveryCase, RetryAttempt, RetryLedger, WebhookEvent
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +122,38 @@ class PaymentRecoveryOrchestrator:
             payment_id, failure_class.value, is_retryable,
         )
 
+        # ── Step 3b: Open (or find) the recovery case ─────────────────────
+        # Everything downstream spends this case's budget and credits its
+        # recovered amount. Opening it here rather than after the agent call
+        # means a case exists even for failures we decide not to chase — the
+        # audit trail has to show the ones we declined, not only the ones we
+        # acted on.
+        case = await open_case(
+            session,
+            risk_type="payment_failure",
+            subject_ref=payment_id,
+            amount_at_risk=failure_record.amount,
+            currency=failure_record.currency,
+            customer_id=failure_record.customer_email or failure_record.customer_contact,
+            # A day is the natural batch for live traffic, so batch_summary()
+            # answers "money recovered across a batch" without anyone having to
+            # pass an id. A bulk replay can set its own by opening cases first.
+            batch_id=datetime.now(UTC).strftime("%Y-%m-%d"),
+        )
+
         # ── Step 4: Hard decline fast path ────────────────────────────────
         if failure_class.is_hard_decline:
             logger.info("Hard decline — abandoning without agent call: %s", payment_id)
+            close_case(case, "abandoned", f"hard decline: {failure_class.value}")
+            log_event(
+                session,
+                case,
+                "closed",
+                actor="deterministic",
+                state="abandoned",
+                reason=f"hard decline: {failure_class.value}",
+                error_code=error_code,
+            )
             abandon_key = f"abandon_{payment_id}"
             if await self._attempt_exists(abandon_key, session):
                 logger.info("Abandon already recorded for %s — skipping", payment_id)
@@ -139,7 +170,31 @@ class PaymentRecoveryOrchestrator:
                 guardrail_passed=True,
                 result="skipped",
             )
+            attempt.recovery_case_id = case.id  # not attach_attempt: spends no budget
             session.add(attempt)
+            await session.commit()
+            return
+
+        # ── Step 4b: Stopping rule ────────────────────────────────────────
+        # Ahead of the agent call, so an exhausted or opted-out case costs no
+        # LLM tokens. The guardrail checks the same budget from the attempt
+        # side; this checks it from the case side, which is the one that also
+        # covers cases closed early by opt-out or expiry.
+        stop = stop_reason(case, await self._get_ledger(case.customer_id, session))
+        if stop is not None:
+            logger.info("Case stopped, no further action: payment=%s reason=%s", payment_id, stop)
+            # "deferred" and "stopped" are different facts and the audit has to
+            # keep them apart: one case is waiting out an escalation gap, the
+            # other is finished. Reading both as "we did nothing" is how a
+            # bounded workflow gets mistaken for a broken one.
+            log_event(
+                session,
+                case,
+                "deferred" if stop.startswith("next action not due") else "stopped",
+                reason=stop,
+                attempts_used=case.attempts_used,
+                max_attempts=case.max_attempts,
+            )
             await session.commit()
             return
 
@@ -233,63 +288,51 @@ class PaymentRecoveryOrchestrator:
                 if guardrail_result.rejection_reasons else None
             ),
         )
-
-        nudge_message: str | None = None
+        # Binds the attempt to the case and spends one unit of its budget.
+        # Called for rejected attempts too: a rejection is a decision the case
+        # made, and not counting it lets a payment that keeps tripping the
+        # guardrail re-enter the agent forever.
+        attach_attempt(case, attempt)
 
         if guardrail_result.passed:
-            # ── Step 10: Generate nudge if needed ─────────────────────────
-            if action.action in ("nudge_customer", "switch_rail"):
-                try:
-                    nudge_message = await self._nudge_gen.generate(
-                        failure_class=failure_class.value,
-                        amount=failure_record.amount,
-                        method=failure_record.method,
-                        next_step="Please try again using a different payment method.",
-                        customer_name=None,
-                    )
-                    attempt.nudge_message = nudge_message
-                except Exception:
-                    logger.warning("Nudge generation failed — proceeding without nudge")
-
-            # ── Step 11: Execute ──────────────────────────────────────────
-            if action.action != "abandon":
-                # Write-ahead intent log. This row MUST be committed BEFORE the
-                # Razorpay call, not after it. Recording the attempt afterwards
-                # leaves a window where money has moved and nothing in our
-                # database says so: crash between the API call and the commit and
-                # the attempt vanishes, the count-derived idem_key stays free,
-                # and the next payment.failed for this payment reuses the same
-                # slot and charges the customer a second time.
-                #
-                # Committing first makes the failure mode a recorded unknown
-                # instead of a silent one — the row survives as "pending", it
-                # occupies its attempt slot, and it counts against
-                # max_retries_per_payment so a crash-looping payment stops
-                # rather than being hammered. Resolving a pending row to
-                # success/failed is reconciliation's job, not this path's.
-                attempt.result = "pending"
+            # ── Step 10: Defer, or execute now ────────────────────────────
+            # `retry_at` is the whole point of this branch. It used to fall
+            # through to the executor, which maps retry_at onto the same
+            # _create_payment_link as retry_now — so "retry in 4 hours" created
+            # the link immediately and `scheduled_at` was decorative. The row is
+            # now parked as "scheduled" and src/scheduler.py fires it when the
+            # time comes, re-running the guardrail at that point: the blackout
+            # window, the consent window and the attempt budget can all have
+            # changed in four hours, and the decision to wait is exactly the
+            # decision that outlives its own validation.
+            if action.action == "retry_at" and action.retry_at is not None:
+                attempt.result = "scheduled"
                 session.add(attempt)
-                await session.commit()
+                log_event(
+                    session,
+                    case,
+                    "deferred",
+                    actor=agent_type,
+                    action="retry_at",
+                    scheduled_at=action.retry_at.isoformat(),
+                    reason=action.reason,
+                )
+                await self._update_ledger_and_commit(context.customer_id, action, session)
+                logger.info(
+                    "Retry scheduled: payment=%s at=%s key=%s",
+                    payment_id, action.retry_at.isoformat(), idem_key,
+                )
+                return
 
-                try:
-                    exec_result = await self._executor.execute_retry(
-                        payment_failure=failure_record,
-                        action_type=action.action,
-                        target_rail=action.rail,
-                        idempotency_key=idem_key,
-                        nudge_message=nudge_message,
-                    )
-                    attempt.executed_at = datetime.now(UTC)
-                    attempt.result = "success" if exec_result.get("success") else "failed"
-                    attempt.result_details = exec_result
-                    if nudge_message:
-                        attempt.nudge_sent = exec_result.get("nudge_sent", False)
-                except Exception:
-                    logger.exception("Execution failed for %s", payment_id)
-                    attempt.result = "failed"
-                    attempt.result_details = {"error": "Execution exception"}
-            else:
-                attempt.result = "skipped"
+            await self._execute_and_record(
+                attempt=attempt,
+                case=case,
+                failure_record=failure_record,
+                action=action,
+                idem_key=idem_key,
+                actor=agent_type,
+                session=session,
+            )
         else:
             attempt.result = "rejected"
             logger.warning(
@@ -301,17 +344,151 @@ class PaymentRecoveryOrchestrator:
         # is what persists the abandon / guardrail-rejected rows, which never
         # touch Razorpay and so need no write-ahead.
         session.add(attempt)
-
-        # ── Step 12: Update ledger ────────────────────────────────────────
-        customer_id = context.customer_id
-        if customer_id:
-            await self._update_retry_ledger(customer_id, action, session)
-
-        await session.commit()
+        await self._update_ledger_and_commit(context.customer_id, action, session)
         logger.info(
             "Pipeline complete: payment=%s action=%s guardrail=%s result=%s",
             payment_id, action.action, guardrail_result.passed, attempt.result,
         )
+
+    async def _update_ledger_and_commit(
+        self, customer_id: str | None, action: RetryAction, session: AsyncSession
+    ) -> None:
+        """Step 12 — bump the per-customer rate-limit tally, then commit."""
+        if customer_id:
+            await self._update_retry_ledger(customer_id, action, session)
+        await session.commit()
+
+    async def _execute_and_record(
+        self,
+        *,
+        attempt: RetryAttempt,
+        case: RecoveryCase,
+        failure_record: PaymentFailure,
+        action: RetryAction,
+        idem_key: str,
+        actor: str,
+        session: AsyncSession,
+    ) -> None:
+        """
+        Generate any nudge, write the attempt ahead, call Razorpay, record what
+        happened.
+
+        Shared by the live webhook path and by src/scheduler.py firing a
+        previously deferred `retry_at`. One copy on purpose: this is the block
+        that moves money, and two copies of it would drift — the write-ahead
+        ordering below is a correctness property, not a style choice, and it has
+        to hold on both paths.
+        """
+        payment_id = failure_record.payment_id
+        nudge_message: str | None = None
+
+        if action.action in ("nudge_customer", "switch_rail"):
+            try:
+                nudge_message = await self._nudge_gen.generate(
+                    failure_class=failure_record.failure_class,
+                    amount=failure_record.amount,
+                    method=failure_record.method,
+                    next_step="Please try again using a different payment method.",
+                    customer_name=None,
+                )
+                attempt.nudge_message = nudge_message
+            except Exception:
+                logger.warning("Nudge generation failed — proceeding without nudge")
+
+        if action.action == "abandon":
+            attempt.result = "skipped"
+            return
+
+        # Write-ahead intent log. This row MUST be committed BEFORE the Razorpay
+        # call, not after it. Recording the attempt afterwards leaves a window
+        # where money has moved and nothing in our database says so: crash
+        # between the API call and the commit and the attempt vanishes, the
+        # count-derived idem_key stays free, and the next payment.failed for
+        # this payment reuses the same slot and charges the customer twice.
+        #
+        # Committing first makes the failure mode a recorded unknown instead of
+        # a silent one — the row survives as "pending", it occupies its attempt
+        # slot, and it counts against max_retries_per_payment so a crash-looping
+        # payment stops rather than being hammered. Resolving a pending row to
+        # success/failed is reconciliation's job, not this path's.
+        attempt.result = "pending"
+        session.add(attempt)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Lost the race on retry_attempts.idempotency_key. Two webhooks for
+            # one payment arriving together both counted the same number of
+            # existing attempts, both built the same key, and both passed the
+            # check-before-execute — a TOCTOU the pre-check cannot close on its
+            # own, because the gap between the count and the insert is where the
+            # other transaction commits.
+            #
+            # The UNIQUE constraint is what actually prevents the double charge,
+            # and it fires here, BEFORE Razorpay is called. Catching it turns
+            # what was an unhandled exception (logged as a generic background
+            # failure, with the event left looking dropped) into the same clean
+            # skip the pre-check produces. The winner's attempt is the attempt.
+            await session.rollback()
+            logger.info(
+                "Idempotency race lost on %s — the other worker owns this attempt",
+                idem_key,
+            )
+            return
+
+        try:
+            exec_result = await self._executor.execute_retry(
+                payment_failure=failure_record,
+                action_type=action.action,
+                target_rail=action.rail,
+                idempotency_key=idem_key,
+                nudge_message=nudge_message,
+            )
+            attempt.executed_at = datetime.now(UTC)
+            attempt.result = "success" if exec_result.get("success") else "failed"
+            attempt.result_details = exec_result
+            # The attribution join key. Razorpay returns the Payment Link id
+            # here; when the customer pays it, the capture webhook is the only
+            # place this id and the new payment id appear together. Not
+            # persisting it is what made recovered revenue unattributable.
+            link_id = exec_result.get("payment_link_id")
+            if link_id:
+                attempt.external_ref = str(link_id)
+            if nudge_message:
+                attempt.nudge_sent = exec_result.get("nudge_sent", False)
+            # The channel that actually reached them. A nudge notifies by SMS
+            # and email both; only the first is recorded, which is enough for
+            # per-channel limits and not enough to reconstruct a two-channel
+            # send — split this into its own contacts table if that becomes
+            # the question.
+            channels = exec_result.get("channels") or []
+            attempt.channel = channels[0] if channels else "payment_link"
+
+            if attempt.result == "success" and action.action == "nudge_customer":
+                log_event(
+                    session,
+                    case,
+                    "escalated",
+                    actor=actor,
+                    level=case.escalation_level,
+                    channel=attempt.channel,
+                    next_action_at=(
+                        case.next_action_at.isoformat() if case.next_action_at else None
+                    ),
+                )
+            elif attempt.result == "success":
+                log_event(
+                    session,
+                    case,
+                    "contacted",
+                    actor=actor,
+                    action=action.action,
+                    channel=attempt.channel,
+                    external_ref=attempt.external_ref,
+                )
+        except Exception:
+            logger.exception("Execution failed for %s", payment_id)
+            attempt.result = "failed"
+            attempt.result_details = {"error": "Execution exception"}
 
     async def _build_failure_context(
         self, failure: PaymentFailure, session: AsyncSession
@@ -326,10 +503,7 @@ class PaymentRecoveryOrchestrator:
         previous_outcomes: list[str] = []
 
         if customer_id:
-            ledger = await session.execute(
-                select(RetryLedger).where(RetryLedger.customer_id == customer_id)
-            )
-            ledger_row = ledger.scalar_one_or_none()
+            ledger_row = await self._get_ledger(customer_id, session)
             if ledger_row:
                 retry_count = ledger_row.total_retries_24h
                 nudge_count = ledger_row.total_nudges_24h
@@ -380,6 +554,17 @@ class PaymentRecoveryOrchestrator:
         )
         return result.first() is not None
 
+    async def _get_ledger(
+        self, customer_id: str | None, session: AsyncSession
+    ) -> RetryLedger | None:
+        """The customer's rate-limit and consent row, or None if they have none."""
+        if not customer_id:
+            return None
+        result = await session.execute(
+            select(RetryLedger).where(RetryLedger.customer_id == customer_id)
+        )
+        return result.scalar_one_or_none()
+
     async def _get_attempt_count(self, payment_id: str, session: AsyncSession) -> int:
         """Count existing retry attempts for a payment."""
         result = await session.execute(
@@ -391,10 +576,7 @@ class PaymentRecoveryOrchestrator:
         self, customer_id: str, action: RetryAction, session: AsyncSession
     ) -> None:
         """Update per-customer rate-limiting ledger."""
-        result = await session.execute(
-            select(RetryLedger).where(RetryLedger.customer_id == customer_id)
-        )
-        ledger = result.scalar_one_or_none()
+        ledger = await self._get_ledger(customer_id, session)
 
         now = datetime.now(UTC)
 

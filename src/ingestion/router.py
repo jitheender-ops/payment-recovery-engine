@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import get_settings
+from src.config import get_settings, reveal
 from src.database import async_session_factory, get_session
 from src.ingestion.idempotency import is_duplicate_event
 from src.ingestion.signature import verify_webhook_signature
@@ -52,26 +52,42 @@ async def _process_event_background(
                     logger.error("Event not found in store: %s", event_id)
 
             elif event_type == "payment.captured":
-                # Mark any pending retry attempts for this payment as no longer needed
+                # Revenue attribution. The captured payment is a payment we have
+                # never seen: recovery goes out as a Payment Link and paying it
+                # mints a new id. The old code compared that new id against
+                # RetryAttempt.payment_id, which holds the ORIGINAL failed id, so
+                # the update matched nothing, pending rows never resolved, and no
+                # rupee was ever creditable to the engine.
+                from src.cases import attribute_capture
+
                 payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
                 payment_id = payment_entity.get("id")
                 if payment_id:
-                    from sqlalchemy import update
-
-                    from src.models import RetryAttempt
-                    await session.execute(
-                        update(RetryAttempt)
-                        .where(
-                            RetryAttempt.payment_id == payment_id,
-                            RetryAttempt.result == "pending",
-                        )
-                        .values(result="superseded", executed_at=datetime.now(UTC))
+                    notes = payment_entity.get("notes") or {}
+                    link_entity = (
+                        payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+                    )
+                    case = await attribute_capture(
+                        session,
+                        amount=payment_entity.get("amount", 0),
+                        recovered_ref=payment_id,
+                        # Razorpay copies a Payment Link's notes onto the payment,
+                        # so the idempotency key we wrote at creation comes back
+                        # here. It is the stronger of the two keys: ours,
+                        # deterministic, and UNIQUE in retry_attempts.
+                        link_id=link_entity.get("id"),
+                        idempotency_key=notes.get("retry_idempotency_key"),
+                        order_ref=payment_entity.get("order_id"),
                     )
                     await session.commit()
-                    logger.info(
-                        "Payment captured — marked pending retries as superseded: %s",
-                        payment_id,
-                    )
+                    if case is not None:
+                        logger.info(
+                            "Capture attributed: payment=%s case=%s state=%s recovered=%s",
+                            payment_id,
+                            case.id,
+                            case.state,
+                            case.amount_recovered,
+                        )
 
         except Exception:
             logger.exception("Error processing background event: %s", event_id)
@@ -112,7 +128,7 @@ async def receive_razorpay_webhook(
         return Response(status_code=401, content="Missing signature")
 
     if not verify_webhook_signature(
-        raw_body, x_razorpay_signature, settings.razorpay_webhook_secret
+        raw_body, x_razorpay_signature, reveal(settings.razorpay_webhook_secret)
     ):
         logger.warning("Webhook signature verification failed")
         return Response(status_code=401, content="Invalid signature")
