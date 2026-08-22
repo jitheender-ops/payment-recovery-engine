@@ -91,6 +91,15 @@ class XGBoostBaseline:
 
     def __init__(self, model_path: str | None = None) -> None:
         self._model = None
+        # Defaulting from settings is the actual fix here. Every production call
+        # site constructed this as `XGBoostBaseline()` with no argument at all,
+        # so the trained model could never load no matter what was on disk —
+        # "the XGBoost baseline" in the README was the rule heuristic below,
+        # every time. Pass "" to force the rules explicitly.
+        if model_path is None:
+            from src.config import get_settings
+            model_path = get_settings().xgboost_model_path
+
         if model_path and Path(model_path).exists():
             try:
                 import joblib
@@ -100,7 +109,18 @@ class XGBoostBaseline:
                 logger.exception("Failed to load XGBoost model from %s", model_path)
 
         if self._model is None:
-            logger.info("XGBoost: no trained model — using rule-based fallback")
+            # warning, not info: this is a silent capability downgrade on the
+            # decision path, and it read as normal startup noise at info level.
+            logger.warning(
+                "XGBoost: no trained model at %r — falling back to rule-based "
+                "heuristics. Train one with scripts/train_xgboost.py.",
+                model_path,
+            )
+
+    @property
+    def is_trained(self) -> bool:
+        """True when a real model backs predict(), False for the rule fallback."""
+        return self._model is not None
 
     def predict(self, context: FailureContext) -> RetryAction:
         """

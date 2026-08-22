@@ -34,20 +34,20 @@
       "net_\u20b9_per_\u20b91Cr_failed_std": 83842.82
     },
     "XGBoost/Rules": {
-      "recovery_rate_%": 27.43,
-      "recovery_rate_%_std": 0.58,
-      "retry_cost_avg": 2.37,
-      "retry_cost_avg_std": 0.01,
+      "recovery_rate_%": 30.24,
+      "recovery_rate_%_std": 0.51,
+      "retry_cost_avg": 2.32,
+      "retry_cost_avg_std": 0.0,
       "false_retry_rate_%": 0.0,
       "false_retry_rate_%_std": 0.0,
       "time_to_recovery_min": 0.0,
       "time_to_recovery_min_std": 0.0,
-      "\u20b9_per_\u20b91Cr_failed": 2699581.2,
-      "\u20b9_per_\u20b91Cr_failed_std": 156655.88,
-      "attempts_per_\u20b91Cr": 23353.6,
-      "attempts_per_\u20b91Cr_std": 456.08,
-      "net_\u20b9_per_\u20b91Cr_failed": 2652874.0,
-      "net_\u20b9_per_\u20b91Cr_failed_std": 156580.77
+      "\u20b9_per_\u20b91Cr_failed": 3011921.0,
+      "\u20b9_per_\u20b91Cr_failed_std": 120481.1,
+      "attempts_per_\u20b91Cr": 22843.2,
+      "attempts_per_\u20b91Cr_std": 447.99,
+      "net_\u20b9_per_\u20b91Cr_failed": 2966234.2,
+      "net_\u20b9_per_\u20b91Cr_failed_std": 120597.72
     }
   },
   "paired_vs_baseline": {
@@ -75,21 +75,21 @@
     },
     "XGBoost/Rules": {
       "recovery_rate_pp": {
-        "mean_delta": 8.22,
-        "ci95_halfwidth": 0.452,
+        "mean_delta": 11.028,
+        "ci95_halfwidth": 0.489,
         "ci95": [
-          7.768,
-          8.672
+          10.539,
+          11.517
         ],
         "n_paired": 25000,
         "significant": true
       },
       "retry_cost": {
-        "mean_delta": -0.357,
+        "mean_delta": -0.409,
         "ci95_halfwidth": 0.012,
         "ci95": [
-          -0.369,
-          -0.346
+          -0.421,
+          -0.397
         ],
         "n_paired": 25000,
         "significant": true
@@ -98,8 +98,8 @@
   },
   "economics_vs_baseline": {
     "XGBoost/Rules": {
-      "delta_revenue_per_crore": 850092.0,
-      "delta_attempts_per_crore": -3519.0,
+      "delta_revenue_per_crore": 1162432.0,
+      "delta_attempts_per_crore": -4030.0,
       "break_even_cost_per_retry_inr": null,
       "verdict": "dominates at any retry cost (incl. \u20b90)"
     }
