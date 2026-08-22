@@ -13,7 +13,7 @@ from typing import Any
 
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.prompts import SYSTEM_PROMPT, format_user_prompt
-from src.config import get_settings
+from src.config import get_settings, reveal
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,13 @@ class PolicyAgent:
         if self._provider == "anthropic":
             import anthropic
             self._client = anthropic.AsyncAnthropic(
-                api_key=settings.anthropic_api_key,
+                api_key=reveal(settings.anthropic_api_key),
                 timeout=self._timeout,
             )
         elif self._provider == "openai":
             import openai
             self._client = openai.AsyncOpenAI(
-                api_key=settings.openai_api_key,
+                api_key=reveal(settings.openai_api_key),
                 # Empty base_url means api.openai.com; set it to point the same
                 # client at any OpenAI-compatible host (OpenRouter, Ollama, ...).
                 base_url=settings.llm_base_url or None,

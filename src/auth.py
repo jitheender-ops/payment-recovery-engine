@@ -16,7 +16,7 @@ import hmac
 
 from fastapi import Header, HTTPException, status
 
-from src.config import get_settings
+from src.config import get_settings, reveal
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -27,7 +27,7 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     through is indistinguishable from having no guard at all, and this exists
     precisely for the deployment where someone forgot to set it.
     """
-    expected = get_settings().api_key
+    expected = reveal(get_settings().api_key)
     # Compare bytes, not str: compare_digest raises TypeError on a str
     # containing non-ASCII, which an attacker controls via the header and which
     # would surface as a 500 instead of a 401.

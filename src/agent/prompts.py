@@ -18,7 +18,7 @@ import hashlib
 import hmac
 from typing import TYPE_CHECKING
 
-from src.config import get_settings
+from src.config import get_settings, reveal
 
 if TYPE_CHECKING:
     # Type-only: prompts.py is imported by policy_agent.py, which also imports
@@ -146,7 +146,7 @@ def mask_customer_id(customer_id: str | None) -> str:
     if not customer_id:
         return "unknown"
     digest = hmac.new(
-        get_settings().razorpay_webhook_secret.encode("utf-8"),
+        reveal(get_settings().razorpay_webhook_secret).encode("utf-8"),
         b"pii-mask|customer_id|" + customer_id.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()

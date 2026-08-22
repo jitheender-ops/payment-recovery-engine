@@ -15,13 +15,13 @@ from typing import Any
 import razorpay
 import requests
 
-from src.config import get_settings
+from src.config import get_settings, reveal
 from src.models import PaymentFailure
 
 logger = logging.getLogger(__name__)
 
 
-class _TimeoutSession(requests.Session):  # type: ignore[misc]
+class _TimeoutSession(requests.Session):
     """
     A requests Session that applies a default timeout to every request.
 
@@ -50,7 +50,7 @@ class RetryExecutor:
         settings = get_settings()
         self._client = razorpay.Client(
             session=_TimeoutSession(settings.razorpay_timeout_seconds),
-            auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+            auth=(settings.razorpay_key_id, reveal(settings.razorpay_key_secret)),
         )
         logger.info("RetryExecutor initialized (key_id=%s...)", settings.razorpay_key_id[:12])
 
@@ -172,6 +172,11 @@ class RetryExecutor:
 
         # Then send notification
         link_id = link_result.get("payment_link_id")
+        # Reported back so the attempt row records which channel actually
+        # reached the customer, not which one we intended to use. Contact limits
+        # are per-channel, and a nudge logged as "sent" with no channel cannot
+        # be counted against any of them.
+        channels: list[str] = []
         if link_id:
             try:
                 # Off the event loop for the same reason as payment_link.create.
@@ -179,15 +184,18 @@ class RetryExecutor:
                     await asyncio.to_thread(
                         self._client.payment_link.notifyBy, link_id, "sms"
                     )
+                    channels.append("sms")
                     logger.info("SMS notification sent for link %s", link_id)
                 if failure.customer_email:
                     await asyncio.to_thread(
                         self._client.payment_link.notifyBy, link_id, "email"
                     )
+                    channels.append("email")
                     logger.info("Email notification sent for link %s", link_id)
             except Exception:
                 logger.warning("Failed to send notification for link %s", link_id)
 
+        link_result["channels"] = channels
         link_result["nudge_sent"] = True
         link_result["nudge_message"] = message
         return link_result

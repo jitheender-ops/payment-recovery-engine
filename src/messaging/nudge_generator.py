@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.config import get_settings
+from src.config import get_settings, reveal
 from src.messaging.templates import render_fallback
 
 logger = logging.getLogger(__name__)
@@ -40,19 +40,15 @@ class NudgeGenerator:
         if self._client is not None:
             return self._client
 
+        anthropic_key = reveal(self._settings.anthropic_api_key)
+        openai_key = reveal(self._settings.openai_api_key)
         try:
-            if self._settings.llm_provider == "anthropic" and self._settings.anthropic_api_key:
+            if self._settings.llm_provider == "anthropic" and anthropic_key:
                 import anthropic
-                self._client = anthropic.AsyncAnthropic(
-                    api_key=self._settings.anthropic_api_key,
-                    timeout=3.0,
-                )
-            elif self._settings.llm_provider == "openai" and self._settings.openai_api_key:
+                self._client = anthropic.AsyncAnthropic(api_key=anthropic_key, timeout=3.0)
+            elif self._settings.llm_provider == "openai" and openai_key:
                 import openai
-                self._client = openai.AsyncOpenAI(
-                    api_key=self._settings.openai_api_key,
-                    timeout=3.0,
-                )
+                self._client = openai.AsyncOpenAI(api_key=openai_key, timeout=3.0)
         except Exception:
             logger.warning("Failed to initialize LLM client for nudge generation")
 

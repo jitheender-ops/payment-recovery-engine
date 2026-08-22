@@ -34,8 +34,12 @@ services:
       # container that resolves to the container itself, not Postgres.
       DATABASE_URL: postgresql+asyncpg://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
       DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
+    # Loopback only, for the same reason Postgres above is not published at
+    # all: "8000:8000" binds 0.0.0.0 and hands the webhook endpoint and the
+    # whole API to the local network. Compose has no tunnel and no auth in
+    # front of it — run.sh is what deliberately exposes a public URL.
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,8 +55,10 @@ services:
     env_file: .env
     environment:
       DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
+    # Loopback only. The dashboard reads live payment data, and DASHBOARD_PASSWORD
+    # is the only thing in front of it.
     ports:
-      - "${STREAMLIT_PORT:-8501}:8501"
+      - "127.0.0.1:${STREAMLIT_PORT:-8501}:8501"
     depends_on:
       postgres:
         condition: service_healthy
