@@ -24,18 +24,9 @@ function with no top-level body to execute.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
-import pandas as pd
 import streamlit as st
 
 from dashboard.auth import dashboard_password, password_is_correct
-
-if TYPE_CHECKING:
-    # Type-only: create_engine is imported inside get_db_engine so the dashboard
-    # still loads (degraded to mock metrics) when sqlalchemy or the DB is absent.
-    # A module-level runtime import here would defeat that.
-    from sqlalchemy.engine import Engine
 
 st.set_page_config(page_title="Payment Recovery Engine", page_icon="🔄", layout="wide")
 
@@ -77,40 +68,23 @@ require_password()
 
 
 # ── DB Connection ────────────────────────────────────────────────────────
-@st.cache_resource
-def get_db_engine() -> Engine | None:
-    """Try to connect to Postgres. Returns None if unavailable."""
-    try:
-        import os
+# Lives in dashboard/db.py so the view modules can query without importing this
+# file back — app.py imports the views at the bottom, and a view importing app
+# is a cycle that only works by accident of ordering.
+from dashboard.db import no_data, query_db  # noqa: E402
 
-        from sqlalchemy import create_engine
-        url = os.getenv("DATABASE_URL_SYNC", "postgresql://recovery:recovery@localhost:5432/payment_recovery")
-        engine = create_engine(url)
-        engine.connect().close()
-        return engine
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=30)
-def query_db(query: str) -> pd.DataFrame | None:
-    engine = get_db_engine()
-    if engine is None:
-        return None
-    try:
-        return pd.read_sql(query, engine)
-    except Exception:
-        return None
-
-
-def get_mock_metrics() -> dict[str, Any]:
-    """Demo metrics when DB is unavailable."""
-    return {
-        "total_failures": 1247,
-        "recovery_rate": 34.2,
-        "active_retries": 18,
-        "recovered_amount": 425680,
-    }
+# One round trip for every headline figure, so the four tiles describe a single
+# consistent moment rather than four moments a few hundred milliseconds apart.
+OVERVIEW_SQL = """
+SELECT
+  (SELECT COUNT(*) FROM payment_failures)                             AS failures,
+  (SELECT COUNT(*) FROM recovery_cases)                               AS cases,
+  (SELECT COUNT(*) FROM recovery_cases WHERE state = 'recovered')     AS recovered_cases,
+  (SELECT COUNT(*) FROM retry_attempts WHERE result = 'pending')      AS pending,
+  (SELECT COUNT(*) FROM retry_attempts WHERE result = 'scheduled')    AS scheduled,
+  (SELECT COALESCE(SUM(amount_recovered), 0) FROM recovery_cases
+     WHERE recovered_via_attempt_id IS NOT NULL)                      AS attributed_paise
+"""
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────
@@ -124,56 +98,56 @@ if page == "Overview":
     st.title("🔄 Payment Failure Recovery Engine")
     st.markdown("Real-time dashboard for payment failure recovery pipeline.")
 
-    engine = get_db_engine()
-    if engine is None:
-        st.warning("⚠️ Database not connected — showing demo data")
-        m = get_mock_metrics()
+    row = query_db(OVERVIEW_SQL)
+    if row is None or row.empty:
+        no_data("recovery activity")
     else:
-        failures_df = query_db("SELECT COUNT(*) as cnt FROM payment_failures")
-        retries_df = query_db("SELECT COUNT(*) as cnt FROM retry_attempts WHERE result='success'")
-        active_df = query_db("SELECT COUNT(*) as cnt FROM retry_attempts WHERE result='pending'")
-        amount_df = query_db(
-            "SELECT COALESCE(SUM(pf.amount),0) as total FROM retry_attempts ra "
-            "JOIN payment_failures pf ON ra.payment_failure_id=pf.id "
-            "WHERE ra.result='success'"
+        total = int(row["failures"].iloc[0])
+        cases = int(row["cases"].iloc[0])
+        recovered_cases = int(row["recovered_cases"].iloc[0])
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Failures", f"{total:,}")
+        # Cases recovered over cases opened. The old figure divided
+        # retry_attempts with result='success' by payment_failures — a payment
+        # LINK being created successfully, which says nothing about whether the
+        # customer paid it. It reported a recovery rate for money that had not
+        # arrived.
+        c2.metric(
+            "Recovery Rate",
+            f"{(recovered_cases / cases * 100) if cases else 0:.1f}%",
+            help="Recovery cases in a terminal 'recovered' state, over cases opened.",
         )
-
-        total = int(failures_df["cnt"].iloc[0]) if failures_df is not None else 0
-        recovered = int(retries_df["cnt"].iloc[0]) if retries_df is not None else 0
-        m = {
-            "total_failures": total,
-            "recovery_rate": (recovered / total * 100) if total > 0 else 0,
-            "active_retries": int(active_df["cnt"].iloc[0]) if active_df is not None else 0,
-            "recovered_amount": (
-                int(amount_df["total"].iloc[0]) / 100 if amount_df is not None else 0
+        c3.metric("Active Retries", int(row["pending"].iloc[0]))
+        c4.metric(
+            "₹ Recovered",
+            f"₹{float(row['attributed_paise'].iloc[0]) / 100:,.0f}",
+            help=(
+                "Attributed to a payment link this engine sent. Money the customer "
+                "paid on their own is excluded — real revenue, but not our result."
             ),
-        }
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Failures", f"{m['total_failures']:,}")
-    c2.metric("Recovery Rate", f"{m['recovery_rate']:.1f}%")
-    c3.metric("Active Retries", m["active_retries"])
-    c4.metric("₹ Recovered", f"₹{m['recovered_amount']:,.0f}")
+        )
+        if int(row["scheduled"].iloc[0]):
+            st.caption(
+                f"{int(row['scheduled'].iloc[0])} retries are scheduled for later "
+                "and will fire from src/scheduler.py."
+            )
 
     st.divider()
     st.subheader("Recent Activity")
 
     recent = query_db("""
         SELECT ra.payment_id, ra.action_type, ra.result, ra.agent_type,
-               ra.guardrail_passed, ra.created_at
+               ra.channel, ra.guardrail_passed, ra.scheduled_at, ra.created_at
         FROM retry_attempts ra ORDER BY ra.created_at DESC LIMIT 20
     """)
     if recent is not None and len(recent) > 0:
         st.dataframe(recent, use_container_width=True)
     else:
-        demo_data = pd.DataFrame({
-            "payment_id": [f"pay_{''.join([str(i)]*6)}" for i in range(5)],
-            "action_type": ["retry_now", "switch_rail", "nudge_customer", "abandon", "retry_at"],
-            "result": ["success", "success", "pending", "skipped", "failed"],
-            "agent_type": ["llm", "llm", "xgboost", "deterministic", "llm"],
-            "guardrail_passed": [True, True, True, True, False],
-        })
-        st.dataframe(demo_data, use_container_width=True)
+        # Deliberately not a demo table. The five fabricated rows that used to
+        # render here were indistinguishable from live output, and that is
+        # precisely what made this dashboard untrustworthy.
+        st.info("No retry attempts recorded yet.")
 
 elif page == "Recovery Funnel":
     from dashboard.views import recovery_funnel
