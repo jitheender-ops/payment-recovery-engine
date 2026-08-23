@@ -455,3 +455,4 @@ coverage went:
 `dashboard/` is 0% — the pages are Streamlit scripts whose bodies execute on
 import. `dashboard/auth.py` is the exception, split out precisely so the password
 gate is testable without a Streamlit runtime.
+# growth
