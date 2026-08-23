@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: recovery-postgres
+    environment:
+      POSTGRES_DB: payment_recovery
+      POSTGRES_USER: recovery
+      # Required — no default. A hardcoded password on a service holding
+      # customer emails, phone numbers and VPAs is a credential published
+      # in source control.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # NOT published to the host. app and dashboard reach Postgres over the
+    # compose network as `postgres:5432`. Publishing "5432:5432" binds to
+    # 0.0.0.0, exposing the payments database to the whole local network.
+    # For ad-hoc psql access, uncomment the loopback-only binding below.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recovery -d payment_recovery"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: recovery-app
+    env_file: .env
+    environment:
+      # Overrides the .env value, which points at localhost — inside a
+      # container that resolves to the container itself, not Postgres.
+      DATABASE_URL: postgresql+asyncpg://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
+      DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
+    # Loopback only, for the same reason Postgres above is not published at
+    # all: "8000:8000" binds 0.0.0.0 and hands the webhook endpoint and the
+    # whole API to the local network. Compose has no tunnel and no auth in
+    # front of it — run.sh is what deliberately exposes a public URL.
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: recovery-dashboard
+    env_file: .env
+    environment:
+      DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
+    # Loopback only. The dashboard reads live payment data, and DASHBOARD_PASSWORD
+    # is the only thing in front of it.
+    ports:
+      - "127.0.0.1:${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    # `python -m`, not a bare `streamlit run`: streamlit puts the *script's*
+    # directory on sys.path, not the working directory, so `dashboard.auth` and
+    # `dashboard.views` would not import. -m adds the CWD (/app). run.sh does
+    # the same. --server.address 0.0.0.0 is correct here (bind inside the
+    # container so the published port reaches it), unlike on the host.
+    command: python -m streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+
+volumes:
+  pgdata:
