@@ -144,7 +144,7 @@ This is the first question a fintech panel will ask. Here's the answer:
    second payment link. Note the honest boundary: `razorpay-python` has no idempotency
    header, so this is enforced on our side, not the gateway's.
 6. **No short-circuiting** — The guardrail checks ALL rules and reports ALL violations for audit.
-7. **LLM fallback** — If the LLM fails, times out, or returns garbage, the system falls back to XGBoost. Never blocks — and `fallback_count` makes the degradation countable, so a dead provider can never be reported as an LLM result.
+7. **LLM fallback** — If the LLM fails, times out, or returns garbage, the system falls back to XGBoost. Never blocks. `fallback_count` is what makes this real: `PolicyAgent.decide()` swallows provider errors and returns its own conservative heuristic without raising, so for a while the XGBoost branch was unreachable and a missing API key silently abandoned ~70% of recoverable payments. The orchestrator now compares that counter across the call and discards a degraded answer.
 8. **Deferred retries re-validate at fire time** — A `retry_at` decision outlives its own guardrail check by hours. When the scheduler fires it, the case state, the consent status and the time-of-day blackout are all re-read; a customer who opted out at 23:00 does not get the 02:00 retry that was approved at 22:00.
 9. **The idempotency race fails closed** — Two webhooks for one payment can both derive the same key before either commits. The UNIQUE constraint on `retry_attempts.idempotency_key` breaks the tie *before* the Razorpay call, and the loser exits as a clean skip rather than an unhandled exception.
 
@@ -226,6 +226,79 @@ Compose has no public tunnel and no verify step — it's the plain local stack.
 Note it does **not** publish Postgres' port: the app reaches it over the compose
 network, because binding 5432 to `0.0.0.0` would expose a database holding
 customer emails, phone numbers and VPAs to the whole local network.
+
+## 👀 See it work
+
+Three commands. No LLM key needed — the engine runs on the trained XGBoost
+policy, which is the better-scoring one anyway.
+
+```bash
+./run.sh                                  # 1. builds, verifies, migrates, starts everything
+python scripts/simulate_webhooks.py --count 24    # 2. drives it with synthetic traffic
+# 3. open the dashboard URL run.sh prints, password from .env
+```
+
+Step 2 runs both halves of the loop:
+
+**Phase 1 — `payment.failed`.** Each webhook is signature-checked, deduped,
+classified, and opens a recovery case. Hard declines (fraud, stolen card) are
+abandoned before the agent is ever called. Everything else gets a decision from
+the fixed five-action space, a guardrail check, and an attempt written *ahead*
+of the Razorpay call.
+
+**Phase 2 — `payment.captured`.** This is the half that was missing, and
+without it nothing could ever be shown to work: cases opened and stayed open,
+`amount_recovered` was 0 forever. A recovered payment carries an id we have
+never seen, so the capture is matched back through the breadcrumb the executor
+wrote into the link's notes. A slice of captures deliberately carries only an
+`order_id` — that is the customer paying on their own, which counts as revenue
+but is **not** credited to the engine.
+
+It prints what actually happened:
+
+```
+  Failures ingested              70
+  Cases opened                   48
+  Cases recovered                13
+  Attempts made                  70   (7 scheduled for later)
+
+  Money at risk              ₹3.11L
+  Money recovered            ₹38.5K
+  ...attributed to us        ₹36.2K   <- the honest number
+  ...customer self-paid       ₹2.3K
+
+  Agent decisions:
+    abandon                43
+    retry_at               12
+    switch_rail            10
+    nudge_customer          5
+```
+
+`retry_at` decisions do not fire immediately — they are parked as `scheduled`
+and the Layer 6 scheduler executes them when due, re-running the guardrail at
+that point. To watch one fire without waiting, drop the interval:
+
+```bash
+SCHEDULER_INTERVAL_SECONDS=10 ./run.sh
+```
+
+**Where to look afterwards:** the dashboard's Overview shows the recovery ledger
+band — brass is money a link *we* sent brought back, hatched is the customer
+paying anyway, and the remainder is still open. `case_events` is the audit
+trail: every open, escalation, deferral, attribution and close, with the actor
+that did it.
+
+```sql
+SELECT event_type, actor, detail FROM case_events ORDER BY id DESC LIMIT 20;
+```
+
+**Check the LLM before spending quota** — the engine falls back to XGBoost when
+the provider is unusable, and `fallback_count` makes that degradation visible
+rather than silent:
+
+```bash
+python scripts/check_llm.py
+```
 
 ## 🗄️ Schema and Migrations
 

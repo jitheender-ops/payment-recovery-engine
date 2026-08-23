@@ -1,31 +1,27 @@
 """
-Recovery funnel — measured, not illustrated.
+Recovery funnel — where money leaves the pipeline, measured.
 
-This page used to draw a hardcoded funnel ([1247, 1247, 1058, ...]) and a
-hardcoded failure-class pie. They looked exactly like real output, which is the
-problem: a demo number rendered in the same chart as a live one is
-indistinguishable from a live one to whoever is reading it.
+This page once drew a hardcoded funnel ([1247, 1247, 1058, ...]) and a
+hardcoded failure-class pie. Every figure here is a COUNT over the real tables,
+and when there are none the page says so rather than inventing a shape.
 
-Every figure below is a COUNT over the real tables. When there are none, the
-page says so rather than inventing a shape.
+The failure-class breakdown is a sorted bar, not the pie it used to be. Twelve
+slices is past the point where anyone can rank them by eye, and rank is the
+whole question — which blocker costs the most.
 """
 
 from __future__ import annotations
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard import theme
 from dashboard.db import no_data, query_db
 
-# One query, one row, one column per funnel stage — cheaper than seven
-# round-trips and guaranteed to describe a single consistent moment.
 FUNNEL_SQL = """
 SELECT
   (SELECT COUNT(*) FROM payment_failures)                              AS failed,
-  (SELECT COUNT(*) FROM payment_failures
-     WHERE failure_class IS NOT NULL)                                  AS classified,
   (SELECT COUNT(*) FROM payment_failures WHERE is_retryable)           AS retryable,
   (SELECT COUNT(*) FROM retry_attempts)                                AS decided,
   (SELECT COUNT(*) FROM retry_attempts WHERE guardrail_passed)         AS passed,
@@ -34,88 +30,112 @@ SELECT
   (SELECT COUNT(*) FROM recovery_cases WHERE state = 'recovered')      AS recovered
 """
 
-STAGES = [
-    ("Failed Payments", "failed"),
-    ("Classified", "classified"),
-    ("Retryable", "retryable"),
-    ("Agent Decided", "decided"),
-    ("Guardrail Passed", "passed"),
-    ("Retry Attempted", "attempted"),
-    ("Recovered", "recovered"),
-]
+# Two funnels, not one, because these count different things. A single chart
+# reads as one shrinking population and this one is not: there are more attempts
+# than payments (a case can spend three), so the middle bar was TALLER than the
+# first and the whole thing looked broken. Split by unit, each is genuinely
+# monotonic and the prose caveat stops being load-bearing.
+PAYMENT_STAGES = [("Failed", "failed"), ("Retryable", "retryable"), ("Recovered", "recovered")]
+ATTEMPT_STAGES = [("Decided", "decided"), ("Guardrail passed", "passed"), ("Executed", "attempted")]
 
-COLOURS = ["#ff6b6b", "#ee5a24", "#f9ca24", "#6ab04c", "#22a6b3", "#4834d4", "#2ecc71"]
+
+def _funnel(row: pd.Series, stages: list[tuple[str, str]], title: str, unit: str) -> go.Figure:
+    """One monotonic funnel over a single unit."""
+    counts = [int(row[c].iloc[0]) for _, c in stages]
+    labels = [s for s, _ in stages]
+    top = max(counts[0], 1)
+    # Ordinal: one hue stepping light-to-dark says "position in a sequence".
+    # Five unrelated hues would say "identity" and imply a difference in kind.
+    ramp = theme.SEQUENTIAL[-len(stages):]
+    fig = go.Figure(
+        go.Bar(
+            x=counts, y=labels, orientation="h",
+            marker={"color": ramp, "line": {"color": theme.INK, "width": 2}},
+            text=[f"{c:,}" for c in counts], textposition="outside",
+            textfont={"family": theme.FONT_MONO, "color": theme.PAPER, "size": 13},
+            customdata=[c / top * 100 for c in counts],
+            hovertemplate="<b>%{y}</b><br>%{x:,} " + unit
+                          + "<br>%{customdata:.1f}% of the first stage<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=title,
+        yaxis={"autorange": "reversed", "tickfont": {"size": 13}},
+        xaxis={"visible": False}, showlegend=False,
+    )
+    return theme.bar_headroom(fig, counts)
 
 
 def render() -> None:
     """Render this page. Called by dashboard/app.py."""
-    st.title("📊 Recovery Funnel")
+    st.markdown(
+        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
+        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>PIPELINE</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("# Where the money leaves")
 
     row = query_db(FUNNEL_SQL)
     if row is None or row.empty or int(row["failed"].iloc[0]) == 0:
         no_data("payment failures")
         return
 
-    df = pd.DataFrame(
-        {"Stage": [s for s, _ in STAGES], "Count": [int(row[c].iloc[0]) for _, c in STAGES]}
-    )
-
-    fig = go.Figure(
-        go.Funnel(
-            y=df["Stage"],
-            x=df["Count"],
-            textinfo="value+percent initial",
-            marker={"color": COLOURS},
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(
+            theme.style_fig(_funnel(row, PAYMENT_STAGES, "Payments", "payments"), height=250),
+            width="stretch",
         )
-    )
-    fig.update_layout(title="Recovery Pipeline Funnel", height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    with right:
+        st.plotly_chart(
+            theme.style_fig(_funnel(row, ATTEMPT_STAGES, "Attempts", "attempts"), height=250),
+            width="stretch",
+        )
 
-    # "Recovered" counts cases, every other stage counts payments or attempts.
-    # Stated rather than left for the reader to trip over: one case can hold
-    # several attempts, so the last bar is not a subset of the one above it.
-    st.caption(
-        "Stages 1–3 count payment failures, 4–6 count retry attempts, and "
-        "'Recovered' counts recovery cases that reached a terminal recovered "
-        "state. A case can span several attempts, so the funnel narrows across "
-        "different units — read each stage against its own row count."
+    st.markdown(
+        f"<p style='color:{theme.SLATE};font-size:0.82rem;margin:-0.6rem 0 1.4rem 0;'>"
+        f"Separate because they count different things — one case can spend several "
+        f"attempts, so attempts outnumber payments. Read each funnel against its own "
+        f"first stage.</p>",
+        unsafe_allow_html=True,
     )
 
-    st.subheader("Failure Class Distribution")
+    st.divider()
+    theme.section("What is blocking payment", "By failure class, most common first.")
+
     fc = query_db(
-        "SELECT failure_class AS \"Class\", COUNT(*) AS \"Count\" "
-        "FROM payment_failures GROUP BY failure_class ORDER BY 2 DESC"
+        "SELECT failure_class, COUNT(*) AS n FROM payment_failures "
+        "GROUP BY failure_class ORDER BY n DESC"
     )
     if fc is None or fc.empty:
         st.info("No classified failures yet.")
         return
+
+    fc = fc.sort_values("n")
+    fig2 = go.Figure(
+        go.Bar(
+            x=fc["n"],
+            y=[c.replace("_", " ") for c in fc["failure_class"]],
+            orientation="h",
+            # One hue: this is magnitude, not identity. Twelve categorical hues
+            # would be a rainbow and would still not be rankable by eye.
+            marker={"color": theme.BRASS, "line": {"color": theme.INK, "width": 2}},
+            text=[f"{n:,}" for n in fc["n"]],
+            textposition="outside",
+            textfont={"family": theme.FONT_MONO, "color": theme.SLATE, "size": 12},
+            hovertemplate="<b>%{y}</b><br>%{x:,} failures<extra></extra>",
+        )
+    )
+    fig2.update_layout(xaxis={"visible": False}, showlegend=False)
+    theme.bar_headroom(fig2, fc["n"])
     st.plotly_chart(
-        px.pie(
-            fc,
-            values="Count",
-            names="Class",
-            title="Failure Class Breakdown",
-            color_discrete_sequence=px.colors.qualitative.Set3,
-        ),
-        use_container_width=True,
+        theme.style_fig(fig2, height=max(260, 26 * len(fc))), width="stretch"
     )
 
-    st.subheader("Money")
-    money = query_db(
-        "SELECT COALESCE(SUM(amount_at_risk),0)/100.0 AS at_risk, "
-        "COALESCE(SUM(amount_recovered),0)/100.0 AS recovered, "
-        "COALESCE(SUM(CASE WHEN recovered_via_attempt_id IS NOT NULL "
-        "THEN amount_recovered ELSE 0 END),0)/100.0 AS attributed "
-        "FROM recovery_cases"
-    )
-    if money is not None and not money.empty:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("At risk", f"₹{money['at_risk'].iloc[0]:,.0f}")
-        c2.metric("Recovered", f"₹{money['recovered'].iloc[0]:,.0f}")
-        c3.metric("Attributed to us", f"₹{money['attributed'].iloc[0]:,.0f}")
-        # The distinction the headline number lives or dies on.
-        st.caption(
-            "'Attributed to us' is the subset recovered through a payment link "
-            "this engine sent. The rest is money the customer paid on their own "
-            "— real revenue, but not the engine's result."
+    with st.expander("View as table"):
+        st.dataframe(
+            pd.DataFrame({"Failure class": fc["failure_class"], "Failures": fc["n"]})
+            .sort_values("Failures", ascending=False),
+            width="stretch",
+            hide_index=True,
         )

@@ -209,18 +209,36 @@ class PaymentRecoveryOrchestrator:
         # answered. Comparing its fallback counter across the call is what
         # distinguishes a real LLM decision from a silent degradation — without
         # it the audit trail claims an LLM made calls it never saw.
+        from src.agent.xgboost_baseline import XGBoostBaseline
+
+        action = None
+        agent_type = "xgboost"
         if agent:
             fallbacks_before = agent.fallback_count
             try:
-                action = await agent.decide(context)
-                agent_type = "llm" if agent.fallback_count == fallbacks_before else "llm_fallback"
+                candidate = await agent.decide(context)
+                if agent.fallback_count == fallbacks_before:
+                    action, agent_type = candidate, "llm"
+                else:
+                    # The LLM degraded. decide() has already swallowed the error
+                    # and handed back its own private heuristic, which abandons
+                    # everything that is not a network error or bank downtime —
+                    # so accepting `candidate` here means a missing API key
+                    # quietly turns the engine into "give up on ~70% of
+                    # recoverable payments".
+                    #
+                    # That is also why the XGBoost path was unreachable in
+                    # practice and the README's "falls back to XGBoost" was not
+                    # true: decide() never raises, so the `except` below never
+                    # fired. The counter told us it degraded; now we act on it.
+                    logger.warning(
+                        "LLM degraded to its internal heuristic — using XGBoost instead: %s",
+                        candidate.reason[:120],
+                    )
             except Exception:
-                logger.exception("Agent failed, using XGBoost fallback")
-                from src.agent.xgboost_baseline import XGBoostBaseline
-                action = XGBoostBaseline().predict(context)
-                agent_type = "xgboost"
-        else:
-            from src.agent.xgboost_baseline import XGBoostBaseline
+                logger.exception("Agent raised, using XGBoost")
+
+        if action is None:
             action = XGBoostBaseline().predict(context)
             agent_type = "xgboost"
 

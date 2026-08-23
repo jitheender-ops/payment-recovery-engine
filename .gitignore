@@ -61,3 +61,10 @@ payment-recovery-engine-main/
 
 # Machine-local Claude Code settings — not shared config.
 .claude/settings.local.json
+
+# Regenerable knowledge-graph cache (1.6M of content-hashed AST blobs).
+graphify-out/
+
+# requirements.lock.txt is the lockfile the Dockerfile and CI actually install
+# from. uv.lock is a second, unreferenced one — two lockfiles drift in silence.
+uv.lock

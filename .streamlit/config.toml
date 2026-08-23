@@ -1,0 +1,22 @@
+# Streamlit's own theme tokens. These are the stable, version-safe half of the
+# design — they survive Streamlit upgrades in a way that CSS targeting generated
+# class names does not. dashboard/theme.py layers on only what this cannot say.
+#
+# base="dark" is a commitment, not a default. This is an operations console read
+# for long stretches, and the whole page is built on one ink ground with brass
+# carrying money — a light flip would need its own palette, validated separately,
+# rather than an automatic inversion.
+[theme]
+base = "dark"
+primaryColor = "#D9A93A"
+backgroundColor = "#12161C"
+secondaryBackgroundColor = "#1A1F27"
+textColor = "#ECEFF4"
+font = "sans serif"
+
+[server]
+# The dashboard reads live payment data; usage stats are off on principle.
+headless = true
+
+[browser]
+gatherUsageStats = false
