@@ -103,8 +103,14 @@ def compact_inr(paise: float) -> str:
 # ── Chart template ───────────────────────────────────────────────────────
 
 
+_template_registered = False
+
+
 def register_plotly_template() -> None:
     """One template every chart inherits: recessive grid, no chart junk."""
+    global _template_registered
+    if _template_registered:
+        return
     pio.templates["recovery"] = go.layout.Template(
         layout=go.Layout(
             paper_bgcolor="rgba(0,0,0,0)",
@@ -131,6 +137,7 @@ def register_plotly_template() -> None:
         )
     )
     pio.templates.default = "recovery"
+    _template_registered = True
 
 
 # ── CSS ──────────────────────────────────────────────────────────────────
@@ -186,9 +193,8 @@ hr {{ border-color: {LINE}; }}
 
 
 def apply() -> None:
-    """Inject the CSS and register the chart template. Call once, after set_page_config."""
+    """Inject the CSS. Chart template is registered lazily by style_fig()."""
     st.markdown(_CSS, unsafe_allow_html=True)
-    register_plotly_template()
 
 
 # ── The signature: the recovery ledger band ──────────────────────────────
@@ -296,5 +302,6 @@ def bar_headroom(fig: Any, values: Any, *, pad: float = 1.18) -> Any:
 
 def style_fig(fig: Any, *, height: int = 320) -> Any:
     """Final pass every figure goes through, so no view can drift off-template."""
+    register_plotly_template()
     fig.update_layout(height=height, template="recovery")
     return fig
