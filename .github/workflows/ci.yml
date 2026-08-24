@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the run in flight for the same ref. Without this a
+  # busy branch queues runs that are already answering an obsolete question.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling. pyproject declares requires-python >=3.11,
+        # and that claim is only true if something actually runs there — the
+        # local venv is 3.13, so 3.11 is the version most likely to rot unseen.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        # The lockfile ONLY on the version it was frozen from. It is a pip
+        # freeze of the local venv (Python 3.13) and some pins carry a minimum
+        # Python of their own — numpy 2.5 needs >=3.12 — so installing it under
+        # 3.11 fails outright with "No matching distribution found".
+        #
+        # 3.11 therefore resolves from pyproject.toml, which is the better test
+        # anyway: pyproject claims requires-python >=3.11, and this job is what
+        # makes that claim true rather than aspirational.
+        run: |
+          python -m pip install --upgrade pip
+          # major.minor explicitly: [0-9.]* is greedy and swallows the
+          # sentence's trailing full stop, yielding "3.13." which matches nothing.
+          LOCK_PY=$(sed -n 's/^# Frozen from Python \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' requirements.lock.txt | head -1)
+          if [ -f requirements.lock.txt ] && [ "$LOCK_PY" = "${{ matrix.python-version }}" ]; then
+            echo "lockfile was frozen from ${LOCK_PY} — installing pinned"
+            pip install -r requirements.lock.txt
+          else
+            echo "lockfile is for Python ${LOCK_PY:-unknown}, this job is ${{ matrix.python-version }} — resolving from pyproject"
+          fi
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy --strict
+        run: mypy .
+
+      - name: pytest
+        # No database service. tests/conftest.py builds the real schema over a
+        # throwaway SQLite file, which is why the suite needs no Postgres — the
+        # same reason run.sh --verify-only skips its Postgres check.
+        run: pytest -q --cov=src --cov=dashboard --cov-report=term-missing
+
+      - name: error-code taxonomy
+        run: python scripts/seed_error_codes.py
+
+      - name: alembic migrations apply cleanly
+        # Catches the failure create_all() hides: a model gains a column, the
+        # migration does not, and it is only found on a database that has data.
+        env:
+          DATABASE_URL_SYNC: sqlite:///./ci_migration_check.db
+        run: |
+          python - <<'PY'
+          import sqlalchemy as sa
+          from alembic import command
+          from alembic.config import Config
+          # Fresh DB, full schema from the ORM, then every migration on top.
+          # Each step is inspector-guarded, so on an up-to-date schema they must
+          # all no-op rather than crash.
+          import src.models  # noqa: F401
+          from src.database import Base
+          engine = sa.create_engine("sqlite:///./ci_migration_check.db")
+          Base.metadata.create_all(engine)
+          cfg = Config("alembic.ini")
+          cfg.set_main_option("sqlalchemy.url", "sqlite:///./ci_migration_check.db")
+          command.upgrade(cfg, "head")
+          print("migrations applied cleanly over a create_all schema")
+          PY
+
+  train-and-eval:
+    # The README quotes numbers from eval/results/. This proves they still
+    # regenerate — a harness that silently stopped running is how a README ends
+    # up quoting a build from six months ago.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Train the XGBoost baseline
+        # Small on CI. The point is that training still works end to end, not
+        # to reproduce the committed model bit for bit.
+        run: python scripts/train_xgboost.py --n-samples 2000
+      - name: Eval harness (no LLM — CI holds no API key)
+        run: python -m eval.runner --scenarios 500 --seeds 2 --skip-llm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: eval/results/
