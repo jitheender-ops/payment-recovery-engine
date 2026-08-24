@@ -77,8 +77,7 @@ services:
 
       - key: LLM_PROVIDER
         value: openai
-      - key: LLM_BASE_URL
-        value: https://generativelanguage.googleapis.com/v1beta/openai/
+      # LLM_BASE_URL left unset — defaults to https://api.openai.com/v1
 
       # sync: false = "prompt me in the dashboard, never store in git".
       # Set each of these once, under the service's Environment tab.
@@ -88,10 +87,10 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
-      - key: OPENAI_API_KEY          # your Google AI Studio key
+      - key: OPENAI_API_KEY
         sync: false
-      - key: LLM_MODEL               # the id scripts/check_llm.py confirms
-        sync: false
+      - key: LLM_MODEL
+        value: gpt-4o-mini
       - key: API_KEY
         generateValue: true          # guards /openapi.json outside development
       - key: DASHBOARD_PASSWORD
