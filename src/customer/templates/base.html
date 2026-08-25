@@ -1,0 +1,130 @@
+{#
+  Shell for the customer-facing pages.
+
+  All CSS is inline and there is no JavaScript framework. That is not
+  minimalism for its own sake: the reader is on a phone, on Indian mobile data,
+  seconds after a payment failed. Every extra request is another chance for the
+  page that explains where their money went to not arrive. One document, one
+  paint, works with JS disabled.
+
+  Light and roomy rather than the ops console's dark ink. That palette is right
+  for an operator reading dense tables all day and wrong for an anxious person
+  reading four sentences once — a dark technical surface reads as "system
+  internals" exactly when someone needs reassurance.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+{# The URL is the credential. Keep it out of referrer headers on the way to
+   Razorpay, and out of search indexes entirely. #}
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light">
+<title>{% block title %}Your payment{% endblock %}</title>
+<style>
+  :root {
+    --ground:#FBFAF7; --card:#FFFFFF; --ink:#14181F; --muted:#59616E;
+    --line:#E6E2DA; --brass:#7A6008; --safe:#14663D; --caution:#8A5A12;
+    --stop:#A33B22;
+    --sp-1:.25rem; --sp-2:.5rem; --sp-3:.75rem; --sp-4:1rem;
+    --sp-5:1.5rem; --sp-6:2rem; --sp-7:3rem;
+    --r-sm:8px; --r-md:12px; --r-lg:16px;
+    --shadow:0 1px 2px rgba(20,24,31,.05), 0 8px 24px -12px rgba(20,24,31,.12);
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    /* System stack: zero network cost and no invisible-text flash on a slow
+       connection. The type does its work through scale and tabular figures
+       rather than a novelty face this reader would wait for. */
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:17px; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  main{max-width:34rem; margin:0 auto; padding:var(--sp-5) var(--sp-4) var(--sp-7)}
+  h1{font-size:1.5rem; line-height:1.25; letter-spacing:-.015em; margin:0 0 var(--sp-3)}
+  h2{font-size:.8rem; text-transform:uppercase; letter-spacing:.07em;
+     color:var(--muted); margin:0 0 var(--sp-2); font-weight:600}
+  p{margin:0 0 var(--sp-3)}
+  .muted{color:var(--muted)}
+  .small{font-size:.9rem}
+
+  .brand{display:flex; align-items:center; gap:var(--sp-2);
+         padding:var(--sp-4) var(--sp-4) 0; max-width:34rem; margin:0 auto}
+  .brand-mark{width:22px;height:22px;border-radius:6px;background:var(--brass);
+              color:#fff;display:grid;place-items:center;font-size:.8rem;font-weight:700}
+  .brand-name{font-weight:600;font-size:.95rem}
+
+  .card{background:var(--card); border:1px solid var(--line);
+        border-radius:var(--r-lg); padding:var(--sp-5); box-shadow:var(--shadow);
+        margin-bottom:var(--sp-4)}
+
+  /* Money is the question on this page, so it gets the largest type and
+     tabular figures — digits that do not shift width as they change. */
+  .amount{font-size:2.4rem; line-height:1.1; font-weight:650; letter-spacing:-.02em;
+          font-variant-numeric:tabular-nums; margin:0}
+
+  /* Status never rides on colour alone: every one carries a glyph and a word,
+     so it survives colour blindness, greyscale printing and forced-colors. */
+  .status{display:flex; gap:var(--sp-3); align-items:flex-start;
+          padding:var(--sp-4); border-radius:var(--r-md); margin:var(--sp-4) 0 0}
+  .status-icon{flex:0 0 auto; width:1.4rem; height:1.4rem; border-radius:50%;
+               display:grid; place-items:center; font-size:.85rem; font-weight:700;
+               color:#fff; margin-top:.1rem}
+  .is-safe   {background:#EAF3EE; color:#0E4F2E} .is-safe .status-icon{background:var(--safe)}
+  .is-wait   {background:#FBF2E3; color:#6E4A0E} .is-wait .status-icon{background:var(--caution)}
+  .is-stop   {background:#FBECE8; color:#83301C} .is-stop .status-icon{background:var(--stop)}
+  .is-done   {background:#EAF3EE; color:#0E4F2E} .is-done .status-icon{background:var(--safe)}
+
+  .btn{display:flex; align-items:center; justify-content:center; gap:var(--sp-2);
+       width:100%; min-height:52px; padding:var(--sp-3) var(--sp-5);
+       border-radius:var(--r-md); border:1px solid transparent;
+       font-size:1.05rem; font-weight:600; font-family:inherit;
+       background:var(--brass); color:#fff; cursor:pointer; text-decoration:none;
+       transition:filter .12s ease}
+  .btn:hover{filter:brightness(1.08)}
+  .btn:active{filter:brightness(.94)}
+  .btn[disabled],.btn[aria-disabled="true"]{opacity:.65; cursor:progress}
+  .btn-quiet{background:transparent; color:var(--ink); border-color:var(--line)}
+
+  .rows{border-top:1px solid var(--line); margin-top:var(--sp-4)}
+  .row{display:flex; justify-content:space-between; gap:var(--sp-4);
+       padding:var(--sp-3) 0; border-bottom:1px solid var(--line); font-size:.95rem}
+  .row dt{color:var(--muted); margin:0} .row dd{margin:0; text-align:right}
+  .ref{font-variant-numeric:tabular-nums; word-break:break-all}
+
+  details{margin-top:var(--sp-4)}
+  /* Kill the native marker in every engine before drawing our own, or Chrome
+     renders both and the row reads "▶ ›". ::-webkit-details-marker alone is no
+     longer enough — modern Chrome uses ::marker. */
+  summary{cursor:pointer; color:var(--muted); font-size:.95rem;
+          padding:var(--sp-2) 0; list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::marker{content:""}
+  summary::before{content:"›"; display:inline-block; margin-right:var(--sp-2);
+                  transition:transform .15s ease}
+  details[open] summary::before{transform:rotate(90deg)}
+
+  footer{max-width:34rem;margin:0 auto;padding:0 var(--sp-4) var(--sp-6);
+         color:var(--muted); font-size:.85rem}
+
+  /* Focus must be obvious — this page is used one-handed, and by keyboard. */
+  a:focus-visible,button:focus-visible,summary:focus-visible{
+    outline:3px solid var(--brass); outline-offset:2px; border-radius:var(--r-sm)}
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+  @media (min-width:33rem){ h1{font-size:1.75rem} .amount{font-size:2.9rem} }
+</style>
+</head>
+<body>
+<div class="brand">
+  <span class="brand-mark" aria-hidden="true">₹</span>
+  <span class="brand-name">Payment recovery</span>
+</div>
+<main>{% block content %}{% endblock %}</main>
+<footer>{% block footer %}{% endblock %}</footer>
+</body>
+</html>

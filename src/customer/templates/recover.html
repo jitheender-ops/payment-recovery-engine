@@ -1,0 +1,156 @@
+{#
+  One customer, one failed payment, one page.
+
+  Order is deliberate and is the reader's order of anxiety, not ours:
+    1. how much           the number they are worried about
+    2. where their money is   the actual question behind every support call
+    3. what happened      in their words
+    4. what to do         exactly one primary action
+    5. the details        folded away; nobody reads a bank name first
+
+  `state` is computed server-side in routes.py on every request. The template
+  never infers status from anything it was handed.
+#}
+{% extends "base.html" %}
+{% block title %}
+  {% if state == "recovered" %}Payment received{% else %}Your payment{% endif %}
+{% endblock %}
+
+{% block content %}
+
+{% if state == "recovered" %}
+  <h1>Payment received</h1>
+  <div class="card">
+    <p class="muted small">Paid</p>
+    <p class="amount">{{ recovered }}</p>
+    <div class="status is-done">
+      <span class="status-icon" aria-hidden="true">✓</span>
+      <div><strong>This payment is complete.</strong> Nothing further is needed.
+      You can close this page.</div>
+    </div>
+  </div>
+
+{% elif state == "confirming" %}
+  <h1>We're confirming your payment</h1>
+  <div class="card">
+    <p class="muted small">Amount</p>
+    <p class="amount">{{ amount }}</p>
+    <div class="status is-wait">
+      <span class="status-icon" aria-hidden="true">!</span>
+      <div><strong>Don't pay again yet.</strong> A payment is going through and
+      we're waiting for your bank to confirm it. This usually takes under a
+      minute. Paying now could charge you twice.</div>
+    </div>
+  </div>
+  <a class="btn btn-quiet" href="/recover/{{ token }}">Check again</a>
+
+{% elif state == "unknown" %}
+  <h1>We can't confirm this payment yet</h1>
+  <div class="card">
+    <p class="muted small">Amount</p>
+    <p class="amount">{{ amount }}</p>
+    <div class="status is-wait">
+      <span class="status-icon" aria-hidden="true">?</span>
+      <div><strong>A payment was started and we haven't had a result.</strong>
+      We're deliberately not offering another attempt, because we can't yet rule
+      out that the first one succeeded. Check your bank statement, or contact
+      support with the reference below.</div>
+    </div>
+  </div>
+  <a class="btn btn-quiet" href="/recover/{{ token }}">Check again</a>
+
+{% elif state == "opted_out" %}
+  <h1>We've stopped contacting you</h1>
+  <div class="card">
+    <div class="status is-safe">
+      <span class="status-icon" aria-hidden="true">✓</span>
+      <div>You asked us not to contact you about this payment, and we haven't.
+      {{ detail.money }}</div>
+    </div>
+  </div>
+
+{% elif state in ("stopped", "not_retryable") %}
+  <h1>{{ detail.headline }}</h1>
+  <div class="card">
+    <p class="muted small">Amount</p>
+    <p class="amount">{{ amount }}</p>
+    <div class="status is-safe">
+      <span class="status-icon" aria-hidden="true">✓</span>
+      <div>{{ detail.money }}</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>What to do</h2>
+    <p>{{ detail.next }}</p>
+    {% if state == "stopped" %}
+      <p class="muted small">We're no longer retrying this payment
+      automatically.</p>
+    {% endif %}
+  </div>
+
+{% else %}{# payable #}
+  <h1>{{ detail.headline }}</h1>
+
+  {# The signature block: the amount, and immediately beneath it the sentence
+     that answers what they actually came here to find out. #}
+  <div class="card">
+    <p class="muted small">Amount</p>
+    <p class="amount">{{ amount }}</p>
+    <div class="status is-safe">
+      <span class="status-icon" aria-hidden="true">✓</span>
+      <div>{{ detail.money }}</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>What to do</h2>
+    <p>{{ detail.next }}</p>
+    <form method="post" action="/recover/{{ token }}/pay" id="payform">
+      <button class="btn" type="submit" id="paybtn">
+        Pay {{ amount }} securely
+      </button>
+    </form>
+    <p class="muted small" style="margin-top:.75rem;margin-bottom:0">
+      Opens Razorpay. You'll come back here once it's done.
+    </p>
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>This payment</h2>
+  <dl class="rows" style="margin-top:0">
+    <div class="row"><dt>Reference</dt><dd class="ref">{{ order_ref }}</dd></div>
+    {% if method %}<div class="row"><dt>Method</dt><dd>{{ method }}{% if bank %} · {{ bank }}{% endif %}</dd></div>{% endif %}
+    {% if failed_at %}<div class="row"><dt>Attempted</dt><dd>{{ failed_at.strftime("%d %b %Y, %I:%M %p") }}</dd></div>{% endif %}
+  </dl>
+  <details>
+    <summary>Is it safe to pay here?</summary>
+    <p class="small muted" style="margin-top:.5rem">
+      Payment is handled by Razorpay — we never see or store your card details.
+      This page shows only your own payment and the link expires on its own.
+    </p>
+  </details>
+</div>
+
+{% if state == "payable" %}
+<script>
+  // Progressive enhancement only. The server re-reads the case on every POST
+  // and refuses anything that is not payable, so this guard is a courtesy that
+  // stops the spinner-tap, not the thing preventing a double charge.
+  (function () {
+    var f = document.getElementById('payform'), b = document.getElementById('paybtn');
+    if (!f || !b) return;
+    f.addEventListener('submit', function () {
+      b.setAttribute('aria-disabled', 'true');
+      b.textContent = 'Opening Razorpay…';
+      setTimeout(function () { b.disabled = true; }, 0);
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}
+
+{% block footer %}
+  Trouble with this payment? Reply to the message we sent you and quote
+  <span class="ref">{{ order_ref }}</span>.
+{% endblock %}

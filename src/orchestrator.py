@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src import recovery_link
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
 from src.cases import attach_attempt, close_case, log_event, open_case, stop_reason
@@ -435,11 +436,27 @@ class PaymentRecoveryOrchestrator:
 
         if action.action in ("nudge_customer", "switch_rail"):
             try:
+                # Point them at the recovery page rather than straight at a
+                # payment link. A bare link asks for money again and explains
+                # nothing — the page answers "has my money already gone" first,
+                # and refuses to offer payment at all while an earlier attempt
+                # is still confirming.
+                #
+                # Returns None when RECOVERY_LINK_SECRET or PUBLIC_BASE_URL is
+                # unset, and the wording then falls back to exactly what it said
+                # before. Configuring the page is what turns this on; nothing
+                # about the existing flow changes until it is.
+                page = recovery_link.url_for(case.id)
+                next_step = (
+                    f"Check your payment and pay securely here: {page}"
+                    if page
+                    else "Please try again using a different payment method."
+                )
                 nudge_message = await self._nudge_gen.generate(
                     failure_class=failure_record.failure_class,
                     amount=failure_record.amount,
                     method=failure_record.method,
-                    next_step="Please try again using a different payment method.",
+                    next_step=next_step,
                     customer_name=None,
                 )
                 attempt.nudge_message = nudge_message

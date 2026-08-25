@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI
 from src import scheduler
 from src.auth import require_api_key
 from src.config import get_settings
+from src.customer.routes import router as customer_router
 from src.database import close_db, init_db
 from src.ingestion.router import router as webhook_router
 
@@ -87,6 +88,16 @@ app = FastAPI(
 
 # ── Routes ───────────────────────────────────────────────────────────────
 app.include_router(webhook_router, prefix="/webhooks", tags=["webhooks"])
+
+# The customer-facing recovery page. Deliberately NOT behind require_api_key:
+# the reader is a member of the public who just had a payment fail, and cannot
+# hold an API key. Its authentication is the signed, expiring, single-case token
+# in the URL (src/recovery_link.py), and with RECOVERY_LINK_SECRET unset every
+# token is rejected, so the surface is closed until it is configured on purpose.
+#
+# include_in_schema=False: these routes are for humans with a link, not for API
+# clients, and listing them in the schema only advertises the shape of the URL.
+app.include_router(customer_router, tags=["customer"], include_in_schema=False)
 
 if not _docs_public:
     # The schema itself stays useful outside development — client codegen and

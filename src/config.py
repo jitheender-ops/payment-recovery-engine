@@ -118,6 +118,20 @@ class Settings(BaseSettings):
     # — they complain about the fourth arriving as fast as the first.
     escalation_backoff_hours: int = 24
 
+    # ── Customer recovery page ───────────────────────────────────────────
+    # Signs the /recover/<token> links handed to customers. A DEDICATED secret,
+    # not the Razorpay webhook one: a leak of either must not be a leak of both,
+    # and they authorise completely different things — one proves Razorpay's
+    # identity, the other lets a stranger view somebody's failed payment.
+    #
+    # Empty means the page is OFF and every token is rejected. Fail closed, for
+    # the same reason api_key and the Razorpay secrets do.
+    recovery_link_secret: SecretStr = SecretStr("")
+    # Absolute origin the customer reaches us on, e.g. https://pay.acme.in —
+    # needed because a link inside an SMS cannot be relative. Without it,
+    # url_for() returns None and messaging falls back to the raw payment link.
+    public_base_url: str = ""
+
     # ── ML baseline ──────────────────────────────────────────────────────
     # Where the trained model lives. The README calls this policy the "XGBoost
     # baseline"; without a file here it silently runs the rule-based heuristic
