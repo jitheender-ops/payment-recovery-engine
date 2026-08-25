@@ -211,12 +211,34 @@ async def test_an_exhausted_case_still_explains_itself(
     assert "no longer retrying" in body
 
 
-async def test_status_is_never_carried_by_colour_alone(
-    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize(
+    ("seed", "verdict"),
+    [
+        ({}, "Still with you"),
+        ({"state": "recovered", "recovered": 249900}, "Received"),
+        ({"state": "exhausted"}, "Still with you"),
+        ({"state": "opted_out"}, "Still with you"),
+        ({"failure_class": "fraud_block"}, "Still with you"),
+        ({"attempt_result": "pending"}, "Moving now"),
+        ({"attempt_result": "pending", "attempt_age_min": 90}, "Not confirmed"),
+    ],
+)
+async def test_state_is_never_carried_by_colour_alone(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    seed: dict[str, Any],
+    verdict: str,
 ) -> None:
-    case_id = await _seed(db_sessionmaker)
+    """
+    The custody rail says where the money is by moving a coloured block. Colour
+    is the second signal and never the only one: every state must also write
+    the verdict out, and hand a screen reader a whole sentence rather than a
+    bar it cannot see.
+    """
+    case_id = await _seed(db_sessionmaker, **seed)
     body = client.get(f"/recover/{recovery_link.mint(case_id)}").text
-    assert 'class="status-icon"' in body, "status needs a glyph, not just a fill"
+    assert f">{verdict}.</p>" in body, "the rail needs a written verdict, not just a fill"
+    assert 'role="img" aria-label="' in body, "the rail needs a spoken equivalent"
     assert "noindex" in body and "no-referrer" in body
 
 

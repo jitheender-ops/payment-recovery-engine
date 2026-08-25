@@ -3,14 +3,15 @@
 {% block title %}Link expired{% endblock %}
 {% block content %}
 <h1>This link has expired</h1>
-<div class="card">
-  <div class="status is-wait">
-    <span class="status-icon" aria-hidden="true">!</span>
-    <div><strong>Recovery links stop working after a few days</strong>, so they
-    can't be reused if the message is forwarded or found later.</div>
-  </div>
-  <p style="margin-top:1rem">No money has left your account through this link.
-  If you still need to pay, reply to the message we sent you and we'll send a
-  fresh one.</p>
+<div class="note hold">
+  <p><strong>Recovery links stop working after a few days</strong>, so they
+  can't be reused if the message is forwarded or found later.</p>
 </div>
+<p>No money has left your account through this link. If you still need to pay,
+reply to the message we sent you and we'll send a fresh one.</p>
+{% endblock %}
+
+{% block footer %}
+  We can't show payment details for an expired link. That is deliberate, so a
+  forwarded message reveals nothing.
 {% endblock %}

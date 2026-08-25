@@ -1,16 +1,19 @@
 {#
   Shell for the customer-facing pages.
 
-  All CSS is inline and there is no JavaScript framework. That is not
-  minimalism for its own sake: the reader is on a phone, on Indian mobile data,
-  seconds after a payment failed. Every extra request is another chance for the
-  page that explains where their money went to not arrive. One document, one
-  paint, works with JS disabled.
+  The reader is on a phone, on Indian mobile data, seconds after a payment
+  failed, and half of them are looking at a debit alert on their lock screen.
+  One document, one paint, no framework, works with JS disabled.
 
-  Light and roomy rather than the ops console's dark ink. That palette is right
-  for an operator reading dense tables all day and wrong for an anxious person
-  reading four sentences once — a dark technical surface reads as "system
-  internals" exactly when someone needs reassurance.
+  Two web fonts load, and the page is COMPLETE without them: body prose is the
+  system stack, and the money falls back to the platform monospace, which is
+  already tabular. The fonts improve the page on arrival; they never gate it.
+
+  Visual language is the Indian payment record — cheque-stock paper, hairline
+  rules, a monospaced register, and money written the way a statement writes it.
+  Light and quiet, not the ops console's dense dark ink: that palette is right
+  for an operator reading tables all day and wrong for an anxious person
+  reading four sentences once.
 #}
 <!doctype html>
 <html lang="en">
@@ -19,111 +22,199 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 {# The URL is the credential. Keep it out of referrer headers on the way to
-   Razorpay, and out of search indexes entirely. #}
+   Razorpay and to the font host, and out of search indexes entirely. #}
 <meta name="referrer" content="no-referrer">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="light dark">
 <title>{% block title %}Your payment{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
 <style>
   :root {
-    --ground:#FBFAF7; --card:#FFFFFF; --ink:#14181F; --muted:#59616E;
-    --line:#E6E2DA; --brass:#7A6008; --safe:#14663D; --caution:#8A5A12;
-    --stop:#A33B22;
+    /* Cheque stock and note ink, not the warm-cream editorial default.
+       --hold is the lavender of a 100-rupee note: money in transit reads as
+       suspended, which is what it is, rather than as a warning. */
+    --slip:#F0F2EF; --field:#FFFFFF;
+    --ink:#171A18; --quiet:#565E58; --rule:#C7CCC6; --rule-soft:#E1E5E0;
+    --hold:#6E5A97; --settled:#0F6B3E; --halt:#A32424;
+    --hatch:#EDE9F3; --btn-hover:#000000; --btn-active:#2C312D;
+
+    --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --display:"IBM Plex Sans Condensed",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    --text:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+
     --sp-1:.25rem; --sp-2:.5rem; --sp-3:.75rem; --sp-4:1rem;
     --sp-5:1.5rem; --sp-6:2rem; --sp-7:3rem;
-    --r-sm:8px; --r-md:12px; --r-lg:16px;
-    --shadow:0 1px 2px rgba(20,24,31,.05), 0 8px 24px -12px rgba(20,24,31,.12);
+    --r:3px;
   }
   *,*::before,*::after{box-sizing:border-box}
   html{-webkit-text-size-adjust:100%}
   body{
-    margin:0; background:var(--ground); color:var(--ink);
-    /* System stack: zero network cost and no invisible-text flash on a slow
-       connection. The type does its work through scale and tabular figures
-       rather than a novelty face this reader would wait for. */
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-    font-size:17px; line-height:1.55;
+    margin:0; background:var(--slip); color:var(--ink);
+    font-family:var(--text); font-size:17px; line-height:1.55;
     -webkit-font-smoothing:antialiased;
   }
-  main{max-width:34rem; margin:0 auto; padding:var(--sp-5) var(--sp-4) var(--sp-7)}
-  h1{font-size:1.5rem; line-height:1.25; letter-spacing:-.015em; margin:0 0 var(--sp-3)}
-  h2{font-size:.8rem; text-transform:uppercase; letter-spacing:.07em;
-     color:var(--muted); margin:0 0 var(--sp-2); font-weight:600}
+  main{max-width:33rem; margin:0 auto; padding:var(--sp-5) var(--sp-4) var(--sp-6)}
+
+  h1{font-family:var(--display); font-weight:600; font-size:1.6rem;
+     line-height:1.18; letter-spacing:0; margin:0 0 var(--sp-4)}
   p{margin:0 0 var(--sp-3)}
-  .muted{color:var(--muted)}
-  .small{font-size:.9rem}
+  .quiet{color:var(--quiet)}
+  .small{font-size:.92rem}
 
-  .brand{display:flex; align-items:center; gap:var(--sp-2);
-         padding:var(--sp-4) var(--sp-4) 0; max-width:34rem; margin:0 auto}
-  .brand-mark{width:22px;height:22px;border-radius:6px;background:var(--brass);
-              color:#fff;display:grid;place-items:center;font-size:.8rem;font-weight:700}
-  .brand-name{font-weight:600;font-size:.95rem}
+  /* Masthead: a hairline rule, not a logo lockup. This service is not the
+     point of the page. TODO: when the merchant name is plumbed through
+     PaymentFailure, it belongs here — it is a better trust anchor than ours. */
+  .masthead{max-width:33rem; margin:0 auto;
+            padding:var(--sp-4) var(--sp-4) var(--sp-3);
+            display:flex; align-items:baseline; gap:var(--sp-2);
+            font-family:var(--mono); font-size:.68rem; font-weight:500;
+            letter-spacing:.16em; text-transform:uppercase; color:var(--quiet)}
+  .masthead::after{content:""; flex:1; height:1px; background:var(--rule);
+                   align-self:center; margin-left:var(--sp-1)}
 
-  .card{background:var(--card); border:1px solid var(--line);
-        border-radius:var(--r-lg); padding:var(--sp-5); box-shadow:var(--shadow);
-        margin-bottom:var(--sp-4)}
+  /* ---- The money ---------------------------------------------------- */
+  .amount{font-family:var(--mono); font-weight:600; font-size:3rem;
+          line-height:1; letter-spacing:-.03em; font-variant-numeric:tabular-nums;
+          margin:0 0 var(--sp-5)}
+  /* A crore has five more glyphs than a thousand, and mono advance width is
+     fixed, so the display size has to come down or the number runs off the
+     right edge of a 320px phone. The server knows the digit count; the
+     template sets this class rather than letting the page overflow. */
+  .amount-long{font-size:2rem; letter-spacing:-.02em}
 
-  /* Money is the question on this page, so it gets the largest type and
-     tabular figures — digits that do not shift width as they change. */
-  .amount{font-size:2.4rem; line-height:1.1; font-weight:650; letter-spacing:-.02em;
-          font-variant-numeric:tabular-nums; margin:0}
+  /* ---- The custody rail: this page's one bold element ----------------
+     Where the money physically is, rendered as a position rather than a
+     status badge. "Where is my money" is the question every support call is
+     really asking; a badge answers the merchant's question instead.
+     It renders exactly what _view_state() knows and never more.            */
+  .rail{margin:0 0 var(--sp-5)}
+  .rail-track{position:relative; height:15px; background:var(--field);
+              border:1px solid var(--rule); border-radius:var(--r);
+              display:grid; grid-template-columns:repeat(3,1fr); overflow:hidden}
+  .rail-track i{border-right:1px solid var(--rule-soft)}
+  .rail-track i:last-child{border-right:0}
+  .rail-block{position:absolute; top:0; bottom:0; width:33.3333%;
+              background:var(--ink);
+              animation:settle .62s cubic-bezier(.2,.8,.2,1) both}
+  .at-you{left:0} .at-transit{left:33.3333%} .at-them{left:66.6667%}
+  .rail-block.on-hold{background:var(--hold)}
+  .rail-block.on-settled{background:var(--settled)}
+  .rail-block.on-quiet{background:var(--quiet)}
+  /* Unverified money gets a second, non-colour channel: hatching. It survives
+     greyscale, colour blindness and forced-colors, where a yellow "?" does not. */
+  .rail-block.on-unknown{
+    background:repeating-linear-gradient(135deg,
+      var(--hold) 0 4px, var(--hatch) 4px 8px)}
+  .rail-block.breathe{animation:settle .62s cubic-bezier(.2,.8,.2,1) both,
+                                pulse 2.4s ease-in-out .62s infinite}
+  @keyframes settle{from{transform:translateX(-100%); opacity:0}
+                    to{transform:none; opacity:1}}
+  @keyframes pulse{0%,100%{opacity:1} 50%{opacity:.55}}
 
-  /* Status never rides on colour alone: every one carries a glyph and a word,
-     so it survives colour blindness, greyscale printing and forced-colors. */
-  .status{display:flex; gap:var(--sp-3); align-items:flex-start;
-          padding:var(--sp-4); border-radius:var(--r-md); margin:var(--sp-4) 0 0}
-  .status-icon{flex:0 0 auto; width:1.4rem; height:1.4rem; border-radius:50%;
-               display:grid; place-items:center; font-size:.85rem; font-weight:700;
-               color:#fff; margin-top:.1rem}
-  .is-safe   {background:#EAF3EE; color:#0E4F2E} .is-safe .status-icon{background:var(--safe)}
-  .is-wait   {background:#FBF2E3; color:#6E4A0E} .is-wait .status-icon{background:var(--caution)}
-  .is-stop   {background:#FBECE8; color:#83301C} .is-stop .status-icon{background:var(--stop)}
-  .is-done   {background:#EAF3EE; color:#0E4F2E} .is-done .status-icon{background:var(--safe)}
+  .rail-legend{display:grid; grid-template-columns:repeat(3,1fr);
+               margin-top:var(--sp-2); font-family:var(--mono);
+               font-size:.68rem; letter-spacing:.09em; text-transform:uppercase;
+               color:var(--quiet)}
+  .rail-legend span{text-align:center}
+  .rail-legend span:first-child{text-align:left}
+  .rail-legend span:last-child{text-align:right}
+  .rail-legend .here{color:var(--ink); font-weight:600}
+  .rail-verdict{font-family:var(--display); font-weight:600; font-size:1.15rem;
+                margin:var(--sp-3) 0 0}
 
+  /* ---- Ruled section head: statement vernacular, and it is true — this
+     page is a record. Not numbered; nothing here is a sequence. ---------- */
+  .sec{display:flex; align-items:center; gap:var(--sp-3);
+       margin:var(--sp-6) 0 var(--sp-3)}
+  .sec h2{margin:0; white-space:nowrap; font-family:var(--mono);
+          font-size:.68rem; font-weight:500; letter-spacing:.14em;
+          text-transform:uppercase; color:var(--quiet)}
+  .sec::after{content:""; flex:1; height:1px; background:var(--rule)}
+
+  /* ---- Notes: a ruled margin, never a tinted pill. Colour is the second
+     signal; the lead word is the first. ---------------------------------- */
+  .note{border-left:2px solid var(--rule); padding:var(--sp-1) 0 var(--sp-1) var(--sp-4);
+        margin:0 0 var(--sp-4)}
+  .note.hold{border-left-color:var(--hold)}
+  .note.settled{border-left-color:var(--settled)}
+  .note.halt{border-left-color:var(--halt)}
+  .note p:last-child{margin-bottom:0}
+
+  /* ---- Actions ------------------------------------------------------- */
   .btn{display:flex; align-items:center; justify-content:center; gap:var(--sp-2);
-       width:100%; min-height:52px; padding:var(--sp-3) var(--sp-5);
-       border-radius:var(--r-md); border:1px solid transparent;
-       font-size:1.05rem; font-weight:600; font-family:inherit;
-       background:var(--brass); color:#fff; cursor:pointer; text-decoration:none;
-       transition:filter .12s ease}
-  .btn:hover{filter:brightness(1.08)}
-  .btn:active{filter:brightness(.94)}
-  .btn[disabled],.btn[aria-disabled="true"]{opacity:.65; cursor:progress}
-  .btn-quiet{background:transparent; color:var(--ink); border-color:var(--line)}
+       width:100%; min-height:56px; padding:var(--sp-3) var(--sp-5);
+       border-radius:var(--r); border:1px solid var(--ink);
+       font-family:var(--display); font-size:1.1rem; font-weight:600;
+       background:var(--ink); color:var(--field); cursor:pointer;
+       text-decoration:none; transition:background .14s ease,color .14s ease}
+  .btn:hover{background:var(--btn-hover)}
+  .btn:active{background:var(--btn-active)}
+  .btn[disabled],.btn[aria-disabled="true"]{opacity:.6; cursor:progress}
+  .btn-quiet{background:transparent; color:var(--ink); border-color:var(--rule)}
+  .btn-quiet:hover{background:var(--field); color:var(--ink)}
 
-  .rows{border-top:1px solid var(--line); margin-top:var(--sp-4)}
-  .row{display:flex; justify-content:space-between; gap:var(--sp-4);
-       padding:var(--sp-3) 0; border-bottom:1px solid var(--line); font-size:.95rem}
-  .row dt{color:var(--muted); margin:0} .row dd{margin:0; text-align:right}
-  .ref{font-variant-numeric:tabular-nums; word-break:break-all}
+  /* ---- The register: a passbook, set in mono and right-aligned -------- */
+  .register{margin:0; border-top:1px solid var(--rule-soft)}
+  .register div{display:flex; justify-content:space-between; gap:var(--sp-4);
+                padding:var(--sp-3) 0; border-bottom:1px solid var(--rule-soft);
+                font-size:.92rem}
+  .register dt{color:var(--quiet); margin:0}
+  .register dd{margin:0; text-align:right; font-family:var(--mono);
+               font-size:.86rem; font-variant-numeric:tabular-nums;
+               word-break:break-all}
 
-  details{margin-top:var(--sp-4)}
+  details{margin-top:var(--sp-3)}
   /* Kill the native marker in every engine before drawing our own, or Chrome
-     renders both and the row reads "▶ ›". ::-webkit-details-marker alone is no
+     renders both and the row reads "> ›". ::-webkit-details-marker alone is no
      longer enough — modern Chrome uses ::marker. */
-  summary{cursor:pointer; color:var(--muted); font-size:.95rem;
+  summary{cursor:pointer; color:var(--quiet); font-size:.92rem;
           padding:var(--sp-2) 0; list-style:none}
   summary::-webkit-details-marker{display:none}
   summary::marker{content:""}
-  summary::before{content:"›"; display:inline-block; margin-right:var(--sp-2);
-                  transition:transform .15s ease}
-  details[open] summary::before{transform:rotate(90deg)}
+  summary::before{content:"+"; font-family:var(--mono); display:inline-block;
+                  width:1rem; transition:transform .15s ease}
+  details[open] summary::before{content:"−"}
 
-  footer{max-width:34rem;margin:0 auto;padding:0 var(--sp-4) var(--sp-6);
-         color:var(--muted); font-size:.85rem}
+  footer{max-width:33rem; margin:0 auto;
+         padding:var(--sp-5) var(--sp-4) var(--sp-7);
+         border-top:1px solid var(--rule); color:var(--quiet); font-size:.86rem}
+  .mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
 
-  /* Focus must be obvious — this page is used one-handed, and by keyboard. */
+  /* Night ledger. The same cheque-stock language after dark, not the ops
+     console: a payment page that blasts pure white at somebody checking their
+     phone at 1am is a defect, and forcing light ignores a preference they set
+     deliberately. Only the tokens move; every rule below is written once. */
+  @media (prefers-color-scheme:dark){
+    :root{
+      --slip:#141815; --field:#1C211D;
+      --ink:#E8EBE7; --quiet:#99A29B; --rule:#39413B; --rule-soft:#2A312C;
+      --hold:#A996CE; --settled:#4FBF87; --halt:#E88C8C;
+      --hatch:#2E2A38; --btn-hover:#FFFFFF; --btn-active:#C2C7C1;
+    }
+    /* The rail track is a container, not a surface: on dark it must read as a
+       recess the block sits in, so it takes the page ground rather than the
+       raised field colour. */
+    .rail-track{background:#0F120F}
+  }
+
+  /* Used one-handed, and by keyboard. Focus is never subtle. */
   a:focus-visible,button:focus-visible,summary:focus-visible{
-    outline:3px solid var(--brass); outline-offset:2px; border-radius:var(--r-sm)}
+    outline:2px solid var(--ink); outline-offset:3px; border-radius:var(--r)}
 
-  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-  @media (min-width:33rem){ h1{font-size:1.75rem} .amount{font-size:2.9rem} }
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none!important}
+    .rail-block,.rail-block.breathe{animation:none!important; opacity:1}
+  }
+  @media (min-width:33rem){
+    h1{font-size:1.95rem}
+    .amount{font-size:3.6rem}
+    .amount-long{font-size:2.8rem}
+  }
 </style>
 </head>
 <body>
-<div class="brand">
-  <span class="brand-mark" aria-hidden="true">₹</span>
-  <span class="brand-name">Payment recovery</span>
-</div>
+<div class="masthead">Payment recovery</div>
 <main>{% block content %}{% endblock %}</main>
 <footer>{% block footer %}{% endblock %}</footer>
 </body>

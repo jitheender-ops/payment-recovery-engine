@@ -36,7 +36,7 @@ class Explanation(NamedTuple):
 # true fact every time, and varying the wording would imply the answer changes.
 _HELD = (
     "No money has left your account. If your bank showed a debit, that is a "
-    "temporary hold and it is released automatically within 3–5 working days."
+    "temporary hold and it is released automatically within 3 to 5 working days."
 )
 
 _BY_CLASS: dict[str, Explanation] = {
@@ -67,7 +67,7 @@ _BY_CLASS: dict[str, Explanation] = {
     "network_error": Explanation(
         "The connection dropped while the payment was going through",
         _HELD,
-        "Pay below — this usually works on the second attempt.",
+        "Pay below. This usually works on the second attempt.",
         True,
     ),
     "payment_timeout": Explanation(
