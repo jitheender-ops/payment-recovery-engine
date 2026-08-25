@@ -18,11 +18,16 @@ leaks, and the two never swap roles anywhere in the product.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # ── Surfaces and ink ─────────────────────────────────────────────────────
 INK = "#12161C"        # page ground
@@ -98,6 +103,31 @@ def compact_inr(paise: float) -> str:
     if rupees >= 1_000:
         return f"{sign}₹{rupees / 1_000:.1f}K"
     return f"{sign}₹{rupees:,.0f}"
+
+
+def fmt_ist(ts: Any) -> str:
+    """
+    A DB timestamp as the wall clock the team runs on.
+
+    Every timestamp in Postgres is UTC; this audience prices things in IST and
+    the guardrail's own blackout window is an IST window, so a naive "2026-08-25
+    05:10:44+00:00" is a small lie someone has to undo in their head. Naive
+    input (SQLite, test harnesses) is treated as UTC, matching the service's
+    own convention. Unparseable input passes through untouched — better an
+    ugly string than a fabricated time.
+    """
+    if ts is None or (isinstance(ts, float) and pd.isna(ts)):
+        return "—"
+    try:
+        parsed: datetime = pd.Timestamp(ts).to_pydatetime()
+    except Exception:
+        return str(ts)
+    if parsed.tzinfo is None:
+        from datetime import UTC
+
+        parsed = parsed.replace(tzinfo=UTC)
+    local: datetime = parsed.astimezone(IST)
+    return local.strftime("%d %b %H:%M IST")
 
 
 # ── Chart template ───────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ Every page now routes its empty case through one honest message.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import streamlit as st
@@ -40,13 +40,20 @@ def get_db_engine() -> Engine | None:
 
 
 @st.cache_data(ttl=30)
-def query_db(query: str) -> pd.DataFrame | None:
-    """Run a read query. None when the database is unreachable or the query fails."""
+def query_db(
+    query: str, params: dict[str, Any] | None = None
+) -> pd.DataFrame | None:
+    """
+    Run a read query. None when the database is unreachable or the query fails.
+
+    `params` are bound parameters (SQLAlchemy named style), so a filtered page
+    never formats user-adjacent values into SQL text.
+    """
     engine = get_db_engine()
     if engine is None:
         return None
     try:
-        return pd.read_sql(query, engine)
+        return pd.read_sql(query, engine, params=params or {})
     except Exception:
         return None
 

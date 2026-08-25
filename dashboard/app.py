@@ -131,9 +131,47 @@ with st.sidebar:
     )
     page = st.radio(
         "Section",
-        ["Overview", "Recovery funnel", "Banks & rails", "Policy eval"],
+        [
+            "Overview",
+            "Recovery funnel",
+            "Banks & rails",
+            "Policy eval",
+            "Cases & audit",
+            "Operations",
+        ],
         label_visibility="collapsed",
+        captions=[
+            "Money at risk, and what came back",
+            "Where the pipeline leaks",
+            "Measured routing quality",
+            "Does the agent beat the baseline",
+            "Lifecycle and audit trail of every case",
+            "Scheduler, guardrail vetoes, ledger health",
+        ],
     )
+    st.divider()
+
+    # Live connection chip. A console that cannot say whether it is looking at
+    # real data is a console that shows stale numbers with total confidence.
+    from dashboard.db import get_db_engine
+
+    connected = get_db_engine() is not None
+    st.markdown(
+        f"""
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
+                     background:{'#5F9752' if connected else theme.CLAY};
+                     margin-right:0.45rem;"></span>
+        <span style="color:{theme.SLATE};font-size:0.76rem;">
+            {'database connected' if connected else 'database unreachable'}
+        </span>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Data caches live for 30s; this button is how an operator forces now.
+    if st.button("Refresh data", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
 
 # ── Overview ─────────────────────────────────────────────────────────────
 if page == "Overview":
@@ -207,7 +245,10 @@ if page == "Overview":
         FROM retry_attempts ra ORDER BY ra.created_at DESC LIMIT 25
     """)
     if recent is not None and len(recent) > 0:
-        st.dataframe(recent, width="stretch", hide_index=True)
+        show = recent.copy()
+        show["When"] = show["When"].map(theme.fmt_ist)
+        show["Fires at"] = show["Fires at"].map(theme.fmt_ist)
+        st.dataframe(show, width="stretch", hide_index=True)
     else:
         # Deliberately not a demo table. The five fabricated rows that used to
         # render here were indistinguishable from live output, and that is
@@ -223,3 +264,9 @@ elif page == "Banks & rails":
 elif page == "Policy eval":
     from dashboard.views import eval_results
     eval_results.render()
+elif page == "Cases & audit":
+    from dashboard.views import cases_audit
+    cases_audit.render()
+elif page == "Operations":
+    from dashboard.views import operations
+    operations.render()
