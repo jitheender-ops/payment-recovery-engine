@@ -147,7 +147,10 @@ class EvalRunner:
         policies_factory: dict[str, Callable[[], Any]] = {
             "No Retry": lambda: NoRetryPolicy(),
             "Fixed 3-Retry": lambda: FixedRetryPolicy(max_retries=3, delay_minutes=15),
-            "XGBoost/Rules": lambda: XGBoostPolicy(),
+            # Labelled plainly "XGBoost": decide() consults the trained model
+            # when one exists and falls back to rules when it does not —
+            # decision_mix records which ran, so the label doesn't have to hedge.
+            "XGBoost": lambda: XGBoostPolicy(),
         }
 
         if not self.skip_llm:
@@ -490,7 +493,7 @@ class EvalRunner:
         # Print headline metric — net of retry cost, and stated against the
         # baseline rather than against zero. "₹X recovered" on its own is not a
         # result; the baseline already recovers most of it.
-        agent, base = results.get("XGBoost/Rules"), results.get(self.BASELINE)
+        agent, base = results.get("XGBoost"), results.get(self.BASELINE)
         if agent and base:
             delta_net = agent["net_₹_per_₹1Cr_failed"] - base["net_₹_per_₹1Cr_failed"]
             fewer = base["retry_cost_avg"] - agent["retry_cost_avg"]

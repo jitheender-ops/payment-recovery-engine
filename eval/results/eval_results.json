@@ -33,7 +33,7 @@
       "net_\u20b9_per_\u20b91Cr_failed": 1795743.6,
       "net_\u20b9_per_\u20b91Cr_failed_std": 83842.82
     },
-    "XGBoost/Rules": {
+    "XGBoost": {
       "recovery_rate_%": 30.24,
       "recovery_rate_%_std": 0.51,
       "retry_cost_avg": 2.32,
@@ -73,7 +73,7 @@
         "significant": true
       }
     },
-    "XGBoost/Rules": {
+    "XGBoost": {
       "recovery_rate_pp": {
         "mean_delta": 11.028,
         "ci95_halfwidth": 0.489,
@@ -97,7 +97,7 @@
     }
   },
   "economics_vs_baseline": {
-    "XGBoost/Rules": {
+    "XGBoost": {
       "delta_revenue_per_crore": 1162432.0,
       "delta_attempts_per_crore": -4030.0,
       "break_even_cost_per_retry_inr": null,

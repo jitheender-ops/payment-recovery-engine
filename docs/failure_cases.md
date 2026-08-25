@@ -109,3 +109,55 @@ outbox/two-phase write, which is not implemented.
 - Multiple random seeds with variance reporting ensures the eval is statistically sound within the synthetic model.
 
 **Why we state this explicitly:** Naming this assumption is a maturity signal, not a weakness. Every model has a sim-to-real gap. The question is whether the system is designed to close it — and this one is.
+
+---
+
+## 8. Process Dies Before a BackgroundTask Runs
+
+**Trigger:** Restart, crash or deploy between the webhook router's 200 and the background task finishing. Razorpay will not re-send after a 200.
+
+**System response:**
+1. The router commits the event to `webhook_events` BEFORE returning 200, so it is durably stored even if processing never starts.
+2. The scheduler's `reconcile_events()` sweep re-runs `payment.failed` events still `processed=False` past an age threshold (`event_reconcile_after_seconds`).
+3. Events whose payload raises every tick get `processing_error` set so they cannot starve the batch.
+
+**What a reviewer sees:** A reconciled event in the logs; the payment gets its recovery attempt on the next tick instead of never.
+
+---
+
+## 9. Consent Withdrawn During a Deferred Wait
+
+**Trigger:** A `retry_at` approved at 22:00; the customer opts out at 23:00; the retry is due at 02:00.
+
+**System response:**
+1. `record_opt_out()` closes all open cases for the customer immediately.
+2. When the scheduler fires the deferred attempt, it re-reads case state and consent status at fire time.
+3. The scheduled attempt is marked `cancelled` with the reason, and a `stopped` audit event records who stopped it.
+
+**What a reviewer sees:** Attempt row with `result="cancelled"`, reason `"customer opted out of contact"` — not the 02:00 message a complaint would be about.
+
+---
+
+## 10. Two Webhooks Race the Same Idempotency Key
+
+**Trigger:** Duplicate delivery of one payment failure; both workers count attempts, derive the same key, pass check-before-execute.
+
+**System response:**
+1. The UNIQUE constraint on `retry_attempts.idempotency_key` breaks the tie BEFORE Razorpay is called.
+2. The loser catches the IntegrityError, rolls back and exits as a clean skip.
+3. The write-ahead commit ordering means the winner's row was already durable before its API call.
+
+**What a reviewer sees:** One attempt row per key ever. No second Payment Link.
+
+---
+
+## 11. Process Dies Mid-Execution (Stale Pending Attempts)
+
+**Trigger:** The write-ahead intent row is committed as `result="pending"`, then the process dies before the executor records the outcome. Nothing downstream resolves a pending row unless money arrives (`attribute_capture` supersedes it).
+
+**System response:**
+1. The scheduler's `reconcile_stale_attempts()` sweep claims pending rows older than `attempt_stale_after_seconds` (default 900s — the executor's own timeout bounds how long a live call can hold one) with a conditional UPDATE, so it cannot race an execution that just resolved them.
+2. The row becomes `result="failed"` with `result_details.scheduler = "stale-pending: no outcome … outcome unknown (fail-closed)"`, and a `reconciled` case event records it.
+3. Fail-closed by construction: the slot stays spent (a link MIGHT exist), but attribution still works — matching reads the idempotency-key breadcrumb, never `result`.
+
+**What a reviewer sees:** The dashboard "In flight" tile counts only genuinely unresolved work; lost attempts are visible as failed-with-reason instead of pending-forever.

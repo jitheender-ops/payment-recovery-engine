@@ -101,6 +101,7 @@ Layer 3: Policy Agent       → LLM/XGBoost → Constrained JSON action
 Layer 4: Guardrail Gate     → Schema + Business rules → BEFORE execution
 Layer 5: Recovery Messaging → Customer nudge (scoped LLM generation)
 Layer 6: Scheduler          → Fires deferred retries, reconciles dropped events
+                              and stale write-ahead attempts, expires promises
 ```
 
 ```mermaid
@@ -427,6 +428,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 | 8 | Process dies before a BackgroundTask runs | `reconcile_events()` re-runs events left `processed=False` past a threshold — Razorpay will not re-send after our 200 |
 | 9 | Consent withdrawn during a deferred wait | Re-validated at fire time; the scheduled retry is cancelled and audited |
 | 10 | Two webhooks race the same idempotency key | UNIQUE constraint decides before the API call; loser skips cleanly |
+| 11 | Process dies mid-execution, leaving a write-ahead row `pending` forever | `reconcile_stale_attempts()` resolves it to failed-outcome-unknown after a threshold — fail-closed (slot stays spent), but visible and audited instead of "in flight" forever |
 
 ## 🔧 Tech Stack
 
@@ -440,7 +442,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-179 tests, 82% statement coverage over `src/`. The money paths are where the
+211 tests, 86% statement coverage over `src/`. The money paths are where the
 coverage went:
 
 | Module | Coverage | Why it is covered |

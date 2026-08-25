@@ -1,0 +1,92 @@
+# The CI this repo's README describes. Three gates, matching run.sh --verify-only:
+#
+#   1. verify    ruff + mypy --strict + pytest on the Python floor (3.11) and
+#                ceiling (3.13 — the interpreter development actually runs on).
+#   2. migrate   scripts/check_migrations.py proves the Alembic chain builds a
+#                schema identical to the ORM's, on empty -> head, create_all ->
+#                head (no-op) and head -> base -> head. Runs on SQLite so no
+#                service container is needed; see that script for why.
+#   3. eval      trains the XGBoost baseline and runs the harness on small
+#                numbers, so the README's results table cannot quietly stop
+#                reproducing. No LLM: the fast mode needs no API keys.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: ruff + mypy + pytest (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy --strict
+        run: mypy src scripts eval
+
+      - name: pytest
+        run: pytest -q
+
+  migrations:
+    name: alembic chain vs ORM schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Migration chain check
+        run: python scripts/check_migrations.py
+
+  eval:
+    name: train model + eval harness reproduces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Train XGBoost baseline
+        run: python scripts/train_xgboost.py --n-samples 2000
+
+      - name: Eval harness (fast mode)
+        run: python -m eval.runner --scenarios 500 --seeds 1 --skip-llm
+
+      - name: Calibration guard
+        run: pytest -q tests/test_calibration.py
