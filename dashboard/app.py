@@ -117,16 +117,32 @@ SELECT
 with st.sidebar:
     st.markdown(
         f"""
-        <div style="font-family:{theme.FONT_MONO};color:{theme.BRASS_TEXT};
-                    font-size:0.7rem;letter-spacing:0.14em;margin-bottom:0.15rem;">₹</div>
-        <div style="font-family:{theme.FONT_DISPLAY};font-weight:800;font-size:1.15rem;
-                    letter-spacing:-0.02em;color:{theme.PAPER};line-height:1.1;">
-          Recovery Engine
-        </div>
-        <div style="color:{theme.SLATE};font-size:0.76rem;margin:0.2rem 0 1.2rem 0;">
-          Payment failure recovery
+        <div style="display:flex;align-items:center;gap:0.7rem;
+                    margin:0.1rem 0 0.25rem 0.15rem;">
+          <div style="width:34px;height:34px;border-radius:9px;flex:none;
+                      background:linear-gradient(145deg,#B8900F,{theme.BRASS});
+                      box-shadow:inset 0 1px 0 rgba(255,255,255,0.28),
+                                 0 6px 18px rgba(165,129,8,0.30);
+                      display:flex;align-items:center;justify-content:center;">
+            <span style="font-family:{theme.FONT_DISPLAY};font-weight:800;
+                         font-size:1.05rem;color:#171204;">₹</span>
+          </div>
+          <div>
+            <div style="font-family:{theme.FONT_DISPLAY};font-weight:800;font-size:1.02rem;
+                        letter-spacing:-0.02em;color:{theme.PAPER};line-height:1.05;">
+              Recovery Engine
+            </div>
+            <div style="color:{theme.SLATE};font-size:0.7rem;margin-top:0.12rem;">
+              Payment failure recovery
+            </div>
+          </div>
         </div>
         """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div style='height:1px;background:{theme.LINE};margin:"
+        f"1rem 0 0.4rem 0;'></div>",
         unsafe_allow_html=True,
     )
     page = st.radio(
@@ -156,80 +172,91 @@ with st.sidebar:
     from dashboard.db import get_db_engine
 
     connected = get_db_engine() is not None
-    st.markdown(
-        f"""
-        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
-                     background:{'#5F9752' if connected else theme.CLAY};
-                     margin-right:0.45rem;"></span>
-        <span style="color:{theme.SLATE};font-size:0.76rem;">
-            {'database connected' if connected else 'database unreachable'}
-        </span>
-        """,
-        unsafe_allow_html=True,
-    )
+    dot = theme.TEAL if connected else theme.CLAY_TEXT
+    st.markdown(theme.chip(
+        ("database connected" if connected else "database unreachable"),
+        tone="teal" if connected else "clay",
+    ).replace(
+        # prepend a live dot inside the chip
+        "<span", f"<span style='width:7px;height:7px;border-radius:50%;background:{dot};"
+        f"display:inline-block;margin-right:0.2rem;'></span><span", 1
+    ), unsafe_allow_html=True)
 
     # Data caches live for 30s; this button is how an operator forces now.
     if st.button("Refresh data", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
+    # Live mode: the KPI panels re-run themselves every 30s via st.fragment —
+    # only that panel rerenders, not the page. Off by default: an unwatched
+    # console polling a production database forever is not free.
+    st.toggle("Live · refresh 30s", key="live_mode", value=False)
+
 # ── Overview ─────────────────────────────────────────────────────────────
 if page == "Overview":
-    st.markdown(
-        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>OVERVIEW</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("# Money at risk, and what came back")
+    theme.page_header("OVERVIEW", "Money at risk, and what came back")
 
-    row = query_db(OVERVIEW_SQL)
-    if row is None or row.empty:
-        no_data("recovery activity")
-    else:
-        cases = int(row["cases"].iloc[0])
-        recovered_cases = int(row["recovered_cases"].iloc[0])
-        at_risk = int(row["at_risk_paise"].iloc[0])
-        recovered = int(row["recovered_paise"].iloc[0])
-        attributed = int(row["attributed_paise"].iloc[0])
+    live = bool(st.session_state.get("live_mode"))
 
-        # The signature. Placed above the tiles because it is the answer, and
-        # the tiles are the supporting detail.
+    # The signature band and the KPI tiles are one unit — they describe the
+    # same moment. As a fragment with run_every, ONLY this panel rerenders on
+    # each tick (the official live-dashboard pattern): the ledger moves as
+    # money lands without a full-page flicker.
+    @st.fragment(run_every="30s" if live else None)
+    def _money_panel() -> None:
+        current = query_db(OVERVIEW_SQL)
+        if current is None or current.empty:
+            no_data("recovery activity")
+            return
+        cases = int(current["cases"].iloc[0])
+        recovered_cases = int(current["recovered_cases"].iloc[0])
+        at_risk = int(current["at_risk_paise"].iloc[0])
+        recovered = int(current["recovered_paise"].iloc[0])
+        attributed = int(current["attributed_paise"].iloc[0])
+        pending = int(current["pending"].iloc[0])
+        scheduled = int(current["scheduled"].iloc[0])
+
         st.markdown(
             theme.ledger_band(at_risk, recovered, attributed), unsafe_allow_html=True
         )
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Cases opened", f"{cases:,}")
         # Cases recovered over cases opened. The old figure divided
         # retry_attempts with result='success' by payment_failures — a payment
         # LINK being created successfully, which says nothing about whether the
         # customer paid it. It reported a recovery rate for money not yet in.
-        c2.metric(
-            "Recovery rate (cases)",
-            f"{(recovered_cases / cases * 100) if cases else 0:.1f}%",
-            help="Cases in a terminal 'recovered' state, over cases opened.",
-        )
-        c3.metric("In flight", int(row["pending"].iloc[0]),
-                  help="Attempts written ahead of the Razorpay call, not yet resolved.")
-        c4.metric(
-            "Attributed",
-            theme.compact_inr(attributed),
-            help=(
-                "Recovered through a payment link this engine sent. Money the "
+        with c1:
+            theme.tile(
+                "Money attributed", theme.compact_inr(attributed),
+                icon="₹", tone="brass",
+                foot="earned by links we sent",
+                help="Recovered through a payment link this engine sent. Money the "
                 "customer paid on their own is excluded — real revenue, but not "
-                "our result."
-            ),
-        )
-
-        scheduled = int(row["scheduled"].iloc[0])
-        if scheduled:
-            st.markdown(
-                f"<p style='color:{theme.SLATE};font-size:0.84rem;margin-top:0.9rem;'>"
-                f"<span style='color:{theme.BRASS_TEXT};font-family:{theme.FONT_MONO};'>"
-                f"{scheduled}</span> retries are scheduled for later and will fire from "
-                f"the Layer 6 scheduler.</p>",
-                unsafe_allow_html=True,
+                "our result.",
             )
+        with c2:
+            theme.tile(
+                "Recovery rate",
+                f"{(recovered_cases / cases * 100) if cases else 0:.1f}%",
+                icon="↗",
+                foot=f"{recovered_cases:,} of {cases:,} cases closed recovered",
+                help="Cases in a terminal 'recovered' state, over cases opened.",
+            )
+        with c3:
+            theme.tile(
+                "In flight", f"{pending:,}", icon="⟳",
+                tone="clay" if pending > 20 else "paper",
+                foot="write-ahead, awaiting outcome",
+                help="Attempts written ahead of the Razorpay call, not yet resolved.",
+            )
+        with c4:
+            theme.tile(
+                "Scheduled", f"{scheduled:,}", icon="⏱",
+                foot="fire from the Layer 6 scheduler" if scheduled else "nothing waiting",
+                help="Deferred retry_at decisions parked until their moment arrives.",
+            )
+
+    _money_panel()
 
     st.divider()
     theme.section(
@@ -242,13 +269,58 @@ if page == "Overview":
                ra.action_type AS "Action", ra.result AS "Result",
                ra.agent_type AS "Decided by", ra.channel AS "Channel",
                ra.guardrail_passed AS "Guardrail", ra.scheduled_at AS "Fires at"
-        FROM retry_attempts ra ORDER BY ra.created_at DESC LIMIT 25
+        FROM retry_attempts ra ORDER BY ra.created_at DESC LIMIT 12
     """)
     if recent is not None and len(recent) > 0:
-        show = recent.copy()
-        show["When"] = show["When"].map(theme.fmt_ist)
-        show["Fires at"] = show["Fires at"].map(theme.fmt_ist)
-        st.dataframe(show, width="stretch", hide_index=True)
+        export_l, list_r = st.columns([1.6, 8.4])
+        with export_l:
+            st.download_button(
+                "Export CSV",
+                recent.to_csv(index=False).encode("utf-8"),
+                file_name="recent_decisions.csv",
+                mime="text/csv",
+            )
+        rows: list[str] = []
+        for _, r in recent.iterrows():
+            guard = (
+                f"<span style='color:{theme.TEAL_TEXT};font-family:{theme.FONT_MONO};"
+                "font-size:0.78rem;' title='guardrail passed'>✓ pass</span>"
+                if bool(r["Guardrail"])
+                else f"<span style='color:{theme.CLAY_TEXT};"
+                     "font-family:" + theme.FONT_MONO + ";font-size:0.78rem;' "
+                     "title='guardrail vetoed'>✗ veto</span>"
+            )
+            fires = theme.fmt_ist(r["Fires at"]) if r["Fires at"] is not None else ""
+            fires_html = (
+                f"<span style='color:{theme.SLATE};font-size:0.74rem;'>→ {fires}</span>"
+                if fires != "—"
+                else ""
+            )
+            rows.append(f"""
+              <div style="display:grid;grid-template-columns:9rem 1fr 8rem 7rem 6.5rem;
+                          gap:0.8rem;align-items:center;
+                          padding:0.55rem 0.35rem;border-bottom:1px solid {theme.LINE};">
+                <span style="font-family:{theme.FONT_MONO};color:{theme.SLATE};
+                             font-size:0.76rem;">{theme.fmt_ist(r['When'])}</span>
+                <span style="font-family:{theme.FONT_MONO};color:{theme.PAPER};
+                             font-size:0.8rem;">{r['Payment']}
+                    {fires_html}</span>
+                <span>{theme.status_chip(r['Action'])}</span>
+                <span>{theme.status_chip(r['Result'] or 'pending')}</span>
+                <span style="text-align:right;">{guard}
+                  <span style="color:{theme.MUTE};font-size:0.7rem;margin-left:0.4rem;"
+                        title="who decided">{r['Decided by']}</span></span>
+              </div>""")
+        # Horizontal scroll containment below ~900px: a grid with fixed track
+        # widths that silently overflows its parent is broken on phones, and
+        # clipping it would hide the verdict column — scrolling keeps every
+        # fact reachable.
+        st.markdown(
+            "<div style='overflow-x:auto;'><div style='min-width:760px;"
+            "border-top:1px solid " + theme.LINE + ";'>" + "".join(rows)
+            + "</div></div>",
+            unsafe_allow_html=True,
+        )
     else:
         # Deliberately not a demo table. The five fabricated rows that used to
         # render here were indistinguishable from live output, and that is

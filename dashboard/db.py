@@ -63,17 +63,31 @@ def no_data(what: str) -> bool:
     Render the honest empty state and return True when there is nothing to draw.
 
     Returns True so callers can `if no_data(...): return` — the page stops rather
-    than falling through to a chart of invented numbers.
+    than falling through to a chart of invented numbers. Two distinct moments,
+    because they mean different things (2026 empty-state guidance: distinguish
+    "not configured" from "no data yet"): the database is unreachable, or the
+    tables are simply quiet.
     """
     if get_db_engine() is None:
-        st.warning(
-            f"Database not connected — no {what} to show. "
-            "Start Postgres and reload; this page shows live data only."
+        from dashboard import theme
+
+        theme.empty_state(
+            "Database not connected",
+            f"No {what} to show. This console renders live data only — start "
+            "Postgres and reload.",
+            icon="⌁",
         )
         return True
-    st.info(
-        f"No {what} recorded yet. Send some traffic through the webhook endpoint "
-        "and reload:\n\n`python scripts/simulate_webhooks.py --count 20`"
+
+    from dashboard import theme
+
+    theme.empty_state(
+        f"No {what} recorded yet",
+        "The engine is honest about zero: an empty chart says 'nothing yet', "
+        "a fabricated one says 'here is your business'. Drive the webhook "
+        "endpoint and this page fills with measured reality.",
+        icon="◌",
+        action_code="python scripts/simulate_webhooks.py --count 20",
     )
     return True
 
