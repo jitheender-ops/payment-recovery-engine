@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     amount_ceiling_inr: int = 5_000_000  # ₹50,000 in paise
     consent_window_hours: int = 72
     max_nudges_per_customer_24h: int = 2
+    # The window the two rate limits above actually count over. The columns are
+    # named _24h but a counter that only ever increments is a lifetime tally —
+    # this setting is what the rolling reset reads, so "24h" in the name and
+    # "24h" in behaviour cannot drift apart.
+    rate_limit_window_hours: int = 24
     retry_blackout_start_hour: int = 23  # 11 PM IST
     retry_blackout_end_hour: int = 7  # 7 AM IST
     # Minimum quiet period after a customer-facing contact, multiplied by the
@@ -134,6 +139,13 @@ class Settings(BaseSettings):
     # treats it as dropped. Must exceed the time a legitimate background task
     # takes, or the sweep races the task still doing the work.
     event_reconcile_after_seconds: int = 300
+    # How stale a result='pending' attempt must be before the scheduler resolves
+    # it as failed. A pending row is the write-ahead intent log; the executor's
+    # own timeout bounds how long a legitimate call can hold one open, and this
+    # threshold only has to clear that with margin. Stale pendings occupy their
+    # attempt slot either way (fail-closed); this sweep is what makes the ledger
+    # say so instead of leaving them "in flight" forever.
+    attempt_stale_after_seconds: int = 900
 
     # ── Dashboard ────────────────────────────────────────────────────────
     streamlit_port: int = 8501

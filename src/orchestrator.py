@@ -8,7 +8,7 @@ guardrail validation → execute/nudge → log everything.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -18,13 +18,29 @@ from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
 from src.cases import attach_attempt, close_case, log_event, open_case, stop_reason
 from src.classifier.mapper import ClassifierMapper
+from src.config import get_settings
 from src.executor.rail_selector import resolve_target_rail
 from src.executor.retry_executor import RetryExecutor
 from src.guardrail.gate import GuardrailGate
+from src.guardrail.rules import IST, clamp_retry_at_out_of_blackout
 from src.messaging.nudge_generator import NudgeGenerator
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt, RetryLedger, WebhookEvent
 
 logger = logging.getLogger(__name__)
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """
+    Coerce a DB-returned timestamp to timezone-aware, assuming UTC when naive.
+
+    Postgres timestamptz comes back aware; the SQLite test harness comes back
+    naive. Every arithmetic against now() goes through this so the window math
+    cannot blow up on one dialect and work on the other — the same coercion
+    check_consent_window() already performs at its own boundary.
+    """
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=UTC)
 
 
 class PaymentRecoveryOrchestrator:
@@ -266,6 +282,16 @@ class PaymentRecoveryOrchestrator:
                 # which is the fail-closed answer when there is no rail to move to.
                 action.rail = resolved
 
+        # ── Step 6c: Clamp a deferred retry out of the blackout window ────
+        # The guardrail validates the CURRENT hour, so a deferral approved at
+        # 22:30 lands unvalidated at 23:05 — inside the 23–7 IST window — and
+        # the scheduler's fire-time re-validation rejects it. The attempt slot
+        # was spent either way: without this clamp every "wait 30 minutes"
+        # decided near the boundary burns budget on a retry that could never
+        # fire. Forward-only; see clamp_retry_at_out_of_blackout.
+        if action.action == "retry_at" and action.retry_at is not None:
+            action.retry_at = clamp_retry_at_out_of_blackout(action.retry_at)
+
         # ── Step 7: Idempotency key ───────────────────────────────────────
         # Deterministic by construction: (payment, attempt number) fully
         # determines the key. A random component would make every key unique
@@ -362,7 +388,14 @@ class PaymentRecoveryOrchestrator:
         # is what persists the abandon / guardrail-rejected rows, which never
         # touch Razorpay and so need no write-ahead.
         session.add(attempt)
-        await self._update_ledger_and_commit(context.customer_id, action, session)
+        if guardrail_result.passed:
+            await self._update_ledger_and_commit(context.customer_id, action, session)
+        else:
+            # A rejected action contacted nobody. Counting it against the
+            # customer's 24h tallies burned real-world quota on a contact that
+            # never happened — the ledger exists to bound actual outreach, not
+            # decisions the guardrail vetoed.
+            await session.commit()
         logger.info(
             "Pipeline complete: payment=%s action=%s guardrail=%s result=%s",
             payment_id, action.action, guardrail_result.passed, attempt.result,
@@ -509,33 +542,37 @@ class PaymentRecoveryOrchestrator:
             attempt.result_details = {"error": "Execution exception"}
 
     async def _build_failure_context(
-        self, failure: PaymentFailure, session: AsyncSession
+        self, failure: PaymentFailure, session: AsyncSession, *, now: datetime | None = None
     ) -> FailureContext:
         """Assemble FailureContext from payment record + DB lookups."""
-        now = datetime.now(UTC)
+        now = now or datetime.now(UTC)
         customer_id = failure.customer_email or failure.customer_contact
 
-        # Query customer retry history
-        retry_count = 0
-        nudge_count = 0
-        previous_outcomes: list[str] = []
+        retry_count, nudge_count = 0, 0
+
+        # Get previous outcomes for this payment — per-payment context, so it is
+        # read regardless of whether the customer is identifiable. A webhook
+        # without email/contact still describes a payment whose earlier attempts
+        # the agent should know about.
+        prev_attempts = await session.execute(
+            select(RetryAttempt.result).where(
+                RetryAttempt.payment_id == failure.payment_id
+            ).order_by(RetryAttempt.created_at.desc()).limit(5)
+        )
+        previous_outcomes = [r for (r,) in prev_attempts.all() if r]
 
         if customer_id:
             ledger_row = await self._get_ledger(customer_id, session)
             if ledger_row:
-                retry_count = ledger_row.total_retries_24h
-                nudge_count = ledger_row.total_nudges_24h
+                # The rolling window, not the raw column: a tally that only ever
+                # increments turns "5 retries per 24h" into a lifetime ban.
+                retry_count, nudge_count = self._effective_counts(ledger_row, now)
 
-            # Get previous outcomes for this payment
-            prev_attempts = await session.execute(
-                select(RetryAttempt.result).where(
-                    RetryAttempt.payment_id == failure.payment_id
-                ).order_by(RetryAttempt.created_at.desc()).limit(5)
-            )
-            previous_outcomes = [r for (r,) in prev_attempts.all() if r]
-
-        # IST hour (UTC + 5:30)
-        ist_hour = (now.hour + 5) % 24  # Simplified IST offset
+        # IST wall clock. India is UTC+5:30; deriving the hour from whole-hour
+        # arithmetic put every :30–:59 minute one hour off — which matters here,
+        # because this hour feeds the guardrail's blackout check at both ends of
+        # the 23–7 IST window.
+        local_now = now.astimezone(IST)
 
         return FailureContext(
             payment_id=failure.payment_id,
@@ -559,11 +596,37 @@ class PaymentRecoveryOrchestrator:
             previous_retry_outcomes=previous_outcomes,
             failed_at=failure.failed_at,
             current_time=now,
-            hour_of_day=ist_hour,
-            day_of_week=now.weekday(),
+            hour_of_day=local_now.hour,
+            day_of_week=local_now.weekday(),
             is_retryable=failure.is_retryable,
             original_failure_id=str(failure.id),
         )
+
+    @staticmethod
+    def _effective_counts(
+        ledger: RetryLedger, now: datetime
+    ) -> tuple[int, int]:
+        """
+        The ledger's counters as they count NOW, not as they were left.
+
+        `total_retries_24h` / `total_nudges_24h` only ever increment, and the
+        only timestamps that say when those contacts happened are
+        last_retry_at / last_nudge_at. If the most recent contact of a kind is
+        older than the window, its tally has rolled off — report 0 rather than
+        letting a lifetime total masquerade as a 24-hour rate. Without this, a
+        customer's fifth retry EVER trips the guardrail forever after: the
+        limit named "per 24h" was quietly a permanent ban.
+        """
+        window = timedelta(hours=get_settings().rate_limit_window_hours)
+        retries = ledger.total_retries_24h or 0
+        nudges = ledger.total_nudges_24h or 0
+        last_retry = _aware(ledger.last_retry_at)
+        last_nudge = _aware(ledger.last_nudge_at)
+        if last_retry is None or now - last_retry > window:
+            retries = 0
+        if last_nudge is None or now - last_nudge > window:
+            nudges = 0
+        return retries, nudges
 
     async def _attempt_exists(self, idempotency_key: str, session: AsyncSession) -> bool:
         """True if an attempt with this exact key was already recorded."""
@@ -597,12 +660,21 @@ class PaymentRecoveryOrchestrator:
         ledger = await self._get_ledger(customer_id, session)
 
         now = datetime.now(UTC)
+        window = timedelta(hours=get_settings().rate_limit_window_hours)
 
         if ledger is None:
             ledger = RetryLedger(customer_id=customer_id)
             session.add(ledger)
 
         if action.action in ("retry_now", "retry_at", "switch_rail"):
+            # Reset the tally first when its window has rolled: the column only
+            # ever increments otherwise, so a customer's fifth retry EVER would
+            # trip a limit named "per 24h". Same rule as _effective_counts —
+            # reads and writes must agree or the guardrail sees one number while
+            # the context reports another.
+            last_retry = _aware(ledger.last_retry_at)
+            if last_retry is None or now - last_retry > window:
+                ledger.total_retries_24h = 0
             # `default=0` on the column is a FLUSH-time default, so a ledger
             # constructed a few lines above still holds None here and `+= 1`
             # raises TypeError — deterministically, on the first retry for every
@@ -611,6 +683,9 @@ class PaymentRecoveryOrchestrator:
             ledger.last_retry_at = now
 
         if action.action == "nudge_customer":
+            last_nudge = _aware(ledger.last_nudge_at)
+            if last_nudge is None or now - last_nudge > window:
+                ledger.total_nudges_24h = 0
             ledger.total_nudges_24h = (ledger.total_nudges_24h or 0) + 1
             ledger.last_nudge_at = now
 

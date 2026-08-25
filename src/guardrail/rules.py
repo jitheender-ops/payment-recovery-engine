@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from src.classifier.taxonomy import FailureClass
-from src.config import get_settings
+from src.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+# The single source of truth for "IST" in this codebase. Every wall-clock
+# decision (blackout checks, hour_of_day context) resolves through this zone —
+# India is UTC+5:30, so an offset of whole hours is wrong for half of every
+# hour, and the half-hour lands exactly inside the window that matters.
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class GuardrailRules:
@@ -109,13 +116,7 @@ class GuardrailRules:
         start = self._settings.retry_blackout_start_hour
         end = self._settings.retry_blackout_end_hour
 
-        # Handle overnight range (e.g., 23-7)
-        if start > end:
-            in_blackout = current_hour >= start or current_hour < end
-        else:
-            in_blackout = start <= current_hour < end
-
-        if in_blackout:
+        if is_in_blackout(current_hour, self._settings):
             return False, (
                 f"Time-of-day blackout: hour {current_hour} is within "
                 f"{start:02d}:00-{end:02d}:00 IST"
@@ -129,3 +130,54 @@ class GuardrailRules:
         if not idempotency_key or not idempotency_key.strip():
             return False, "Missing idempotency key — every retry must be idempotent"
         return True, None
+
+
+def is_in_blackout(hour: int, settings: Settings | None = None) -> bool:
+    """
+    Whether an IST hour falls inside the retry blackout window.
+
+    Shared by the decision-time rule and the retry_at clamp below, so the two
+    can never disagree about where the window's edges are.
+    """
+    s = settings or get_settings()
+    start = s.retry_blackout_start_hour
+    end = s.retry_blackout_end_hour
+    if start > end:  # overnight range (e.g. 23-7)
+        return hour >= start or hour < end
+    return start <= hour < end
+
+
+def clamp_retry_at_out_of_blackout(retry_at: datetime) -> datetime:
+    """
+    Shift a deferred `retry_at` forward until it lands outside the blackout.
+
+    Why this exists: the guardrail validates the CURRENT hour at decision time,
+    so a +30min deferral approved at 22:30 sails through — and then the
+    scheduler's fire-time re-validation rejects it for being 23:05. The attempt
+    slot is already spent (attach_attempt ran), so every such decision burns
+    budget on a retry that could never fire. Clamping at decision time makes the
+    scheduled time one the fire-time check will actually approve.
+
+    Forward-only, never earlier: waiting longer is always compliant; pulling a
+    contact sooner than the agent chose is not ours to decide.
+    """
+    local = retry_at.astimezone(IST)
+    if not is_in_blackout(local.hour):
+        return retry_at
+
+    end = get_settings().retry_blackout_end_hour
+    # Jump straight to the window's edge rather than stepping hourly. +5min
+    # clears the boundary itself: a retry landing at exactly 07:00 is inside
+    # `hour < end`'s shadow only in rounding, and sitting on the edge risks the
+    # clock reading 06:59:xx at fire time after tz/db round-trips.
+    wake = local.replace(hour=end % 24, minute=5, second=0, microsecond=0)
+    if wake <= local:
+        wake += timedelta(days=1)
+
+    clamped = wake.astimezone(UTC)
+    logger.info(
+        "retry_at shifted out of the IST blackout: %s → %s",
+        retry_at.isoformat(),
+        clamped.isoformat(),
+    )
+    return clamped

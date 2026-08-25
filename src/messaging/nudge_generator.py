@@ -125,7 +125,11 @@ class NudgeGenerator:
             response = await client.messages.create(
                 model=settings.llm_model,
                 max_tokens=100,
-                temperature=0.7,
+                # No temperature: sampling params were removed on current Claude
+                # models and return a 400 — the same reason the policy agent's
+                # call site omits it. Every nudge this path used to attempt
+                # failed, and the "LLM" half of LLM-with-template-fallback was
+                # silently dead weight.
                 system=_NUDGE_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )

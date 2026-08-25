@@ -7,6 +7,7 @@ Falls back to a safe abandon action on any failure.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -16,6 +17,11 @@ from src.agent.prompts import SYSTEM_PROMPT, format_user_prompt
 from src.config import get_settings, reveal
 
 logger = logging.getLogger(__name__)
+
+# Pause before the one transient retry. Short on purpose: the caller (a webhook
+# background task or an eval prefetch) is waiting, and a rate limit usually
+# clears in single-digit seconds.
+_TRANSIENT_RETRY_BACKOFF_SECONDS = 1.0
 
 
 class PolicyAgent:
@@ -85,7 +91,24 @@ class PolicyAgent:
         self.call_count += 1
 
         try:
-            raw_response = await self._call_llm(user_prompt)
+            try:
+                raw_response = await self._call_llm(user_prompt)
+            except Exception as first_error:
+                # One retry on transient failures. A 429 or a blipped 503 is
+                # seconds away from being a real decision; degrading the very
+                # first hiccup to the XGBoost fallback threw away exactly the
+                # calls a rate limit was most likely to interrupt mid-eval.
+                # Fatal statuses (bad key, no credits, unknown model) skip it —
+                # retrying those only burns time before the same answer.
+                status = getattr(first_error, "status_code", None)
+                if status in (401, 402, 403, 404):
+                    raise
+                logger.warning(
+                    "Transient LLM failure (%s) — retrying once", str(first_error)[:120]
+                )
+                await asyncio.sleep(_TRANSIENT_RETRY_BACKOFF_SECONDS)
+                raw_response = await self._call_llm(user_prompt)
+
             action = self._parse_response(raw_response)
 
             if action is None:

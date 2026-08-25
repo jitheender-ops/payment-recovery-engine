@@ -199,3 +199,59 @@ def test_fallback_on_an_unknown_class_abandons_rather_than_guesses() -> None:
     """Conservative by design: the money path fails closed."""
     action = PolicyAgent._fallback_action(_context(failure_class="something_new"), "down")
     assert action.action == "abandon"
+
+
+# ── Transient failures get one retry before degrading ────────────────────
+
+
+async def test_a_transient_error_is_retried_once_and_recovers(
+    agent: PolicyAgent, monkeypatch: Any
+) -> None:
+    """A 503 is seconds from being a decision; the first blip must not burn it."""
+    calls = 0
+
+    async def flaky(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            err = RuntimeError("upstream unavailable")
+            err.status_code = 503  # type: ignore[attr-defined]
+            raise err
+        return json.dumps({"action": "retry_now", "reason": "transient"})
+
+    async def instant(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("src.agent.policy_agent.asyncio.sleep", instant)
+    monkeypatch.setattr(agent, "_call_llm", flaky)
+    action = await agent.decide(_context())
+
+    assert calls == 2, "the transient retry did not happen"
+    assert action.action == "retry_now"
+    assert agent.fallback_count == 0
+
+
+async def test_a_fatal_status_is_not_retried(
+    agent: PolicyAgent, monkeypatch: Any
+) -> None:
+    """
+    Retrying a bad key or an empty balance only delays the same answer — and
+    the eval harness keys its early-abort off last_error_status, which a
+    doomed retry loop would slow down per scenario.
+    """
+    class InsufficientCreditsError(Exception):
+        status_code = 402
+
+    calls = 0
+
+    async def boom(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise InsufficientCreditsError("Insufficient credits")
+
+    monkeypatch.setattr(agent, "_call_llm", boom)
+    await agent.decide(_context())
+
+    assert calls == 1
+    assert agent.last_error_status == 402
+    assert agent.fallback_count == 1
