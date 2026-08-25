@@ -1,8 +1,21 @@
 # 🔄 Payment Failure Recovery Engine
 
+[![CI](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Tests](https://img.shields.io/badge/tests-211%20passing-brightgreen)
+
 > AI-powered system that decides **whether**, **when**, and **on which rail** to retry a failed payment — with deterministic guardrails ensuring no LLM ever directly authorizes money movement.
 
 Indian checkout success rates sit in the high 80s. Every failed payment is real, recoverable money. This system replaces dumb fixed-schedule retries with intelligent, context-aware recovery decisions — and **proves the improvement with numbers, not vibes.**
+
+```
+Razorpay webhook ──▶ classify ──▶ decide (LLM / XGBoost) ──▶ guardrail ──▶ execute
+                      │ no LLM      │ constrained JSON        │ 8 rules      │ Payment Link
+                      ▼             ▼                         ▼              ▼
+                 hard declines   5 fixed actions          ALL violations   idempotent,
+                 never reach it                           reported         audited, bounded
+```
 
 ## 📊 Headline Result
 
@@ -138,7 +151,7 @@ This is the first question a fintech panel will ask. Here's the answer:
 1. **Hard-decline blocklist** — Fraud blocks, stolen cards, and permanent declines are caught *before* the LLM is ever called. No agent involvement.
 2. **Fixed action space** — The LLM outputs a JSON action from exactly 5 options: `retry_now`, `retry_at`, `switch_rail`, `nudge_customer`, `abandon`. No freeform.
 3. **Schema validation** — Pydantic validates every agent output. Malformed JSON → auto-reject.
-4. **8 business rules** — Max retries per payment (3), per customer per 24h (5), amount ceiling (₹50K), consent window (72h), nudge rate limit (2/day), time-of-day blackout (11PM-7AM), idempotency key requirement.
+4. **8 business rules** — Max retries per payment (3), per customer per rolling 24h (5), amount ceiling (₹50K), consent window (72h), nudge rate limit (2/day), time-of-day blackout (11PM-7AM IST, computed on a true Asia/Kolkata clock), idempotency key requirement.
 5. **Idempotency keys** — The key is deterministic (`retry_{payment_id}_{attempt_no}`) and
    `retry_attempts.idempotency_key` is UNIQUE. The orchestrator checks for an existing
    attempt *before* calling the Razorpay API, so a replayed webhook cannot produce a
@@ -148,6 +161,9 @@ This is the first question a fintech panel will ask. Here's the answer:
 7. **LLM fallback** — If the LLM fails, times out, or returns garbage, the system falls back to XGBoost. Never blocks. `fallback_count` is what makes this real: `PolicyAgent.decide()` swallows provider errors and returns its own conservative heuristic without raising, so for a while the XGBoost branch was unreachable and a missing API key silently abandoned ~70% of recoverable payments. The orchestrator now compares that counter across the call and discards a degraded answer.
 8. **Deferred retries re-validate at fire time** — A `retry_at` decision outlives its own guardrail check by hours. When the scheduler fires it, the case state, the consent status and the time-of-day blackout are all re-read; a customer who opted out at 23:00 does not get the 02:00 retry that was approved at 22:00.
 9. **The idempotency race fails closed** — Two webhooks for one payment can both derive the same key before either commits. The UNIQUE constraint on `retry_attempts.idempotency_key` breaks the tie *before* the Razorpay call, and the loser exits as a clean skip rather than an unhandled exception.
+10. **Rate limits that actually roll** — The per-customer tallies decay on a true 24-hour window (reads and writes apply the same rule), so "5 retries per 24h" cannot silently become a lifetime ban. And a guardrail veto counts against the *case*, never against the customer's contact quota — a rejected action contacted nobody.
+11. **Deferred retries are clamped out of the blackout before they're parked** — A deferral approved at 22:30 that lands at 23:05 would pass decision-time validation and die at fire-time re-validation, having already spent an attempt slot. It is shifted forward to the window's edge instead — forward-only, because waiting longer is always compliant.
+12. **Write-ahead attempts can't get lost in flight** — Every execution is committed as `pending` *before* Razorpay is called. If the process dies mid-call, a scheduler sweep resolves the stale row to failed-outcome-unknown after a threshold: the slot stays spent (fail-closed), but nothing sits "in flight" forever, and a later capture still attributes through the idempotency-key breadcrumb.
 
 ## 🚀 Quick Start
 
@@ -301,6 +317,25 @@ rather than silent:
 python scripts/check_llm.py
 ```
 
+### 🖥️ The operations console
+
+The Streamlit dashboard is an ops console, not a demo: every number on it is a
+query over the real tables, and when there is no data it says so instead of
+drawing something plausible. Six views:
+
+| View | Answers |
+|---|---|
+| **Overview** | Money at risk vs. money back — the recovery ledger band separates what *our* links earned from customers who paid anyway |
+| **Recovery funnel** | Where the pipeline leaks: payments and attempts as two separate funnels, plus failure classes ranked |
+| **Banks & rails** | Recovery rate per bank × rail heatmap, money recovered per bank, success by hour with the IST blackout drawn where it bites |
+| **Policy eval** | The eval table above, live from `eval/results/` — net revenue leads, paired CIs answer "is it real" |
+| **Cases & audit** | Every case by state; pick one and unfold its full `case_events` timeline — actor, action, reason, in order |
+| **Operations** | Is the machinery running: scheduled/pending/stale retries, unprocessed events, guardrail vetoes with reasons, decision mix, ledger health |
+
+All timestamps render in IST (the timezone the blackout itself runs on), the
+sidebar shows a live database-status chip, and **Refresh data** busts the 30s
+query cache. The gate is fail-closed: no `DASHBOARD_PASSWORD`, no dashboard.
+
 ## 🗄️ Schema and Migrations
 
 `init_db()` calls `create_all(checkfirst=True)`, which creates missing *tables*
@@ -321,6 +356,7 @@ predates it. A migration that crashes half the time is a migration nobody runs.
 | `0000_initial_schema` | The baseline tables. Added because 0001/0002 only *alter* them — `upgrade head` on an empty database used to succeed and leave you with `recovery_cases` and no `retry_attempts` |
 | `0001_recovery_cases` | `recovery_cases`, the attribution join keys, consent columns |
 | `0002_revenue_recovery` | `promises_to_pay`, `case_events`, case scheduling, and **drops NOT NULL on `retry_attempts.payment_failure_id`/`payment_id`** — the constraint that confined the engine to the payment rail |
+| `0003_scheduler_indexes` | Composite indexes on `(result, scheduled_at)` and `(result, created_at)` — the Layer 6 sweeps poll these every tick and were seq-scanning the table |
 
 See [docs/architecture.md](docs/architecture.md) for the full ER diagram.
 
@@ -390,11 +426,12 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   ├── ingestion/        # Layer 1: Webhook endpoint + signature + dedup
 │   ├── classifier/       # Layer 2: Error code → failure taxonomy
 │   ├── agent/            # Layer 3: LLM policy agent + XGBoost baseline
-│   ├── guardrail/        # Layer 4: Schema + business rule validation
+│   ├── guardrail/        # Layer 4: Schema + business rules + blackout clamp
 │   ├── messaging/        # Layer 5: Customer nudge generation
-│   ├── executor/         # Retry execution via Razorpay API
+│   ├── executor/         # Retry execution via Razorpay API + rail selection
 │   ├── cases.py          # Recovery cases, promises to pay, audit trail
-│   ├── scheduler.py      # Layer 6: deferred retries, event reconciliation
+│   ├── scheduler.py      # Layer 6: four sweeps — fire, reconcile events,
+│   │                     #   resolve stale write-aheads, expire promises
 │   ├── orchestrator.py   # Ties the layers together
 │   └── main.py           # FastAPI app
 ├── eval/                 # Standalone eval harness
@@ -402,14 +439,16 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   ├── scenario_generator.py
 │   ├── policies/         # No-retry, fixed-retry, XGBoost, LLM
 │   └── runner.py         # Runs all policies, produces results table
-├── dashboard/            # Streamlit dashboard
-├── tests/                # Pytest test suite
-├── scripts/              # Utility scripts
+├── dashboard/            # Streamlit ops console (6 views under views/)
+├── tests/                # Pytest suite — real schema over throwaway SQLite
+├── scripts/              # simulate_webhooks, train_xgboost, check_llm, ...
 ├── alembic/versions/     # Schema migrations (create_all is not an upgrade path)
 ├── models/               # Trained XGBoost artefact (gitignored; run.sh builds it)
-├── .github/workflows/    # CI: ruff + mypy + pytest on 3.11 and 3.13, migrations, eval
+├── .github/workflows/    # CI: ruff + mypy strict + pytest on 3.11 & 3.13,
+│                         #   migration-chain check, train + eval reproduction
+├── AGENTS.md             # Ground rules for AI assistants working in this repo
 ├── run.sh                # One command: clean build → verify → run → public URL
-└── docs/                 # Architecture, failure cases, eval methodology
+└── docs/                 # architecture.md · failure_cases.md · eval_methodology.md
 ```
 
 ## ⚠️ Documented Failure Cases
@@ -457,4 +496,19 @@ coverage went:
 `dashboard/` is 0% — the pages are Streamlit scripts whose bodies execute on
 import. `dashboard/auth.py` is the exception, split out precisely so the password
 gate is testable without a Streamlit runtime.
+
+## 🧾 Recent Hardening
+
+The engine's first cut could decide; it could not always be trusted about what
+it had decided. The current wave, all CI-verified:
+
+| Change | Why it mattered |
+|---|---|
+| Rolling rate-limit windows | `total_retries_24h` only ever incremented — a customer's fifth retry *ever* tripped a limit named "per 24h", permanently |
+| True IST clock | `(utc_hour + 5) % 24` dropped the +30 minutes, skewing the blackout check for half of every hour |
+| Blackout-aware `retry_at` | Deferrals approved at 22:30 landed inside the blackout at 23:05 and died at fire time, having already spent an attempt slot |
+| Stale write-ahead resolution | A crash mid-Razorpay-call left rows `pending` forever; a fourth scheduler sweep resolves them fail-closed with an audit event |
+| Honest contact tallies | Guardrail vetoes no longer burn the customer's contact quota on outreach that never happened |
+| Transient LLM retry | One 429 no longer degrades a decidable case to XGBoost |
+| Anthropic nudge fix | `temperature=0.7` returns HTTP 400 on current Claude models — every LLM nudge silently became a template |
 # growth
