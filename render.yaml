@@ -96,6 +96,19 @@ services:
       - key: DASHBOARD_PASSWORD
         sync: false                  # must MATCH the dashboard service below
 
+      # ── Customer recovery page ──────────────────────────────────────
+      # Signs /recover/<token>. generateValue means Render mints it once and
+      # keeps it — nobody has to invent, paste or store a secret by hand, and
+      # it never touches git. A dedicated secret, not the webhook one.
+      - key: RECOVERY_LINK_SECRET
+        generateValue: true
+      # The origin customers open the link on. Taken from the service itself so
+      # it is correct the moment the service exists; override with a custom
+      # domain once you have one, since an onrender.com host in an SMS asking
+      # for money is not a link most people would trust.
+      - key: PUBLIC_BASE_URL
+        fromService: {type: web, name: recovery-api, property: host}
+
   # ── Dashboard ─────────────────────────────────────────────────────────
   - type: web
     name: recovery-dashboard
