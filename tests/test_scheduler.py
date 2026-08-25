@@ -349,8 +349,108 @@ async def test_tick_reports_what_each_sweep_did(
         assert await scheduler.tick(session) == {
             "retries_fired": 0,
             "events_reconciled": 0,
+            "attempts_reconciled": 0,
             "promises_expired": 0,
         }
+
+
+# ── write-ahead attempts whose outcome never landed ──────────────────────
+
+
+async def _insert_pending(
+    sm: async_sessionmaker[AsyncSession], key: str, age_seconds: int
+) -> RetryAttempt:
+    from src.cases import open_case
+
+    async with sm() as session:
+        case = await open_case(
+            session, risk_type="payment_failure", subject_ref=f"pay_{key}",
+            amount_at_risk=50000, customer_id="c@example.com",
+        )
+        attempt = RetryAttempt(
+            payment_id=f"pay_{key}",
+            idempotency_key=key,
+            attempt_number=1,
+            action_type="retry_now",
+            guardrail_passed=True,
+            result="pending",
+            created_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        )
+        attempt.recovery_case_id = case.id
+        session.add(attempt)
+        await session.commit()
+        return attempt
+
+
+async def test_a_stale_pending_attempt_is_resolved_failed(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    The write-ahead commit exists so a crash mid-Razorpay-call leaves a
+    recorded unknown instead of a silent gap. Nothing resolved that unknown:
+    the row sat 'pending' forever and the dashboard read 'in flight' for a
+    payment nobody was looking at.
+    """
+    await _insert_pending(db_sessionmaker, "retry_stale_1", age_seconds=10_000)
+
+    async with db_sessionmaker() as session:
+        assert await scheduler.reconcile_stale_attempts(session) == 1
+        await session.commit()
+
+    async with db_sessionmaker() as reader:
+        row = (
+            await reader.execute(
+                select(RetryAttempt).where(RetryAttempt.idempotency_key == "retry_stale_1")
+            )
+        ).scalar_one()
+        events = list(
+            (await reader.execute(
+                select(CaseEvent.event_type).order_by(CaseEvent.id)
+            )).scalars()
+        )
+    assert row.result == "failed"
+    assert "stale-pending" in str(row.result_details)
+    assert "reconciled" in events, "the resolution left no trace in the audit trail"
+
+
+async def test_a_fresh_pending_attempt_is_left_alone(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The age threshold is what stops the sweep racing a live Razorpay call."""
+    await _insert_pending(db_sessionmaker, "retry_fresh_1", age_seconds=5)
+
+    async with db_sessionmaker() as session:
+        assert await scheduler.reconcile_stale_attempts(session) == 0
+        await session.commit()
+
+    async with db_sessionmaker() as reader:
+        row = (
+            await reader.execute(
+                select(RetryAttempt).where(RetryAttempt.idempotency_key == "retry_fresh_1")
+            )
+        ).scalar_one()
+    assert row.result == "pending"
+
+
+async def test_a_resolved_attempt_is_not_resolved_twice(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_pending(db_sessionmaker, "retry_once_1", age_seconds=10_000)
+
+    async with db_sessionmaker() as session:
+        assert await scheduler.reconcile_stale_attempts(session) == 1
+        await session.commit()
+    async with db_sessionmaker() as session:
+        assert await scheduler.reconcile_stale_attempts(session) == 0
+        await session.commit()
+
+    async with db_sessionmaker() as reader:
+        row = (
+            await reader.execute(
+                select(RetryAttempt).where(RetryAttempt.idempotency_key == "retry_once_1")
+            )
+        ).scalar_one()
+    assert row.result == "failed"
 
 
 async def test_deferring_is_recorded_in_the_audit_trail(

@@ -1,11 +1,12 @@
 """
 Background worker — the thing that makes deferred decisions actually happen.
 
-Three sweeps, one tick:
+Four sweeps, one tick:
 
-    fire_due_retries()   an agent said "retry in 4 hours"; four hours have passed
-    reconcile_events()   a webhook was stored but its background task never ran
-    expire_promises()    a promise-to-pay came due with no money (src/cases.py)
+    fire_due_retries()          an agent said "retry in 4 hours"; four hours have passed
+    reconcile_events()          a webhook was stored but its background task never ran
+    reconcile_stale_attempts()  a write-ahead attempt was committed but its outcome never landed
+    expire_promises()           a promise-to-pay came due with no money (src/cases.py)
 
 Why this exists at all: `retry_at` was an advertised action that never took
 effect. The executor maps it onto the same `_create_payment_link` as
@@ -272,12 +273,90 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
     return recovered
 
 
+async def reconcile_stale_attempts(
+    session: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """
+    Resolve write-ahead attempts whose outcome never landed. Returns how many.
+
+    A pending attempt is the intent log the money path depends on: it is
+    committed BEFORE Razorpay is called precisely so a crash mid-call leaves a
+    recorded unknown rather than a silent gap. But nothing resolved that unknown
+    — the row sat as "pending" forever, its dashboard tile read "in flight"
+    indefinitely, and nothing distinguished a slow call from a lost one. The
+    executor's own timeout bounds how long a live call can hold the state; past
+    `attempt_stale_after_seconds` the honest resolution is failed-outcome-
+    unknown, marked here.
+
+    Fail-closed either way: the attempt keeps occupying its budget slot (a
+    link MIGHT exist out there), so this never frees an attempt. If the link
+    was created and paid later, attribute_capture still matches it through the
+    idempotency-key breadcrumb — matching never reads `result`.
+    """
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(seconds=get_settings().attempt_stale_after_seconds)
+
+    stale = await session.execute(
+        select(RetryAttempt)
+        .where(
+            RetryAttempt.result == "pending",
+            RetryAttempt.created_at <= cutoff,
+        )
+        .order_by(RetryAttempt.created_at)
+        .limit(get_settings().scheduler_batch_size)
+    )
+
+    resolved = 0
+    for attempt in stale.scalars().all():
+        # Same portable claim as everywhere else in this module: whoever flips
+        # the row out of "pending" owns it, so a sweep cannot race an execution
+        # that resolved the row a moment ago.
+        claimed = await session.execute(
+            update(RetryAttempt)
+            .where(RetryAttempt.id == attempt.id, RetryAttempt.result == "pending")
+            .values(
+                result="failed",
+                executed_at=now,
+                result_details={
+                    "scheduler": (
+                        "stale-pending: no outcome after "
+                        f"{get_settings().attempt_stale_after_seconds}s — "
+                        "marked failed, outcome unknown (fail-closed)"
+                    )
+                },
+            )
+        )
+        if claimed.rowcount != 1:  # type: ignore[attr-defined]
+            continue
+
+        if attempt.recovery_case_id:
+            case = await session.get(RecoveryCase, attempt.recovery_case_id)
+            if case is not None:
+                log_event(
+                    session,
+                    case,
+                    "reconciled",
+                    actor="scheduler",
+                    attempt_id=str(attempt.id),
+                    idempotency_key=attempt.idempotency_key,
+                    reason="stale pending — outcome unknown",
+                )
+        logger.warning(
+            "Stale pending attempt resolved: key=%s age>%ss",
+            attempt.idempotency_key,
+            get_settings().attempt_stale_after_seconds,
+        )
+        resolved += 1
+    return resolved
+
+
 async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[str, int]:
     """One full pass. Returns what each sweep did, for logs and for tests."""
     now = now or datetime.now(UTC)
     counts = {
         "retries_fired": await fire_due_retries(session, now=now),
         "events_reconciled": await reconcile_events(session, now=now),
+        "attempts_reconciled": await reconcile_stale_attempts(session, now=now),
         "promises_expired": await expire_promises(session, now=now),
     }
     await session.commit()

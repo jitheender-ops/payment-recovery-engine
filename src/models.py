@@ -293,9 +293,16 @@ class RetryAttempt(Base):
     executed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Lifecycle: pending (write-ahead, Razorpay not yet answered) → success |
+    # failed; scheduled (a retry_at parked for the Layer 6 scheduler) → pending
+    # at claim time; rejected (guardrail veto); cancelled (scheduler fire-time
+    # re-validation); skipped (abandon — no API call); superseded (money
+    # arrived before this attempt resolved). The scheduler's two sweeps filter
+    # on (result, scheduled_at) and (result='pending', created_at), which is
+    # what the indexes below exist for.
     result: Mapped[str | None] = mapped_column(
         String(50), nullable=True
-    )  # success, failed, pending, skipped
+    )
     result_details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # Nudge (if applicable)
@@ -319,6 +326,11 @@ class RetryAttempt(Base):
         Index("ix_retry_attempts_case", "recovery_case_id"),
         # The attribution lookup path: a capture arrives knowing only the link id.
         Index("ix_retry_attempts_external_ref", "external_ref"),
+        # The scheduler's fire sweep: due `retry_at` rows, every tick. Without
+        # it each poll scans every attempt ever written.
+        Index("ix_retry_attempts_scheduled", "result", "scheduled_at"),
+        # The stale-pending sweep: write-ahead rows whose outcome never landed.
+        Index("ix_retry_attempts_pending", "result", "created_at"),
     )
 
 

@@ -101,6 +101,7 @@ CaseEventType = Literal[
     "opted_out",
     "deferred",
     "stopped",
+    "reconciled",
 ]
 
 _TERMINAL: frozenset[str] = frozenset(
