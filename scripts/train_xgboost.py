@@ -126,11 +126,39 @@ def main() -> None:
     counts = {ACTION_LABELS[i]: int((y == i).sum()) for i in range(len(ACTION_LABELS))}
     print(f"Label distribution (expected-value argmax): {counts}")
 
+    # XGBoost requires every label in [0, num_class) to be present; retry_now
+    # wins the argmax only in a narrow corner of the scenario space (~0.06%),
+    # so tiny runs can legitimately produce a class of zero. Fail with the
+    # fix stated rather than xgboost's "Invalid classes inferred" riddle.
+    missing = [ACTION_LABELS[i] for i in range(len(ACTION_LABELS)) if counts[ACTION_LABELS[i]] == 0]
+    if missing:
+        raise SystemExit(
+            f"No training examples for: {', '.join(missing)}. "
+            f"Raise --n-samples (5000 keeps every class populated; "
+            f"retry_now is the scarce one)."
+        )
+
     # Held out, and stratified so a rare class does not vanish from the test
     # split entirely and report an undefined score.
+    #
+    # The check that matters happens AFTER the split: predict() maps its output
+    # index through ACTION_LABELS, so a model fitted on anything less than the
+    # full label space would mislabel every prediction by one position —
+    # silently. A run whose training half lost a class must stop here, loudly.
+    min_class = min(int((y == i).sum()) for i in np.unique(y))
+    stratify = y if min_class >= 2 else None
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=args.test_size, random_state=args.seed, stratify=y
+        X, y, test_size=args.test_size, random_state=args.seed, stratify=stratify
     )
+    lost = [ACTION_LABELS[i] for i in range(len(ACTION_LABELS)) if i not in np.unique(y_train)]
+    if lost:
+        raise SystemExit(
+            f"Training split is missing classes: {', '.join(lost)}. "
+            f"A model fitted on a partial label space would mislabel every "
+            f"prediction through ACTION_LABELS. Raise --n-samples "
+            f"(5000 keeps every class populated; retry_now is the scarce one)."
+        )
+    print(f"Training on {len(X_train)}, holding out {len(X_test)}...")
     print(f"Training on {len(X_train)}, holding out {len(X_test)}...")
 
     from src.agent.xgboost_baseline import XGBoostBaseline
