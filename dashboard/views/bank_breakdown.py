@@ -57,12 +57,7 @@ GROUP BY 1 ORDER BY 1
 
 def render() -> None:
     """Render this page. Called by dashboard/app.py."""
-    st.markdown(
-        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>ROUTING</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("# Which bank, on which rail")
+    theme.page_header("ROUTING", "Which bank, on which rail")
 
     cells = query_db(BANK_RAIL_SQL)
     if cells is None or cells.empty:
@@ -90,19 +85,39 @@ def render() -> None:
                         for i, c in enumerate(theme.SEQUENTIAL)],
             zmin=0, zmax=1,
             xgap=2, ygap=2,   # the surface shows through, separating the cells
-            # Direct labels: 20 cells is few enough to label every one, and a
-            # heatmap whose only reading is hue is unreadable in print, under
-            # CVD, and on a screenshot.
-            texttemplate="%{z:.0%}",
-            textfont={"family": theme.FONT_MONO, "size": 11, "color": theme.INK},
             hovertemplate="<b>%{y} · %{x}</b><br>%{z:.0%} recovered"
                           "<br>%{customdata:,} attempts<extra></extra>",
             colorbar={"outlinewidth": 0, "tickfont": {"color": theme.SLATE, "size": 11},
                       "tickformat": ".0%", "thickness": 10, "len": 0.9},
         )
     )
+    # Per-cell labels with PER-CELL ink. Plotly's own annotation colouring is
+    # two-tone at best (a documented limitation across its ecosystem), and our
+    # ramp spans near-black to bright brass — one fixed text colour fails
+    # WCAG on one end or the other. The fill each cell gets is recomputed
+    # here through the same ramp, and the label takes ink or paper by
+    # measured luminance.
+    label_x, label_y, label_text, label_color = [], [], [], []
+    for i, bank in enumerate(grid.index):
+        for j, rail in enumerate(grid.columns):
+            rate = grid.values[i][j]
+            if pd.isna(rate):
+                continue
+            label_x.append(j)
+            label_y.append(i)
+            label_text.append(f"{rate:.0%}")
+            label_color.append(theme.readable_on(theme.ramp_color(float(rate))))
+    fig.add_trace(
+        go.Scatter(
+            x=label_x, y=label_y, mode="text",
+            text=label_text,
+            textfont={"family": theme.FONT_MONO, "size": 11, "color": label_color},
+            showlegend=False, hoverinfo="skip",
+        )
+    )
     st.plotly_chart(
-        theme.style_fig(fig, height=max(280, 42 * len(grid))), width="stretch"
+        theme.style_fig(fig, height=max(280, 42 * len(grid))), width="stretch",
+        config=theme.PLOTLY_CONFIG,
     )
 
     thin = cells[cells["attempts"] < MIN_SAMPLE]
@@ -143,6 +158,7 @@ def render() -> None:
         st.plotly_chart(
             theme.style_fig(fig2, height=max(240, 30 * len(by_bank))),
             width="stretch",
+            config=theme.PLOTLY_CONFIG,
         )
     else:
         st.info("No recovery cases linked to a bank yet.")
@@ -171,6 +187,8 @@ def render() -> None:
                           "<br>%{customdata[1]:,} of %{customdata[0]:,} attempts<extra></extra>",
         )
     )
+    # A soft brass wash under the curve — depth without a second visual subject.
+    theme.soft_fill(fig3, theme.BRASS, opacity=0.12)
     # The retry blackout, shown where it applies rather than described in prose.
     # 23:00-07:00 IST is 17:30-01:30 UTC; drawn on the UTC axis this page uses.
     fig3.add_vrect(x0=17.5, x1=24, fillcolor=theme.CLAY, opacity=0.10, line_width=0,
@@ -182,7 +200,8 @@ def render() -> None:
         yaxis={"title": "Attempt success (%)", "ticksuffix": "%"},
         showlegend=False, hovermode="x unified",
     )
-    st.plotly_chart(theme.style_fig(fig3, height=320), width="stretch")
+    st.plotly_chart(theme.style_fig(fig3, height=320), width="stretch",
+                    config=theme.PLOTLY_CONFIG)
 
     with st.expander("View as table"):
         st.dataframe(

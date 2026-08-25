@@ -41,12 +41,7 @@ def _load() -> dict[str, Any] | None:
 
 def render() -> None:
     """Render this page. Called by dashboard/app.py."""
-    st.markdown(
-        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>EVIDENCE</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("# Is the agent actually better")
+    theme.page_header("EVIDENCE", "Is the agent actually better")
 
     data = _load()
     if data is None:
@@ -76,18 +71,22 @@ def render() -> None:
         delta = bm.get("net_₹_per_₹1Cr_failed", 0) - base.get("net_₹_per_₹1Cr_failed", 0)
         st.markdown(
             f"""
-            <div style="background:{theme.SURFACE};border:1px solid {theme.LINE};
-                        border-left:3px solid {theme.BRASS};border-radius:10px;
-                        padding:1.3rem 1.5rem;margin:0.4rem 0 1.8rem 0;">
+            <div style="background:linear-gradient(135deg,#1D2330 0%,#161B22 60%);
+                        border:1px solid {theme.LINE};border-left:3px solid {theme.BRASS};
+                        border-radius:14px;padding:1.4rem 1.6rem;margin:0.5rem 0 1.8rem 0;
+                        box-shadow:inset 0 1px 0 rgba(255,255,255,0.05),
+                                   0 14px 36px rgba(6,9,14,0.42);">
               <div style="color:{theme.SLATE};text-transform:uppercase;font-size:0.72rem;
-                          letter-spacing:0.08em;margin-bottom:0.5rem;">
+                          letter-spacing:0.08em;margin-bottom:0.55rem;">
                 {best} vs {BASELINE} · net of ₹{cost:.2f} per attempt
               </div>
-              <div style="font-family:{theme.FONT_MONO};font-size:2.4rem;font-weight:500;
-                          color:{theme.BRASS_TEXT};line-height:1.1;">
+              <div style="font-family:{theme.FONT_MONO};font-size:2.7rem;font-weight:500;
+                          color:{theme.BRASS_TEXT};line-height:1.05;
+                          font-variant-numeric:tabular-nums;">
                 +{theme.compact_inr(delta * 100)}
               </div>
-              <div style="color:{theme.PAPER};font-size:0.94rem;margin-top:0.45rem;">
+              <div style="color:{theme.PAPER};font-size:0.94rem;margin-top:0.5rem;
+                          max-width:65ch;">
                 additional net revenue per ₹1Cr of failed volume,
                 at {bm.get('retry_cost_avg', 0):.2f} attempts per payment
                 against {base.get('retry_cost_avg', 0):.2f}.
@@ -145,7 +144,7 @@ def render() -> None:
     fig.update_layout(xaxis={"visible": False}, showlegend=False)
     theme.bar_headroom(fig, nets)
     st.plotly_chart(theme.style_fig(fig, height=max(220, 46 * len(names))),
-                    width="stretch")
+                    width="stretch", config=theme.PLOTLY_CONFIG)
 
     # ── Is the difference real ───────────────────────────────────────────
     if paired:

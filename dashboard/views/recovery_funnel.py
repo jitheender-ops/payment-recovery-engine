@@ -68,12 +68,7 @@ def _funnel(row: pd.Series, stages: list[tuple[str, str]], title: str, unit: str
 
 def render() -> None:
     """Render this page. Called by dashboard/app.py."""
-    st.markdown(
-        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>PIPELINE</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("# Where the money leaves")
+    theme.page_header("PIPELINE", "Where the money leaves")
 
     row = query_db(FUNNEL_SQL)
     if row is None or row.empty or int(row["failed"].iloc[0]) == 0:
@@ -85,11 +80,13 @@ def render() -> None:
         st.plotly_chart(
             theme.style_fig(_funnel(row, PAYMENT_STAGES, "Payments", "payments"), height=250),
             width="stretch",
+            config=theme.PLOTLY_CONFIG,
         )
     with right:
         st.plotly_chart(
             theme.style_fig(_funnel(row, ATTEMPT_STAGES, "Attempts", "attempts"), height=250),
             width="stretch",
+            config=theme.PLOTLY_CONFIG,
         )
 
     st.markdown(

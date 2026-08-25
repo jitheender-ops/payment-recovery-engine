@@ -64,62 +64,71 @@ FROM retry_ledger GROUP BY 1
 """
 
 
-def _tile(label: str, value: int, *, warn: bool = False, help: str = "") -> None:
-    """One number, tinted only when it needs eyes."""
-    colour = theme.CLAY_TEXT if warn and value else theme.PAPER
-    st.markdown(
-        f"""
-        <div style="background:{theme.SURFACE};border:1px solid {theme.LINE};
-                    border-radius:10px;padding:0.9rem 1.1rem;">
-          <div style="color:{theme.SLATE};text-transform:uppercase;letter-spacing:0.07em;
-                      font-size:0.68rem;font-weight:500;">{label}</div>
-          <div style="font-family:{theme.FONT_MONO};font-size:1.6rem;font-weight:500;
-                      color:{colour};margin-top:0.25rem;">{value:,}</div>
-          <div style="color:{theme.MUTE};font-size:0.72rem;margin-top:0.1rem;">{help}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render() -> None:
     """Render this page. Called by dashboard/app.py."""
-    st.markdown(
-        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>OPERATIONS</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("# Is the machinery running")
+    theme.page_header("OPERATIONS", "Is the machinery running")
 
-    sweep = query_db(SWEEP_SQL)
-    if sweep is None or sweep.empty:
-        no_data("engine activity")
-        return
-    s = sweep.iloc[0]
+    # The sweep tiles are the page's pulse. As a live fragment they re-read
+    # every 30s and rerender ONLY themselves — an operator watching a backlog
+    # drain sees it drain, without a full-page flicker. Off unless Live mode
+    # is on (the toggle lives in the sidebar).
+    live = bool(st.session_state.get("live_mode"))
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        _tile("Scheduled retries", int(s["scheduled"]),
-              help="Parked by a retry_at decision; the Layer 6 scheduler fires them when due.")
-    with c2:
-        _tile("Write-ahead pending", int(s["pending"]),
-              help="Committed ahead of the Razorpay call, outcome not yet recorded.")
-    with c3:
-        _tile("Stale > 15 min", int(s["stale_pending"]), warn=True,
-              help="Pending past the executor's reach — the reconciler marks these failed.")
-    with c4:
-        _tile("Events unprocessed", int(s["events_unprocessed"]), warn=True,
-              help="Stored webhooks whose background task has not finished.")
+    @st.fragment(run_every="30s" if live else None)
+    def _sweep_panel() -> None:
+        sweep = query_db(SWEEP_SQL)
+        if sweep is None or sweep.empty:
+            no_data("engine activity")
+            return
+        s = sweep.iloc[0]
 
-    if int(s["events_errored"]) or int(s["promises_overdue"]):
-        c1, c2 = st.columns(2)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
-            _tile("Events with errors", int(s["events_errored"]), warn=True,
-                  help="Marked processed with a processing_error — never re-run.")
+            theme.tile(
+                "Scheduled retries", f"{int(s['scheduled']):,}", icon="⏱",
+                foot="fire when their moment arrives",
+                help="Parked by a retry_at decision; the Layer 6 scheduler fires "
+                     "them when due.",
+            )
         with c2:
-            _tile("Promises overdue", int(s["promises_overdue"]), warn=True,
-                  help="Due dates passed with no money; expire_promises "
-                       "hands them back to the chaser.")
+            theme.tile(
+                "Write-ahead pending", f"{int(s['pending']):,}", icon="⟳",
+                foot="committed ahead of Razorpay",
+                help="Committed ahead of the Razorpay call, outcome not yet recorded.",
+            )
+        with c3:
+            theme.tile(
+                "Stale > 15 min", f"{int(s['stale_pending']):,}", icon="⚠",
+                tone="clay" if int(s["stale_pending"]) else "paper",
+                foot="reconciler marks these failed",
+                help="Pending past the executor's reach — the reconciler marks "
+                     "these failed.",
+            )
+        with c4:
+            theme.tile(
+                "Events unprocessed", f"{int(s['events_unprocessed']):,}", icon="✉",
+                tone="clay" if int(s["events_unprocessed"]) else "paper",
+                foot="background task not finished",
+                help="Stored webhooks whose background task has not finished.",
+            )
+
+        if int(s["events_errored"]) or int(s["promises_overdue"]):
+            e1, e2 = st.columns(2)
+            with e1:
+                theme.tile(
+                    "Events with errors", f"{int(s['events_errored']):,}", icon="⚠",
+                    tone="clay", foot="never re-run — see processing_error",
+                    help="Marked processed with a processing_error — never re-run.",
+                )
+            with e2:
+                theme.tile(
+                    "Promises overdue", f"{int(s['promises_overdue']):,}", icon="⌛",
+                    tone="clay", foot="expire_promises re-opens the chase",
+                    help="Due dates passed with no money; expire_promises hands "
+                         "them back to the chaser.",
+                )
+
+    _sweep_panel()
 
     # ── What fires next ──────────────────────────────────────────────────
     st.divider()
@@ -147,13 +156,27 @@ def render() -> None:
     if rejected is not None and not rejected.empty:
         show = rejected.copy()
         show["At"] = show["At"].map(theme.fmt_ist)
-        st.dataframe(
-            show[["At", "Payment", "Action", "Reason", "Decided by"]],
-            width="stretch",
-            hide_index=True,
-        )
+        export_col, table_col = st.columns([1.4, 8.6])
+        with export_col:
+            st.download_button(
+                "Export CSV",
+                rejected.to_csv(index=False).encode("utf-8"),
+                file_name="guardrail_rejections.csv",
+                mime="text/csv",
+            )
+        with table_col:
+            st.dataframe(
+                show[["At", "Payment", "Action", "Reason", "Decided by"]],
+                width="stretch",
+                hide_index=True,
+            )
     else:
-        st.info("No rejections recorded.")
+        theme.empty_state(
+            "No rejections recorded",
+            "Either the guardrail has had nothing to veto, or no traffic has "
+            "reached it yet. A clean slate here is good news either way.",
+            icon="🛡",
+        )
 
     # ── Decision mix ─────────────────────────────────────────────────────
     left, right = st.columns([3, 2])
@@ -182,7 +205,7 @@ def render() -> None:
         theme.bar_headroom(fig, mix["n"])
         with left:
             st.plotly_chart(theme.style_fig(fig, height=max(240, 26 * len(mix))),
-                            width="stretch")
+                            width="stretch", config=theme.PLOTLY_CONFIG)
 
     # ── Ledger health ────────────────────────────────────────────────────
     st.divider()

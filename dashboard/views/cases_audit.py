@@ -91,12 +91,7 @@ def _detail_str(detail: Any) -> str:
 
 def render() -> None:
     """Render this page. Called by dashboard/app.py."""
-    st.markdown(
-        f"<div style='font-family:{theme.FONT_MONO};color:{theme.SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>CASES</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("# Every unit of revenue at risk")
+    theme.page_header("CASES", "Every unit of revenue at risk")
 
     states = query_db(STATE_SQL)
     if states is None or states.empty:
@@ -110,14 +105,20 @@ def render() -> None:
         s for s in by_state if s not in order
     ]
     cols = st.columns(len(present))
+    icons = {"open": "◐", "recovered": "₹", "exhausted": "∅",
+             "abandoned": "⊘", "opted_out": "⃠", "expired": "⌛"}
+    tones = {"recovered": "brass", "open": "clay"}
     for col, state in zip(cols, present, strict=False):
         row = by_state[state]
         with col:
-            st.metric(
+            theme.tile(
                 state.replace("_", " ").title(),
                 f"{int(row['n']):,}",
-                help=f"{theme.compact_inr(row['at_risk_paise'])} at risk · "
-                f"{theme.compact_inr(row['recovered_paise'])} recovered",
+                icon=icons.get(state, "◆"),
+                tone=tones.get(state, "paper"),
+                foot=f"{theme.compact_inr(row['at_risk_paise'])} at risk · "
+                     f"{theme.compact_inr(row['recovered_paise'])} back",
+                help=f"Cases in the '{state}' state.",
             )
 
     # ── Case browser ─────────────────────────────────────────────────────
@@ -134,27 +135,36 @@ def render() -> None:
         st.info(f"No cases in state '{state_filter}'.")
         return
 
-    show = cases.copy()
-    show["At risk"] = show["at_risk"].map(theme.compact_inr)
-    show["Recovered"] = show["recovered"].map(
-        lambda p: theme.compact_inr(p) if p else "—"
-    )
-    show["Next action"] = show["Next action"].map(theme.fmt_ist)
-    show["Opened"] = show["Opened"].map(theme.fmt_ist)
-    show["Case"] = show["case_id"].str.slice(0, 8)
+    export_col, table_col = st.columns([1.4, 8.6])
+    with export_col:
+        st.download_button(
+            "Export CSV",
+            cases.to_csv(index=False).encode("utf-8"),
+            file_name=f"cases_{state_filter}.csv",
+            mime="text/csv",
+        )
+    with table_col:
+        show = cases.copy()
+        show["At risk"] = show["at_risk"].map(theme.compact_inr)
+        show["Recovered"] = show["recovered"].map(
+            lambda p: theme.compact_inr(p) if p else "—"
+        )
+        show["Next action"] = show["Next action"].map(theme.fmt_ist)
+        show["Opened"] = show["Opened"].map(theme.fmt_ist)
+        show["Case"] = show["case_id"].str.slice(0, 8)
 
-    st.dataframe(
-        show[[
-            "Case", "State", "Type", "Customer", "At risk", "Recovered",
-            "Used", "Max", "Esc", "Next action", "Close reason", "Opened",
-        ]],
-        width="stretch",
-        hide_index=True,
-        height=380,
-        column_config={
-            "State": st.column_config.TextColumn("State"),
-        },
-    )
+        st.dataframe(
+            show[[
+                "Case", "State", "Type", "Customer", "At risk", "Recovered",
+                "Used", "Max", "Esc", "Next action", "Close reason", "Opened",
+            ]],
+            width="stretch",
+            hide_index=True,
+            height=380,
+            column_config={
+                "State": st.column_config.TextColumn("State"),
+            },
+        )
 
     # ── One case, unfolded ───────────────────────────────────────────────
     st.divider()
@@ -184,11 +194,10 @@ def render() -> None:
             f"""
             <div style="border-left:2px solid {tint}; padding:0.15rem 0 0.55rem 0.85rem;
                         margin-left:0.25rem;">
-              <span style="font-family:{theme.FONT_MONO};font-size:0.78rem;
-                           color:{tint};">{kind}</span>
+              {theme.status_chip(kind)}
               <span style="color:{theme.MUTE};font-size:0.75rem;"> · {when}
                            · {ev['Actor']}</span>
-              <div style="color:{theme.SLATE};font-size:0.8rem;margin-top:0.1rem;">
+              <div style="color:{theme.SLATE};font-size:0.8rem;margin-top:0.28rem;">
                 {detail}</div>
             </div>
             """,
@@ -205,10 +214,10 @@ def render() -> None:
             "kept means money arrived, broken means the date passed without it.",
         )
         chips = "  ".join(
-            f"<span style='background:{theme.SURFACE};border:1px solid {theme.LINE};"
-            f"border-radius:6px;padding:0.3rem 0.75rem;font-size:0.8rem;"
-            f"color:{_STATE_TINT.get(r['status'], theme.PAPER)};'>"
-            f"{r['status']} <b>{int(r['n']):,}</b></span>"
+            theme.chip(
+                f"{r['status']} <b style='margin-left:0.3rem;'>{int(r['n']):,}</b>",
+                tone=theme.STATUS_TONE.get(r["status"], "slate"),
+            )
             for _, r in promises.iterrows()
         )
         st.markdown(chips, unsafe_allow_html=True)
