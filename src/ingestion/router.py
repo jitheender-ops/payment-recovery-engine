@@ -104,7 +104,14 @@ async def _process_event_background(
                 logger.exception("Failed to update event error status")
 
 
-@router.post("/razorpay")
+@router.post(
+    "/razorpay",
+    responses={
+        200: {"description": "Accepted (or duplicate already processed)"},
+        400: {"description": "Body is not valid JSON"},
+        401: {"description": "Missing or invalid X-Razorpay-Signature — fail closed"},
+    },
+)
 async def receive_razorpay_webhook(
     request: Request,
     background_tasks: BackgroundTasks,

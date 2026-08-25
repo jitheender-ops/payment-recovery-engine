@@ -55,6 +55,13 @@ def _orchestrator(
 ) -> PaymentRecoveryOrchestrator:
     orch = PaymentRecoveryOrchestrator()
     monkeypatch.setattr(orch, "_get_agent", lambda: _FixedAgent(action, retry_at))
+    # Scheduler tests pin the parking/fire mechanics, not the blackout clamp
+    # (which has its own suite). Unclamped: +4h from the live clock crosses
+    # into the IST window on some runs and the parked row moves past the fire
+    # probe — a time-of-day flake, fixed by identity-clamping here.
+    monkeypatch.setattr(
+        "src.orchestrator.clamp_retry_at_out_of_blackout", lambda dt: dt
+    )
     # Pinned: the real gate reads the wall clock for the IST retry blackout, so
     # an unpinned test passes or fails depending on the hour CI runs.
     monkeypatch.setattr(

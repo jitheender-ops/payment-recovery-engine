@@ -68,3 +68,8 @@ graphify-out/
 # requirements.lock.txt is the lockfile the Dockerfile and CI actually install
 # from. uv.lock is a second, unreferenced one — two lockfiles drift in silence.
 uv.lock
+
+# local analysis artifacts
+.mutmut-cache
+.schemathesis/
+preview/

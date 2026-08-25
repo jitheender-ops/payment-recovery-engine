@@ -76,7 +76,12 @@ def extract_features(context: FailureContext) -> NDArray[np.float32]:
 
     # Bank hash (deterministic hash to [0, 1])
     bank_str = context.bank or "unknown"
-    bank_hash = int(hashlib.md5(bank_str.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    # usedforsecurity=False is the honest annotation: this buckets a bank name
+    # into a model feature — MD5's weakness is irrelevant here, and saying so
+    # keeps security scanners pointing at real crypto instead of feature prep.
+    bank_hash = int(
+        hashlib.md5(bank_str.encode(), usedforsecurity=False).hexdigest()[:8], 16
+    ) / 0xFFFFFFFF
     features.append(bank_hash)
 
     return np.array(features, dtype=np.float32)

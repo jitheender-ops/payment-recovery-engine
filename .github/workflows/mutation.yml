@@ -1,0 +1,44 @@
+# Mutation testing on the money path. Deliberately NOT on every push: each
+# mutant reruns the suite. Weekly + manual keeps the kill score honest without
+# taxing iteration.
+#
+# Scope is the guardrail first (the layer that must never be wrong); widen to
+# cases.py/scheduler.py as budgets allow.
+
+name: mutation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+
+jobs:
+  guardrail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: |
+          pip install -e ".[dev]"
+          pip install "mutmut==2.4.5" hypothesis
+      - name: Mutate src/guardrail, run guardrail suites per mutant
+        run: |
+          mutmut run \
+            --paths-to-mutate src/guardrail \
+            --runner "python -m pytest -x -q tests/test_guardrail.py tests/test_guardrail_properties.py tests/test_blackout_clamp.py" \
+            --tests-dir tests --simple-output || true
+      - name: Publish survivor report
+        if: always()
+        run: |
+          mutmut results | tee mutation_report.txt
+          mutmut junitxml > mutation_junit.xml || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: |
+            mutation_report.txt
+            mutation_junit.xml

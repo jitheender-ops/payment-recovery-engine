@@ -105,8 +105,9 @@ def render() -> None:
         s for s in by_state if s not in order
     ]
     cols = st.columns(len(present))
-    icons = {"open": "◐", "recovered": "₹", "exhausted": "∅",
-             "abandoned": "⊘", "opted_out": "⃠", "expired": "⌛"}
+    icons = {"open": "open-case", "recovered": "money",
+             "exhausted": "exhausted", "abandoned": "abandoned",
+             "opted_out": "opted-out", "expired": "expired"}
     tones = {"recovered": "brass", "open": "clay"}
     for col, state in zip(cols, present, strict=False):
         row = by_state[state]

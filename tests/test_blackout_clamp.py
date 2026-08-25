@@ -128,3 +128,25 @@ async def test_a_deferral_into_the_blackout_is_parked_outside_it(
     assert not is_in_blackout(scheduled_local.hour), (
         f"parked at {parked} — inside the blackout it will be rejected at fire time"
     )
+
+
+# ── The two halves of the window behave differently ──────────────────────
+# Late-night inputs must roll to TOMORROW's edge; early-morning inputs land
+# TODAY at 07:05. A clamp that got days=2 or dropped `wake` entirely passed
+# every test above — these two pin both branches.
+
+
+def test_late_night_input_rolls_to_tomorrows_edge() -> None:
+    # 23:30 IST → 07:05 the NEXT day.
+    inside = datetime(2026, 8, 25, 18, 0, tzinfo=UTC)  # 23:30 IST
+    clamped = _ist(clamp_retry_at_out_of_blackout(inside))
+    assert (clamped.hour, clamped.minute, clamped.day) == (7, 5, 26)
+
+
+def test_small_hours_land_today_not_tomorrow() -> None:
+    # 02:00 IST on the 26th (= 20:30 UTC on the 25th) → TODAY at 07:05.
+    # A +2-day drift or a None crash fails here.
+    inside = datetime(2026, 8, 25, 20, 30, tzinfo=UTC)  # 02:00 IST, Aug 26
+    clamped = _ist(clamp_retry_at_out_of_blackout(inside))
+    assert (clamped.hour, clamped.minute, clamped.day) == (7, 5, 26)
+    assert clamped > _ist(inside), "forward-only, even within the same day"

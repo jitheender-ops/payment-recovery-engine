@@ -75,7 +75,7 @@ def no_data(what: str) -> bool:
             "Database not connected",
             f"No {what} to show. This console renders live data only — start "
             "Postgres and reload.",
-            icon="⌁",
+            icon="disconnected",
         )
         return True
 

@@ -92,3 +92,27 @@ jobs:
 
       - name: Calibration guard
         run: pytest -q tests/test_calibration.py
+
+  semgrep:
+    name: semgrep SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install semgrep
+      # Inline nosemgrep suppressions carry written rationale; --error makes
+      # any unsuppressed finding fail the build.
+      - run: semgrep scan --config p/default --metrics=off --error src scripts eval dashboard
+
+  secrets:
+    name: gitleaks (secret scan, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history — a secret buried in an old commit counts
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

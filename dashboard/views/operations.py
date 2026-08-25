@@ -85,20 +85,20 @@ def render() -> None:
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             theme.tile(
-                "Scheduled retries", f"{int(s['scheduled']):,}", icon="⏱",
+                "Scheduled retries", f"{int(s['scheduled']):,}", icon="clock",
                 foot="fire when their moment arrives",
                 help="Parked by a retry_at decision; the Layer 6 scheduler fires "
                      "them when due.",
             )
         with c2:
             theme.tile(
-                "Write-ahead pending", f"{int(s['pending']):,}", icon="⟳",
+                "Write-ahead pending", f"{int(s['pending']):,}", icon="pending",
                 foot="committed ahead of Razorpay",
                 help="Committed ahead of the Razorpay call, outcome not yet recorded.",
             )
         with c3:
             theme.tile(
-                "Stale > 15 min", f"{int(s['stale_pending']):,}", icon="⚠",
+                "Stale > 15 min", f"{int(s['stale_pending']):,}", icon="warning",
                 tone="clay" if int(s["stale_pending"]) else "paper",
                 foot="reconciler marks these failed",
                 help="Pending past the executor's reach — the reconciler marks "
@@ -106,7 +106,7 @@ def render() -> None:
             )
         with c4:
             theme.tile(
-                "Events unprocessed", f"{int(s['events_unprocessed']):,}", icon="✉",
+                "Events unprocessed", f"{int(s['events_unprocessed']):,}", icon="envelope",
                 tone="clay" if int(s["events_unprocessed"]) else "paper",
                 foot="background task not finished",
                 help="Stored webhooks whose background task has not finished.",
@@ -116,13 +116,13 @@ def render() -> None:
             e1, e2 = st.columns(2)
             with e1:
                 theme.tile(
-                    "Events with errors", f"{int(s['events_errored']):,}", icon="⚠",
+                    "Events with errors", f"{int(s['events_errored']):,}", icon="warning",
                     tone="clay", foot="never re-run — see processing_error",
                     help="Marked processed with a processing_error — never re-run.",
                 )
             with e2:
                 theme.tile(
-                    "Promises overdue", f"{int(s['promises_overdue']):,}", icon="⌛",
+                    "Promises overdue", f"{int(s['promises_overdue']):,}", icon="hourglass",
                     tone="clay", foot="expire_promises re-opens the chase",
                     help="Due dates passed with no money; expire_promises hands "
                          "them back to the chaser.",
@@ -175,50 +175,59 @@ def render() -> None:
             "No rejections recorded",
             "Either the guardrail has had nothing to veto, or no traffic has "
             "reached it yet. A clean slate here is good news either way.",
-            icon="🛡",
+            icon="shield",
         )
 
-    # ── Decision mix ─────────────────────────────────────────────────────
-    left, right = st.columns([3, 2])
-    with left:
-        theme.section(
-            "Who decided what",
-            "agent_type records who ACTUALLY decided — llm means the model answered; "
-            "xgboost includes silent degradations the fallback counter caught.",
+    # ── Decision mix + ledger health: collapsible ─────────────────────────
+    # Primary view stays tidy — an operator lands on the pulse and the queue.
+    # The analytical tail opens on demand, which is the drawer pattern this
+    # console can actually honor: Streamlit expanders are real disclosure
+    # widgets, not decoration.
+    with st.expander("Who decided what", expanded=False):
+        st.markdown(
+            "<p style='color:" + theme.SLATE + ";font-size:0.84rem;"
+            "margin:0 0 0.6rem 0;'>agent_type records who ACTUALLY decided — "
+            "llm means the model answered; xgboost includes silent "
+            "degradations the fallback counter caught.</p>",
+            unsafe_allow_html=True,
         )
-    mix = query_db(DECISION_MIX_SQL)
-    if mix is not None and not mix.empty:
-        mix = mix.sort_values("n")
-        fig = go.Figure(
-            go.Bar(
-                x=mix["n"],
-                y=[f"{a} · {b}" for a, b in zip(mix["agent_type"], mix["action_type"])],
-                orientation="h",
-                marker={"color": theme.BRASS, "line": {"color": theme.INK, "width": 2}},
-                text=[f"{n:,}" for n in mix["n"]],
-                textposition="outside",
-                textfont={"family": theme.FONT_MONO, "color": theme.PAPER, "size": 12},
-                hovertemplate="<b>%{y}</b><br>%{x:,} decisions<extra></extra>",
+        mix = query_db(DECISION_MIX_SQL)
+        if mix is not None and not mix.empty:
+            mix = mix.sort_values("n")
+            fig = go.Figure(
+                go.Bar(
+                    x=mix["n"],
+                    y=[f"{a} · {b}" for a, b in zip(mix["agent_type"], mix["action_type"])],
+                    orientation="h",
+                    marker={"color": theme.BRASS, "line": {"color": theme.INK, "width": 2}},
+                    text=[f"{n:,}" for n in mix["n"]],
+                    textposition="outside",
+                    textfont={"family": theme.FONT_MONO, "color": theme.PAPER, "size": 12},
+                    hovertemplate="<b>%{y}</b><br>%{x:,} decisions<extra></extra>",
+                )
             )
-        )
-        fig.update_layout(xaxis={"visible": False}, showlegend=False)
-        theme.bar_headroom(fig, mix["n"])
-        with left:
-            st.plotly_chart(theme.style_fig(fig, height=max(240, 26 * len(mix))),
-                            width="stretch", config=theme.PLOTLY_CONFIG)
+            fig.update_layout(xaxis={"visible": False}, showlegend=False)
+            theme.bar_headroom(fig, mix["n"])
+            st.plotly_chart(
+                theme.style_fig(fig, height=max(240, 26 * len(mix))),
+                width="stretch", config=theme.PLOTLY_CONFIG,
+            )
 
-    # ── Ledger health ────────────────────────────────────────────────────
-    st.divider()
-    theme.section(
-        "Customer ledger health",
-        "Rate limits roll on a 24h window; opt-out is permanent and stops everything.",
-    )
-    ledger = query_db(LEDGER_SQL)
-    if ledger is not None and not ledger.empty:
-        show = ledger.rename(columns={
-            "customers": "Customers", "retries": "Retries (24h)", "nudges": "Nudges (24h)",
-        })
-        show["Consent"] = show["Consent"].map(
-            lambda v: v.replace("_", " ") if isinstance(v, str) else v
+    with st.expander("Customer ledger health", expanded=False):
+        st.markdown(
+            "<p style='color:" + theme.SLATE + ";font-size:0.84rem;"
+            "margin:0 0 0.6rem 0;'>Rate limits roll on a 24h window; opt-out "
+            "is permanent and stops everything.</p>",
+            unsafe_allow_html=True,
         )
-        st.dataframe(show, width="stretch", hide_index=True)
+        ledger = query_db(LEDGER_SQL)
+        if ledger is not None and not ledger.empty:
+            show = ledger.rename(columns={
+                "customers": "Customers",
+                "retries": "Retries (24h)",
+                "nudges": "Nudges (24h)",
+            })
+            show["Consent"] = show["Consent"].map(
+                lambda v: v.replace("_", " ") if isinstance(v, str) else v
+            )
+            st.dataframe(show, width="stretch", hide_index=True)

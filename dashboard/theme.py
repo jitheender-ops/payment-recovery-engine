@@ -203,6 +203,50 @@ def chip(text: str, *, tone: str = "slate") -> str:
     )
 
 
+# ── Icons ────────────────────────────────────────────────────────────────
+# Inline SVG, Phosphor-outline style: stroke follows currentColor so an icon
+# inherits its container's tone, and no emoji ever stands in for a glyph.
+# Paths are deliberately simple geometry — they must read at 16px.
+
+_ICONS: dict[str, str] = {
+    "money":        "<rect x='2.5' y='6' width='19' height='12' rx='2'/><circle cx='12' cy='12' r='2.6'/><path d='M6 9.5v0M18 14.5v0'/>",  # noqa: E501
+    "trend-up":     "<path d='M3 17l6-6 4 4 8-8'/><path d='M15 7h6v6'/>",  # noqa: E501
+    "pending":      "<path d='M12 3a9 9 0 1 0 9 9'/><path d='M12 7v5l3 3'/>",  # noqa: E501
+    "clock":        "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3.5 2.5'/>",  # noqa: E501
+    "warning":      "<path d='M12 3L2.5 20h19L12 3z'/><path d='M12 10v4'/><circle cx='12' cy='17' r='0.4'/>",  # noqa: E501
+    "envelope":     "<rect x='3' y='5.5' width='18' height='13' rx='2'/><path d='M3.5 7l8.5 6 8.5-6'/>",  # noqa: E501
+    "hourglass":    "<path d='M7 3h10M7 21h10M8 3c0 7 8 7 8 11s-8 4-8 7M16 3c0 7-8 7-8 11s8 4 8 7'/>",  # noqa: E501
+    "check":        "<path d='M4.5 12.5l5 5L20 6.5'/>",  # noqa: E501
+    "cross":        "<path d='M6 6l12 12M18 6L6 18'/>",  # noqa: E501
+    "shield":       "<path d='M12 3l8 3v6c0 4.5-3.4 7.9-8 9-4.6-1.1-8-4.5-8-9V6l8-3z'/>",  # noqa: E501
+    "open-case":    "<circle cx='12' cy='12' r='9'/><path d='M12 7v5h4'/>",  # noqa: E501
+    "exhausted":    "<circle cx='12' cy='12' r='9'/><path d='M8.5 12h7'/>",  # noqa: E501
+    "abandoned":    "<circle cx='12' cy='12' r='9'/><path d='M6 6l12 12'/>",  # noqa: E501
+    "opted-out":    "<circle cx='12' cy='12' r='9'/><path d='M8 10.5h8M8 13.5h5'/>",  # noqa: E501
+    "expired":      "<circle cx='12' cy='12' r='9'/><path d='M9 12h6'/>",  # noqa: E501
+    "disconnected": "<path d='M3 3l18 18'/><path d='M8.5 8.5A11 11 0 0 0 5 12M12 4.5c3.5 0 6.7 1.3 9 3.5M11 8.3a8 8 0 0 1 7 2.2'/><circle cx='12' cy='17' r='0.6'/>",  # noqa: E501
+}
+
+
+def icon(name: str, *, size: int = 18) -> str:
+    """
+    One inline SVG icon by name, stroked in currentColor.
+
+    Unknown names fail LOUD (KeyError): a silently missing icon renders as an
+    invisible gap that nobody investigates.
+    """
+    body = _ICONS[name]
+    return (
+        f"<svg width='{size}' height='{size}' viewBox='0 0 24 24' fill='none'"
+        f" stroke='currentColor' stroke-width='1.8' stroke-linecap='round'"
+        f" stroke-linejoin='round' aria-hidden='true'>{body}</svg>"
+    )
+
+# Alias: tile()/empty_state() take an `icon=` NAME argument that shadows this
+# function inside their bodies; they render through this alias instead.
+_icon = icon
+
+
 def status_chip(status: Any) -> str:
     """A lifecycle word as its reserved pill. Unknown words stay quiet-slate."""
     word = str(status) if status is not None else "—"
@@ -231,11 +275,48 @@ def page_header(eyebrow: str, title: str, note: str | None = None) -> None:
         )
 
 
+def ring(
+    pct: float,
+    *,
+    label: str = "",
+    size: int = 74,
+    stroke: int = 7,
+    colour: str = BRASS_TEXT,
+    track: str = LINE,
+) -> str:
+    """
+    A circular progress ring — SVG, no library.
+
+    The rounded cap and the -90° start (12 o'clock) are the two conventions
+    every fitness/payment ring shares; the number sits dead centre in mono so
+    the eye lands on the value, not on the geometry. pct beyond [0,100] is
+    clamped: a progress ring that lies is worse than none.
+    """
+    p = min(max(pct, 0.0), 100.0)
+    r = (size - stroke) / 2
+    c = 2 * 3.14159265 * r
+    filled = c * p / 100
+    return f"""
+<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" role="img"
+     aria-label="{label}: {p:.1f} percent">
+  <circle cx="{size/2}" cy="{size/2}" r="{r}" fill="none"
+          stroke="{track}" stroke-width="{stroke}"/>
+  <circle cx="{size/2}" cy="{size/2}" r="{r}" fill="none"
+          stroke="{colour}" stroke-width="{stroke}"
+          stroke-linecap="round"
+          stroke-dasharray="{filled:.2f} {c:.2f}"
+          transform="rotate(-90 {size/2} {size/2})"/>
+  <text x="50%" y="54%" text-anchor="middle" dominant-baseline="middle"
+        font-family="{FONT_MONO}" font-size="{size*0.21:.0f}" font-weight="500"
+        fill="{PAPER}">{p:.0f}%</text>
+</svg>"""
+
+
 def empty_state(
     title: str,
     body: str,
     *,
-    icon: str = "◌",
+    icon: str = "pending",
     action_label: str = "",
     action_code: str = "",
 ) -> None:
@@ -246,7 +327,8 @@ def empty_state(
     context, ONE primary action, and no whimsical illustration — this is a
     payments console, not a consumer app. The card keeps the region's real
     proportions (no giant hero panel), so the move from empty to populated
-    reads as continuous rather than as a page swap.
+    reads as continuous rather than as a page swap. `icon` is a theme.icon()
+    name.
     """
     st.markdown(
         f"""
@@ -257,7 +339,7 @@ def empty_state(
           <div style="width:44px;height:44px;border-radius:12px;margin:0 auto 0.8rem auto;
                       background:{SURFACE};border:1px solid {LINE};
                       display:flex;align-items:center;justify-content:center;
-                      color:{SLATE};font-size:1.15rem;">{icon}</div>
+                      color:{SLATE};">{_icon(icon, size=22)}</div>
           <div style="font-family:{FONT_DISPLAY};font-weight:600;font-size:1.02rem;
                       color:{PAPER};">{title}</div>
           <div style="color:{SLATE};font-size:0.84rem;margin-top:0.3rem;
@@ -283,19 +365,22 @@ def tile(
     """
     One elevated KPI card — the design system's primary atom.
 
-    Depth comes from a two-stop surface, an inner top highlight and a tinted
-    drop shadow (never pure black), not from blur. The whole card lifts two
-    pixels on hover; under prefers-reduced-motion the transition collapses.
+    Depth comes from frosted glass over the ambient ground, an inner top
+    highlight and a tinted drop shadow (never pure black), not from heavy
+    blur. The whole card lifts two pixels on hover; under reduced-motion the
+    transition collapses. `icon` is a theme.icon() NAME (svg), never an emoji.
     tone: 'paper' (default), 'brass' (money in), 'clay' (needs eyes).
     """
-    value_colour = {"paper": PAPER, "brass": BRASS_TEXT, "clay": CLAY_TEXT}.get(
-        tone, PAPER
-    )
+    value_token = {
+        "paper": "--rc-paper",
+        "brass": "--rc-brass-text",
+        "clay": "--rc-clay-text",
+    }.get(tone, "--rc-paper")
     ico_html = (
         f"<span style='width:26px;height:26px;border-radius:8px;display:inline-flex;"
         f"align-items:center;justify-content:center;background:rgba(165,129,8,0.10);"
-        f"border:1px solid rgba(165,129,8,0.25);color:{BRASS_TEXT};"
-        f"font-size:0.82rem;'>{icon}</span>"
+        f"border:1px solid rgba(165,129,8,0.25);color:{BRASS_TEXT};'>"
+        f"{_icon(icon, size=15)}</span>"
         if icon
         else ""
     )
@@ -315,7 +400,7 @@ def tile(
             {ico_html}
           </div>
           <div style="font-family:{FONT_MONO};font-weight:500;font-size:1.72rem;
-                      color:{value_colour};font-variant-numeric:tabular-nums;
+                      color:var({{{value_token}}});font-variant-numeric:tabular-nums;
                       line-height:1.1;">{value}</div>
           {foot_html}
         </div>
@@ -444,22 +529,57 @@ PLOTLY_CONFIG = {
 
 _CSS = f"""
 <style>
+:root {{
+  /* Semantic design tokens — components reference var(--rc-*), never
+     raw hex, so re-theming is a token edit, not a markup hunt. */
+  --rc-ink: #12161C;
+  --rc-surface: #1A1F27;
+  --rc-line: #2A313C;
+  --rc-paper: #ECEFF4;
+  --rc-slate: #8A94A6;
+  --rc-brass-text: #D9A93A;
+  --rc-clay-text: #E0805F;
+}}
+
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 html, body, [class*="css"] {{ font-family: {FONT_BODY}; }}
 
-/* The ground is not flat black: two fixed radial washes give the page depth
-   without a single blurred element, and they never repaint on scroll because
-   they sit on the app root, not on scrolling content. */
+/* ── Ambient layer ───────────────────────────────────────────────────── */
+/* Two fixed radial washes for depth, plus a hairline engineering grid that
+   drifts one cell every 90s — perceptible as 'alive', never as motion that
+   competes with data. Paints between the app ground and all content
+   (z-index:-1), pointer-transparent, and collapses under reduced-motion. */
 .stApp {{
     background:
       radial-gradient(1100px 520px at 78% -12%, rgba(165,129,8,0.055), transparent 60%),
       radial-gradient(900px 480px at -8% 108%, rgba(117,125,208,0.045), transparent 55%),
       {INK};
 }}
+.stApp::before {{
+    content: "";
+    position: fixed; inset: -56px;
+    z-index: -1; pointer-events: none;
+    background-image:
+      linear-gradient(rgba(138,148,166,0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(138,148,166,0.045) 1px, transparent 1px);
+    background-size: 56px 56px;
+    animation: rc-grid-drift 90s linear infinite;
+}}
+@keyframes rc-grid-drift {{
+    to {{ transform: translate(56px, 56px); }}
+}}
 
+/* Every full page render rises once — the closest a rerun-model framework
+   gets to a view transition, and enough that switching sections feels like
+   movement instead of a flash. */
 .block-container {{ padding-top: 2.6rem; max-width: 1340px;
-                   padding-left: 2.6rem; padding-right: 2.6rem; }}
+                   padding-left: 2.6rem; padding-right: 2.6rem;
+                   animation: rc-rise 0.32s cubic-bezier(0.16,1,0.3,1); }}
+@keyframes rc-rise {{
+    from {{ opacity: 0; transform: translateY(9px); }}
+    to   {{ opacity: 1; transform: none; }}
+}}
 
 h1, h2, h3 {{ font-family: {FONT_DISPLAY}; letter-spacing: -0.02em; color: {PAPER}; }}
 h1 {{ font-weight: 800; font-size: 2.15rem; }}
@@ -469,27 +589,42 @@ h3 {{ font-weight: 600; color: {SLATE};
 
 hr {{ border-color: {LINE}; }}
 
-/* ── Tiles: the atom ─────────────────────────────────────────────────── */
+/* ── Tiles: frosted glass over the ambient ground ────────────────────── */
+/* True glassmorphism, with a discipline the trend usually lacks: blur is
+   capped at 14px so text on the panel stays crisp, the fill stays ≥0.66
+   opaque so contrast math survives whatever drifts behind it, and a solid
+   fallback serves browsers without backdrop-filter. */
 .rc-tile {{
-  background: linear-gradient(180deg, #1B212B 0%, #161B22 100%);
-  border: 1px solid {LINE};
+  position: relative;
+  background: linear-gradient(180deg,
+              rgba(30,37,48,0.78) 0%, rgba(22,27,34,0.72) 100%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid rgba(236,239,244,0.09);
   border-radius: 12px;
   padding: 1.05rem 1.15rem 0.95rem 1.15rem;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 10px 28px rgba(6,9,14,0.38);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), 0 10px 28px rgba(6,9,14,0.38);
   transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {{
+  .rc-tile {{ background: linear-gradient(180deg, #1B212B 0%, #161B22 100%); }}
 }}
 .rc-tile:hover {{
   transform: translateY(-2px);
-  border-color: rgba(217,169,58,0.34);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 14px 34px rgba(6,9,14,0.46);
+  border-color: rgba(217,169,58,0.40);
+  /* The hover glow: soft brass bleed, not neon — money keeps its colour. */
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.10),
+              0 0 0 1px rgba(217,169,58,0.18),
+              0 6px 26px rgba(165,129,8,0.22),
+              0 14px 34px rgba(6,9,14,0.46);
 }}
 
-/* Legacy metric tiles (still used in a few places) get the same skin. */
 [data-testid="stMetric"] {{
-  background: linear-gradient(180deg, #1B212B 0%, #161B22 100%);
-  border: 1px solid {LINE};
+  background: linear-gradient(180deg,
+              rgba(30,37,48,0.78) 0%, rgba(22,27,34,0.72) 100%);
+  border: 1px solid rgba(236,239,244,0.09);
   border-radius: 12px; padding: 1rem 1.1rem;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 10px 28px rgba(6,9,14,0.38);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), 0 10px 28px rgba(6,9,14,0.38);
 }}
 [data-testid="stMetricValue"] {{
     font-family: {FONT_MONO}; font-weight: 500; font-size: 1.75rem;
@@ -508,13 +643,16 @@ hr {{ border-color: {LINE}; }}
 [data-testid="stSidebar"] .block-container {{ padding-top: 1.6rem; }}
 
 /* Nav radio rendered as stacked cards with a brass rail on the active one. */
+/* ── Touch targets: 44px is the floor a thumb can trust ──────────────── */
 [data-testid="stSidebar"] div[role="radiogroup"] label {{
   display: flex; flex-direction: column; gap: 0.05rem;
+  min-height: 44px; justify-content: center;
   background: rgba(255,255,255,0.015);
   border: 1px solid transparent;
   border-radius: 10px;
   padding: 0.52rem 0.8rem !important;
   margin: 0.14rem 0 !important;
+  cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
 }}
 [data-testid="stSidebar"] div[role="radiogroup"] label:hover {{
@@ -524,7 +662,10 @@ hr {{ border-color: {LINE}; }}
 [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {{
   background: rgba(165,129,8,0.09);
   border-color: rgba(217,169,58,0.38);
-  box-shadow: inset 2px 0 0 {BRASS_TEXT};
+  box-shadow: inset 2px 0 0 {BRASS_TEXT},
+              /* Active nav carries the glow language: a soft brass bleed
+                 that fades in with the border — state you can feel. */
+              0 0 14px rgba(165,129,8,0.18);
 }}
 /* Hide the native radio dot; the rail carries the state. */
 [data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child {{
@@ -537,10 +678,19 @@ hr {{ border-color: {LINE}; }}
   color: {SLATE} !important; font-size: 0.7rem; font-weight: 400;
 }}
 
+/* Keyboard nav on custom radios: the native input is visually clipped,
+   so its focus ring moves onto the label card itself. */
+[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:focus-visible) {{
+  outline: 2px solid {BRASS_TEXT};
+  outline-offset: 2px;
+}}
+
 /* ── Buttons: brass on press, never neon ─────────────────────────────── */
 [data-testid="stBaseButton-secondary"],
 [data-testid="stBaseButton-primary"] {{
   border-radius: 10px;
+  min-height: 40px;
+  cursor: pointer;
   transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
 }}
 [data-testid="stBaseButton-primary"]:not([disabled]) {{
@@ -550,10 +700,28 @@ hr {{ border-color: {LINE}; }}
 [data-testid="stBaseButton-primary"]:hover:not([disabled]) {{
   box-shadow: 0 6px 20px rgba(165,129,8,0.30);
 }}
+/* Press feedback: border expands a frame and the glow fades outward —
+   instant acknowledgement, gone before it distracts. */
+[data-testid="stBaseButton-secondary"]:hover:not([disabled]) {{
+  border-color: rgba(217,169,58,0.45);
+  box-shadow: 0 0 12px rgba(165,129,8,0.16);
+}}
 [data-testid="stBaseButton-primary"]:active:not([disabled]),
 [data-testid="stBaseButton-secondary"]:active {{
-  transform: translateY(1px);
+  /* whileTap equivalent: shrink + drop, returning faster than hover entered */
+  transform: translateY(1px) scale(0.98);
 }}
+
+/* Sidebar nav items cascade in on load — same stagger primitive as tiles. */
+[data-testid="stSidebar"] div[role="radiogroup"] label {{
+  animation: rc-rise 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}}
+[data-testid="stSidebar"] div[role="radiogroup"] label:nth-child(1) {{ animation-delay: 40ms }}
+[data-testid="stSidebar"] div[role="radiogroup"] label:nth-child(2) {{ animation-delay: 80ms }}
+[data-testid="stSidebar"] div[role="radiogroup"] label:nth-child(3) {{ animation-delay: 120ms }}
+[data-testid="stSidebar"] div[role="radiogroup"] label:nth-child(4) {{ animation-delay: 160ms }}
+[data-testid="stSidebar"] div[role="radiogroup"] label:nth-child(5) {{ animation-delay: 200ms }}
+[data-testid="stSidebar"] div[role="radiogroup"] label:nth-child(n+6) {{ animation-delay: 240ms }}
 
 /* ── Tables, expanders, alerts ───────────────────────────────────────── */
 [data-testid="stDataFrame"] {{
@@ -614,8 +782,73 @@ hr {{ border-color: {LINE}; }}
 
 ::selection {{ background: rgba(217,169,58,0.32); color: {PAPER}; }}
 
+/* The live dot breathes — the one place perpetual motion is earned, because
+   'connected and streaming' is exactly what it communicates. */
+@keyframes rc-pulse {{
+  0%   {{ box-shadow: 0 0 0 0 rgba(61,189,180,0.45); }}
+  70%  {{ box-shadow: 0 0 0 7px rgba(61,189,180,0); }}
+  100% {{ box-shadow: 0 0 0 0 rgba(61,189,180,0); }}
+}}
+.rc-pulse {{ animation: rc-pulse 2.4s ease-out infinite; }}
+
+/* ── Motion system ───────────────────────────────────────────────────── */
+/* Motion-library principles, expressed in CSS because Streamlit has no React
+   runtime: transforms only (never width/left), enter slower than exit,
+   spring-flavoured overshoot on hover, staggered children via delay steps,
+   and everything collapses under prefers-reduced-motion below. */
+
+.rc-tile {{
+  /* Enter: rise + fade, 'both' fill so delayed children start hidden —
+     this is the stagger primitive; delays come from the column rules. */
+  animation: rc-rise 0.30s cubic-bezier(0.16, 1, 0.3, 1) both;
+}}
+/* KPI rows are Streamlit columns; each child enters a beat after the last.
+   Cap at four — deeper rows just arrive together, which is fine. */
+[data-testid="stColumn"]:nth-child(1) .rc-tile {{ animation-delay: 40ms; }}
+[data-testid="stColumn"]:nth-child(2) .rc-tile {{ animation-delay: 100ms; }}
+[data-testid="stColumn"]:nth-child(3) .rc-tile {{ animation-delay: 160ms; }}
+[data-testid="stColumn"]:nth-child(4) .rc-tile {{ animation-delay: 220ms; }}
+
+/* Hover: spring-flavoured overshoot curve — past the target, settle back.
+   Press: faster than hover returns (exit-faster-than-enter). */
+.rc-tile {{
+  transition: transform 0.18s cubic-bezier(0.34, 1.4, 0.5, 1),
+              border-color 0.16s ease, box-shadow 0.16s ease;
+}}
+.rc-tile:hover {{ transform: translateY(-2px); }}
+.rc-tile:hover [style*="border-radius:8px"] {{
+  /* The little icon chip answers its card's hover — nested-variant feel. */
+  transform: scale(1.1);
+  transition: transform 0.18s cubic-bezier(0.34, 1.4, 0.5, 1);
+}}
+
+/* Decision-feed rows cascade in, capped so a long feed doesn't parade. */
+.rc-row {{ animation: rc-rise 0.26s cubic-bezier(0.16, 1, 0.3, 1) both; }}
+.rc-row:nth-child(1) {{ animation-delay: 30ms }}
+.rc-row:nth-child(2) {{ animation-delay: 70ms }}
+.rc-row:nth-child(3) {{ animation-delay: 110ms }}
+.rc-row:nth-child(4) {{ animation-delay: 150ms }}
+.rc-row:nth-child(5) {{ animation-delay: 190ms }}
+.rc-row:nth-child(n+6) {{ animation-delay: 230ms }}
+
 /* Focus must stay visible — this is a console people drive from the keyboard. */
 *:focus-visible {{ outline: 2px solid {BRASS_TEXT} !important; outline-offset: 2px; }}
+
+/* ── Responsive: 375 / 768 / 1024 ───────────────────────────────────── */
+@media (max-width: 1024px) {{
+  .block-container {{ padding-left: 1.6rem; padding-right: 1.6rem; }}
+}}
+@media (max-width: 768px) {{
+  .block-container {{ padding-left: 1rem; padding-right: 1rem;
+                      padding-top: 1.6rem; }}
+  h1 {{ font-size: 1.7rem; }}
+  .rc-tile {{ animation-delay: 0ms !important; }}
+  .stApp::before {{ animation: none; }}   /* ambience rests on small screens */
+}}
+@media (max-width: 480px) {{
+  h1 {{ font-size: 1.5rem; }}
+  .block-container {{ max-width: 100%; }}
+}}
 
 @media (prefers-reduced-motion: reduce) {{
     *, *::before, *::after {{ animation-duration: 0.001ms !important;

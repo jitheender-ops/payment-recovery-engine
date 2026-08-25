@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from jinja2 import BaseLoader, Environment
 
-_env = Environment(loader=BaseLoader())
+# autoescape ON: customer_name arrives from webhook-controlled payload fields,
+# so a future caller wiring a display name through here must not be able to
+# smuggle markup into what becomes an SMS/email body. Escaping entities in a
+# plain-text nudge costs a few &amp;; an injected message costs trust.
+_env = Environment(loader=BaseLoader(), autoescape=True)  # nosemgrep
 
 # Per-failure-class templates — all under 160 chars for SMS
 _TEMPLATES: dict[str, str] = {

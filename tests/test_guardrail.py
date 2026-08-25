@@ -120,3 +120,55 @@ def test_all_rules_checked_not_short_circuit() -> None:
     result = gate.validate(action, context, "key_1", 5)
     assert result.passed is False
     assert result.rules_failed >= 3  # blocklist + amount + retries + blackout
+
+
+# ── Fail-closed on the unexpected ────────────────────────────────────────
+
+
+async def test_schema_validation_fails_closed_on_unexpected_errors(
+    sample_retry_action, monkeypatch
+) -> None:
+    """
+    If validation itself explodes (a pydantic bug, an OOM mid-import), the
+    answer must be REJECT — an unvalidated action reaching execution is the
+    one failure this layer exists to prevent.
+    """
+    from src.guardrail.schemas import validate_action_schema
+
+    monkeypatch.setattr(
+        "src.guardrail.schemas.RetryAction",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    is_valid, action, err = validate_action_schema(sample_retry_action.model_dump())
+    assert is_valid is False
+    assert action is None
+    assert err is not None
+
+
+def test_valid_non_switch_actions_pass_the_semantic_checks() -> None:
+    """
+    The switch_rail-requires-rail check must not leak into other actions:
+    'and', not 'or' — otherwise every rail-less retry_now gets vetoed here
+    and nothing downstream ever sees why.
+    """
+    from src.agent.actions import RetryAction
+    from src.guardrail.schemas import validate_action_schema
+
+    ok, parsed, err = validate_action_schema(
+        RetryAction(action="retry_now", reason="transient").model_dump()
+    )
+    assert ok is True and err is None and parsed.action == "retry_now"
+
+    ok, _, _ = validate_action_schema(
+        RetryAction(action="nudge_customer", reason="needs customer").model_dump()
+    )
+    assert ok is True
+
+
+def test_switch_rail_without_rail_is_rejected_but_others_are_not() -> None:
+    from src.guardrail.schemas import validate_action_schema
+
+    bad = validate_action_schema(
+        {"action": "switch_rail", "reason": "no rail given"}
+    )
+    assert bad[0] is False
