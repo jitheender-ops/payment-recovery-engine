@@ -13,6 +13,10 @@ backgroundColor = "#12161C"
 secondaryBackgroundColor = "#1A1F27"
 textColor = "#ECEFF4"
 font = "sans serif"
+# One radius everywhere — tiles, tables, cards, alerts. A mixed radius system
+# reads as several products stapled together.
+borderRadius = "12px"
+borderColor = "#2A313C"
 
 [server]
 # The dashboard reads live payment data; usage stats are off on principle.
