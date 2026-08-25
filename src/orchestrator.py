@@ -323,7 +323,14 @@ class PaymentRecoveryOrchestrator:
             attempt_number=attempt_count + 1,
             action_type=action.action,
             target_rail=action.rail,
-            scheduled_at=action.retry_at,
+            # Persist UTC, always. The agent hands back an IST-aware time and
+            # Postgres would normalise it, but SQLite's DATETIME drops the zone
+            # and stores the wall clock it was given — so an IST value read back
+            # naive is 5h30m adrift, which is enough to move a retry into the
+            # blackout window it was just clamped out of.
+            scheduled_at=(
+                action.retry_at.astimezone(UTC) if action.retry_at else None
+            ),
             agent_reasoning=action.reason,
             agent_type=agent_type,
             agent_confidence=action.confidence,

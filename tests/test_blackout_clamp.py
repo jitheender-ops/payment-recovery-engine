@@ -18,7 +18,14 @@ from src.models import RetryAttempt, WebhookEvent
 
 
 def _ist(dt: datetime) -> datetime:
-    return dt.astimezone(IST)
+    """
+    IST, treating a naive value as UTC rather than as system-local.
+
+    SQLite stores no zone, so anything read back from the test DB is naive, and
+    bare .astimezone() would resolve it against whatever TZ the machine runs in.
+    That made this file pass in IST and fail in UTC on CI.
+    """
+    return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).astimezone(IST)
 
 
 # ── The pure clamp ───────────────────────────────────────────────────────
