@@ -357,6 +357,7 @@ async def test_tick_reports_what_each_sweep_did(
             "retries_fired": 0,
             "events_reconciled": 0,
             "attempts_reconciled": 0,
+            "links_cancelled": 0,
             "promises_expired": 0,
         }
 

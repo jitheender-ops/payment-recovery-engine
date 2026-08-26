@@ -132,6 +132,16 @@ class Settings(BaseSettings):
     # url_for() returns None and messaging falls back to the raw payment link.
     public_base_url: str = ""
 
+    # ── PII pseudonymisation ─────────────────────────────────────────────
+    # Keys the HMAC that turns customer_id (a raw email or phone number) into
+    # the pseudonym the LLM prompts carry. A DEDICATED secret, for the same
+    # reason recovery_link_secret is: the webhook secret is shared with the
+    # Razorpay dashboard and proves RAZORPAY'S identity — reusing it for
+    # pseudonymisation meant one leak unmasked customers too. Empty falls back
+    # to the webhook secret so existing deployments keep stable pseudonyms
+    # until they set this explicitly; new deployments should always set it.
+    pii_mask_secret: SecretStr = SecretStr("")
+
     # ── ML baseline ──────────────────────────────────────────────────────
     # Where the trained model lives. The README calls this policy the "XGBoost
     # baseline"; without a file here it silently runs the rule-based heuristic

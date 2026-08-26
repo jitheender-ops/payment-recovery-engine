@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import razorpay
@@ -19,6 +20,12 @@ from src.config import get_settings, reveal
 from src.models import PaymentFailure
 
 logger = logging.getLogger(__name__)
+
+# How many Razorpay calls may run concurrently on the dedicated pool. The
+# default asyncio executor is shared with everything else in the process
+# (min(32, cpu+4) workers); the money path deserves its own budget so a burst
+# of link creations cannot starve — or be starved by — unrelated thread work.
+_MAX_RAZORPAY_WORKERS = 8
 
 
 class _TimeoutSession(requests.Session):
@@ -52,7 +59,46 @@ class RetryExecutor:
             session=_TimeoutSession(settings.razorpay_timeout_seconds),
             auth=(settings.razorpay_key_id, reveal(settings.razorpay_key_secret)),
         )
+        # A dedicated pool rather than asyncio.to_thread's shared default: one
+        # slow Razorpay day can hold up to this many calls, and the rest of
+        # the process keeps its own executor untouched.
+        self._pool = ThreadPoolExecutor(
+            max_workers=_MAX_RAZORPAY_WORKERS,
+            thread_name_prefix="razorpay",
+        )
         logger.info("RetryExecutor initialized (key_id=%s...)", settings.razorpay_key_id[:12])
+
+    async def _off_thread(self, fn: Any, *args: Any) -> Any:
+        """Run a blocking SDK call on the dedicated Razorpay pool."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._pool, lambda: fn(*args))
+
+    async def cancel_payment_link(self, link_id: str) -> bool:
+        """
+        Cancel a Payment Link so it can never be paid late.
+
+        Every retry mints a NEW link for the full amount while the old ones
+        stay live on Razorpay's side — a customer paying both an old and a new
+        link double-pays, and the case credits the overpayment. When a case
+        closes (or an attempt is superseded), the links it spawned must die
+        with it. Cancelling an already-paid or already-cancelled link is a
+        400 from Razorpay, which this treats as success: the link is inert
+        either way, and the sweep that drives this must not retry it forever.
+
+        Returns True when the link is known-inert (cancelled here, already
+        paid, already cancelled), False when the call itself failed — the
+        caller records that and a later sweep retries.
+        """
+        try:
+            await self._off_thread(self._client.payment_link.cancel, link_id)
+            logger.info("Payment link cancelled: id=%s", link_id)
+            return True
+        except razorpay.errors.BadRequestError as e:
+            logger.info("Payment link %s already inert (cancel refused): %s", link_id, e)
+            return True
+        except Exception:
+            logger.warning("Failed to cancel payment link %s — will retry", link_id)
+            return False
 
     async def execute_retry(
         self,
@@ -115,6 +161,13 @@ class RetryExecutor:
         if failure.customer_contact:
             customer["contact"] = failure.customer_contact
 
+        # MAKE THE RAIL REAL. Until now target_rail was recorded in the ledger
+        # and nowhere else — a "switch to UPI" decision executed as a generic
+        # link the customer could pay by card, and the switch was decorative.
+        # Razorpay's `upi_link: true` creates a UPI-ONLY link: no card form,
+        # no netbanking, just a UPI intent/QR. That is the one rail the API
+        # lets us enforce, so the executor enforces it; for the other rails a
+        # generic link is still the honest best available (recorded as such).
         link_data: dict[str, Any] = {
             "amount": failure.amount,
             "currency": failure.currency,
@@ -132,16 +185,19 @@ class RetryExecutor:
                 # retry_attempts (UNIQUE on idempotency_key) before calling this
                 # method. See PaymentRecoveryOrchestrator._attempt_exists.
                 "idempotency_key": idempotency_key,
+                "target_rail": target_rail or "any",
             },
         }
+        if target_rail == "upi":
+            link_data["upi_link"] = True
 
         # razorpay-python is synchronous `requests`. Calling it directly from a
         # coroutine blocks the whole event loop: one slow Razorpay response
         # freezes every other in-flight webhook and /health along with them.
-        # ponytail: shares the default asyncio executor (min(32, cpu+4) workers),
-        # so sustained concurrency above that queues — give it a dedicated
-        # executor if retry volume ever approaches it.
-        result = await asyncio.to_thread(self._client.payment_link.create, link_data)
+        # Runs on the executor's DEDICATED pool (see __init__), so sustained
+        # concurrency beyond its workers queues Razorpay work specifically
+        # rather than starving the whole process.
+        result = await self._off_thread(self._client.payment_link.create, link_data)
 
         logger.info(
             "Payment link created: id=%s, short_url=%s, payment=%s",
@@ -181,15 +237,11 @@ class RetryExecutor:
             try:
                 # Off the event loop for the same reason as payment_link.create.
                 if failure.customer_contact:
-                    await asyncio.to_thread(
-                        self._client.payment_link.notifyBy, link_id, "sms"
-                    )
+                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "sms")
                     channels.append("sms")
                     logger.info("SMS notification sent for link %s", link_id)
                 if failure.customer_email:
-                    await asyncio.to_thread(
-                        self._client.payment_link.notifyBy, link_id, "email"
-                    )
+                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "email")
                     channels.append("email")
                     logger.info("Email notification sent for link %s", link_id)
             except Exception:

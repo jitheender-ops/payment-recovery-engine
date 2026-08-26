@@ -43,6 +43,20 @@ from src.models import (
 
 logger = logging.getLogger(__name__)
 
+
+def _aware(ts: datetime) -> datetime:
+    """
+    Force a timestamp to UTC-aware before it meets datetime.now(UTC).
+
+    The columns are DateTime(timezone=True), so Postgres hands these back
+    aware — but SQLite stores and returns naive wall clocks, and comparing the
+    two kinds raises TypeError. The same coercion the orchestrator and the
+    customer routes apply at their boundaries; the stopping rule reads
+    next_action_at on every webhook, so it gets the same protection instead of
+    relying on every writer remembering the zone.
+    """
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
 # How the money went missing. `subject_ref` is the id in that source's own
 # namespace — a payment id, a cart id, a subscription id, an invoice id, a
 # mandate token.
@@ -206,8 +220,8 @@ def stop_reason(case: RecoveryCase, ledger: RetryLedger | None = None) -> str | 
     # Weakest reason, so it is checked last: this one expires on its own, and
     # reporting it ahead of a spent budget would describe a dead case as merely
     # waiting. Set by the escalation backoff and by a pending promise to pay.
-    if case.next_action_at is not None and datetime.now(UTC) < case.next_action_at:
-        return f"next action not due until {case.next_action_at.isoformat()}"
+    if case.next_action_at is not None and datetime.now(UTC) < _aware(case.next_action_at):
+        return f"next action not due until {_aware(case.next_action_at).isoformat()}"
     return None
 
 
@@ -515,7 +529,9 @@ async def record_promise(
     await session.flush()
 
     case.next_action_at = (
-        due_at if case.next_action_at is None else max(case.next_action_at, due_at)
+        due_at
+        if case.next_action_at is None
+        else max(_aware(case.next_action_at), due_at)
     )
     log_event(
         session,

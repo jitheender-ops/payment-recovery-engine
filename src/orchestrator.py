@@ -486,7 +486,14 @@ class PaymentRecoveryOrchestrator:
         # slot, and it counts against max_retries_per_payment so a crash-looping
         # payment stops rather than being hammered. Resolving a pending row to
         # success/failed is reconciliation's job, not this path's.
+        #
+        # The phase marker is the boundary the stale sweep reads (see
+        # scheduler.reconcile_stale_attempts): a row marked phase=write_ahead
+        # may or may not have reached Razorpay, so it resolves fail-closed. A
+        # row still carrying only the scheduler's claim marker crashed BEFORE
+        # the API call was even attempted — that one is safe to re-park.
         attempt.result = "pending"
+        attempt.result_details = {"phase": "write_ahead"}
         session.add(attempt)
         try:
             await session.commit()
@@ -633,23 +640,46 @@ class PaymentRecoveryOrchestrator:
         """
         The ledger's counters as they count NOW, not as they were left.
 
-        `total_retries_24h` / `total_nudges_24h` only ever increment, and the
-        only timestamps that say when those contacts happened are
-        last_retry_at / last_nudge_at. If the most recent contact of a kind is
-        older than the window, its tally has rolled off — report 0 rather than
-        letting a lifetime total masquerade as a 24-hour rate. Without this, a
-        customer's fifth retry EVER trips the guardrail forever after: the
-        limit named "per 24h" was quietly a permanent ban.
+        Two reset rules, deliberately:
+
+        ANCHORED (preferred, rows written after migration 0004): the window
+        opened at retries/nudges_window_started_at and closes
+        window-length after that instant — a true fixed window per customer.
+        Contacts spaced just inside the window cannot keep it alive forever,
+        which the old rule allowed.
+
+        LEGACY (rows predating the anchor columns, anchor is NULL): fall back
+        to the last-contact rule — if the most recent contact of a kind is
+        older than the window, its tally has rolled off. Without some reset,
+        a customer's fifth retry EVER trips the guardrail forever: the limit
+        named "per 24h" was quietly a permanent ban.
+
+        Reads and writes must agree on which rule applies (see
+        _update_retry_ledger), or the guardrail sees one number while the
+        context reports another.
         """
         window = timedelta(hours=get_settings().rate_limit_window_hours)
         retries = ledger.total_retries_24h or 0
         nudges = ledger.total_nudges_24h or 0
-        last_retry = _aware(ledger.last_retry_at)
-        last_nudge = _aware(ledger.last_nudge_at)
-        if last_retry is None or now - last_retry > window:
-            retries = 0
-        if last_nudge is None or now - last_nudge > window:
-            nudges = 0
+
+        retry_anchor = _aware(ledger.retries_window_started_at)
+        if retry_anchor is not None:
+            if now - retry_anchor > window:
+                retries = 0
+        else:
+            last_retry = _aware(ledger.last_retry_at)
+            if last_retry is None or now - last_retry > window:
+                retries = 0
+
+        nudge_anchor = _aware(ledger.nudges_window_started_at)
+        if nudge_anchor is not None:
+            if now - nudge_anchor > window:
+                nudges = 0
+        else:
+            last_nudge = _aware(ledger.last_nudge_at)
+            if last_nudge is None or now - last_nudge > window:
+                nudges = 0
+
         return retries, nudges
 
     async def _attempt_exists(self, idempotency_key: str, session: AsyncSession) -> bool:
@@ -662,18 +692,47 @@ class PaymentRecoveryOrchestrator:
     async def _get_ledger(
         self, customer_id: str | None, session: AsyncSession
     ) -> RetryLedger | None:
-        """The customer's rate-limit and consent row, or None if they have none."""
+        """
+        The customer's rate-limit and consent row, or None if they have none.
+
+        with_for_update(): the contact limits are checked from a snapshot
+        taken in build_failure_context and bumped only after execution, so
+        two concurrent webhooks for one customer could both read 4/5 and both
+        send — the same TOCTOU shape as the idempotency race, which the UNIQUE
+        constraint closes. There is no constraint equivalent for a tally, so
+        the row lock is what closes it: the read takes the lock and the
+        transaction holds it until its commit, serialising per-customer
+        decisions end to end. Postgres honours it; SQLite ignores it (and is
+        single-writer anyway). The lock is held across the agent call — a
+        second webhook for the SAME customer waits, which is the correct
+        behaviour; a different customer never touches this row.
+        """
         if not customer_id:
             return None
         result = await session.execute(
-            select(RetryLedger).where(RetryLedger.customer_id == customer_id)
+            select(RetryLedger)
+            .where(RetryLedger.customer_id == customer_id)
+            .with_for_update()
         )
         return result.scalar_one_or_none()
 
     async def _get_attempt_count(self, payment_id: str, session: AsyncSession) -> int:
-        """Count existing retry attempts for a payment."""
+        """
+        Count the retry attempts a payment has actually consumed.
+
+        Excludes attempt_number = 0 rows — the deterministic `abandon_*`
+        markers the hard-decline path writes. Those record a decision the
+        case deliberately made WITHOUT spending budget, but the old count
+        included them, so the guardrail's "max retries per payment" ran one
+        slot tighter than the case's own attempts_used — the two budget
+        sources of truth this module is required to agree. With the filter,
+        count-attempts and case-budget answer the same question.
+        """
         result = await session.execute(
-            select(func.count()).where(RetryAttempt.payment_id == payment_id)
+            select(func.count()).where(
+                RetryAttempt.payment_id == payment_id,
+                RetryAttempt.attempt_number > 0,
+            )
         )
         return result.scalar_one()
 
@@ -691,14 +750,24 @@ class PaymentRecoveryOrchestrator:
             session.add(ledger)
 
         if action.action in ("retry_now", "retry_at", "switch_rail"):
-            # Reset the tally first when its window has rolled: the column only
-            # ever increments otherwise, so a customer's fifth retry EVER would
-            # trip a limit named "per 24h". Same rule as _effective_counts —
-            # reads and writes must agree or the guardrail sees one number while
-            # the context reports another.
+            # ANCHORED window (see _effective_counts): reset when the anchor
+            # itself has aged out of the window; otherwise increment and keep
+            # the anchor where it is — that anchor is what makes the window
+            # deterministic instead of "24h from the last contact". Legacy
+            # rows with no anchor fall back to the last-contact rule and gain
+            # an anchor on this very write, upgrading them to the anchored
+            # behaviour from their next window on.
             last_retry = _aware(ledger.last_retry_at)
-            if last_retry is None or now - last_retry > window:
+            anchor = _aware(ledger.retries_window_started_at)
+            if anchor is not None:
+                if now - anchor > window:
+                    ledger.total_retries_24h = 0
+                    ledger.retries_window_started_at = now
+            elif last_retry is None or now - last_retry > window:
                 ledger.total_retries_24h = 0
+                ledger.retries_window_started_at = now
+            else:
+                ledger.retries_window_started_at = last_retry
             # `default=0` on the column is a FLUSH-time default, so a ledger
             # constructed a few lines above still holds None here and `+= 1`
             # raises TypeError — deterministically, on the first retry for every
@@ -708,8 +777,16 @@ class PaymentRecoveryOrchestrator:
 
         if action.action == "nudge_customer":
             last_nudge = _aware(ledger.last_nudge_at)
-            if last_nudge is None or now - last_nudge > window:
+            anchor = _aware(ledger.nudges_window_started_at)
+            if anchor is not None:
+                if now - anchor > window:
+                    ledger.total_nudges_24h = 0
+                    ledger.nudges_window_started_at = now
+            elif last_nudge is None or now - last_nudge > window:
                 ledger.total_nudges_24h = 0
+                ledger.nudges_window_started_at = now
+            else:
+                ledger.nudges_window_started_at = last_nudge
             ledger.total_nudges_24h = (ledger.total_nudges_24h or 0) + 1
             ledger.last_nudge_at = now
 

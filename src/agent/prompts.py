@@ -138,15 +138,20 @@ def mask_customer_id(customer_id: str | None) -> str:
 
     Keyed, not a bare sha256. The input space is small enough to enumerate: any
     plain hash of an Indian mobile number falls to 10^10 guesses, and a hash of
-    an email address falls to any breach list. The webhook secret doubles as the
-    key with a domain separator prefix, so this needs no extra config to
-    configure wrong — and require_razorpay_credentials() already guarantees it
-    is non-empty in any environment that serves traffic.
+    an email address falls to any breach list.
+
+    The key is pii_mask_secret — a DEDICATED secret, not the webhook one. The
+    webhook secret proves Razorpay's identity and is visible to anyone with
+    dashboard access; using it here meant one leak unmasked every customer.
+    Empty pii_mask_secret falls back to the webhook secret so pre-existing
+    deployments keep stable pseudonyms until the new setting is filled in.
     """
     if not customer_id:
         return "unknown"
+    settings = get_settings()
+    key = reveal(settings.pii_mask_secret) or reveal(settings.razorpay_webhook_secret)
     digest = hmac.new(
-        reveal(get_settings().razorpay_webhook_secret).encode("utf-8"),
+        key.encode("utf-8"),
         b"pii-mask|customer_id|" + customer_id.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()

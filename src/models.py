@@ -60,9 +60,46 @@ class WebhookEvent(Base):
     )
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How many times the reconciler has tried to run this event through the
+    # pipeline. The claim-then-process sweep used to consume the event on the
+    # first exception — a transient database blip permanently skipped a real
+    # payment failure. Now the sweep re-arms the event (processed=False) until
+    # this crosses the retry cap, so only a deterministically-broken payload
+    # is ever given up on.
+    processing_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
 
     __table_args__ = (
         Index("ix_webhook_events_type_received", "event_type", "received_at"),
+    )
+
+
+# ── Scheduler heartbeat ─────────────────────────────────────────────────────
+
+
+class SchedulerHeartbeat(Base):
+    """
+    A dead-man's-switch row: the scheduler stamps it on every tick.
+
+    A tick that swallows an exception (correctly — one bad tick must not end the
+    loop) is indistinguishable from a scheduler that died three days ago, unless
+    something outside the loop remembers when it last ran. This row is that
+    something: single-row by convention (id=1), read by the Operations view, and
+    stale past a couple of intervals means nobody is firing deferred retries.
+    """
+
+    __tablename__ = "scheduler_heartbeat"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    last_tick_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_tick_counts: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -352,6 +389,19 @@ class RetryLedger(Base):
         DateTime(timezone=True), nullable=True
     )
     last_nudge_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # When the CURRENT counting window opened. The old reset rule keyed off
+    # last_retry_at alone, so contacts spaced just inside the window kept the
+    # tally alive indefinitely — "5 per 24h" was really "5 per 24h from the
+    # last contact". Anchoring the window at its first contact makes the
+    # reset deterministic: past window_started + window, the tally resets no
+    # matter how recently the last contact was. NULL on legacy rows = fall
+    # back to the old last_* behaviour (see orchestrator._effective_counts).
+    retries_window_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    nudges_window_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     blocked_until: Mapped[datetime | None] = mapped_column(

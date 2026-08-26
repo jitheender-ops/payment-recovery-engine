@@ -28,11 +28,13 @@ Three rules hold this file together:
 from __future__ import annotations
 
 import logging
+import time
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
@@ -46,6 +48,45 @@ from src.models import PaymentFailure, RecoveryCase, RetryAttempt
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# ── Rate limiting ───────────────────────────────────────────────────────────
+# This is the one public, unauthenticated surface in the product (the token in
+# the URL is the credential), and until now nothing throttled it: token
+# guessing, /pay hammering and slow-loris loops were all free. A fixed window
+# per client IP, in-process — which is exactly right for the deployment this
+# ships on (one uvicorn worker; render.yaml pins WEB_CONCURRENCY=1) and
+# deliberately NOT a Redis dependency. Two limits because they protect
+# different things: page views are cheap reads, /pay mints Razorpay objects.
+_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_PAGE_LIMIT = 30          # page views per window per IP
+_PAY_LIMIT = 6            # payment starts per window per IP — link creation is the expensive call
+_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    # Render terminates TLS at its proxy and forwards the real client in this
+    # header; falling back to the socket peer keeps it honest elsewhere.
+    return request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        request.client.host if request.client else "unknown"
+    )
+
+
+def _check_rate_limit(request: Request, *, kind: str, limit: int) -> None:
+    """Raise 429 once an IP exhausts its window budget for this kind of call."""
+    key = f"{kind}:{_client_ip(request)}"
+    now_mono = time.monotonic()
+    bucket = _RATE_LIMIT_BUCKETS.setdefault(key, deque())
+    while bucket and now_mono - bucket[0] > _RATE_LIMIT_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        logger.warning("Rate limit hit: %s (%d in window)", key, len(bucket))
+        raise HTTPException(status_code=429, detail="Too many requests")
+    bucket.append(now_mono)
+    # Opportunistic GC: the dict holds one small deque per IP; drop idle ones
+    # so a scan of many IPs cannot grow it without bound.
+    if len(_RATE_LIMIT_BUCKETS) > 10_000:
+        for stale_key in [k for k, v in _RATE_LIMIT_BUCKETS.items() if not v]:
+            del _RATE_LIMIT_BUCKETS[stale_key]
 
 # How long an attempt may sit unresolved before "we are confirming" stops being
 # a fair thing to say. Razorpay's capture webhook normally lands in seconds; a
@@ -143,6 +184,7 @@ async def recovery_page(
     request: Request, token: str, session: AsyncSession = Depends(get_session)
 ) -> Any:
     """Show one customer their own failed payment and what to do about it."""
+    _check_rate_limit(request, kind="page", limit=_PAGE_LIMIT)
     loaded = await _load(session, token)
     if loaded is None:
         # One response for expired, forged and unknown alike. Distinguishing
@@ -175,7 +217,7 @@ async def recovery_page(
 
 @router.post("/recover/{token}/pay")
 async def start_payment(
-    token: str, session: AsyncSession = Depends(get_session)
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
 ) -> Any:
     """
     Hand the customer a payment link — reusing one if it already exists.
@@ -185,6 +227,7 @@ async def start_payment(
     second of two taps on a slow connection; none of those are evidence about
     what the case looks like now.
     """
+    _check_rate_limit(request, kind="pay", limit=_PAY_LIMIT)
     loaded = await _load(session, token)
     if loaded is None:
         return RedirectResponse(f"/recover/{token}", status_code=303)

@@ -13,6 +13,8 @@ click into an unauthorised contact with a customer.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -32,6 +34,12 @@ SELECT
       WHERE processed = true AND processing_error IS NOT NULL)       AS events_errored,
   (SELECT COUNT(*) FROM promises_to_pay
       WHERE status = 'pending' AND due_at < now())                   AS promises_overdue
+"""
+
+HEARTBEAT_SQL = """
+SELECT last_tick_at, last_tick_counts
+FROM scheduler_heartbeat
+WHERE id = 1
 """
 
 NEXT_DUE_SQL = """
@@ -62,6 +70,15 @@ SELECT consent_status AS Consent, COUNT(*) AS customers,
        COALESCE(SUM(total_nudges_24h), 0)  AS nudges
 FROM retry_ledger GROUP BY 1
 """
+
+
+def _aware_heartbeat(ts: object) -> datetime:
+    """UTC-aware the same way every timestamp read on this dashboard is."""
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts)
+    if isinstance(ts, datetime) and ts.tzinfo is None:
+        return ts.replace(tzinfo=UTC)
+    return ts  # type: ignore[return-value]
 
 
 def render() -> None:
@@ -127,6 +144,29 @@ def render() -> None:
                     help="Due dates passed with no money; expire_promises hands "
                          "them back to the chaser.",
                 )
+
+        # The dead-man's-switch. A scheduler that died silently looks identical
+        # to an idle one everywhere else on this page — this is the tile that
+        # breaks the tie. Stale past two intervals means nothing is firing
+        # deferred retries, reconciling dropped webhooks, or expiring promises.
+        heartbeat = query_db(HEARTBEAT_SQL)
+        if heartbeat is None or heartbeat.empty:
+            st.caption(
+                "No scheduler heartbeat recorded yet — the first tick writes "
+                "it (or SCHEDULER_ENABLED is false)."
+            )
+        else:
+            last_tick = heartbeat.iloc[0]["last_tick_at"]
+            counts = heartbeat.iloc[0]["last_tick_counts"]
+            from datetime import timedelta
+
+            age = datetime.now(UTC) - _aware_heartbeat(last_tick)
+            fresh = age <= timedelta(minutes=3)
+            st.caption(
+                ("Scheduler alive" if fresh else "SCHEDULER STALE")
+                + f" — last tick {age.total_seconds():.0f}s ago"
+                + (f" · did {counts}" if counts else "")
+            )
 
     _sweep_panel()
 

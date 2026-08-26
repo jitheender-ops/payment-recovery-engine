@@ -504,6 +504,18 @@ it had decided. The current wave, all CI-verified:
 
 | Change | Why it mattered |
 |---|---|
+| Superseded links get cancelled | Every retry minted a NEW Payment Link while the old ones stayed live on Razorpay's side — paying an old link after a newer one settled was a real double payment the case credited twice. A scheduler sweep now cancels the links of terminal cases (already-paid links refuse the cancel and resolve as inert) |
+| `switch_rail` became real | The target rail was recorded in the ledger and nowhere else — a "switch to UPI" executed as a generic link payable by card. UPI-target links now set `upi_link: true` (UPI-only); other rails stay generic and say so in `notes.target_rail` |
+| Dedicated PII-mask secret | `mask_customer_id` keyed its HMAC with the webhook secret — shared with the Razorpay dashboard, so one leak unmasked every customer. `PII_MASK_SECRET` now takes precedence (empty falls back for existing deployments) |
+| Attempt budget unified | The guardrail counted ALL `retry_attempts` rows while the case budget skipped the deterministic `abandon` markers — the two budget answers could disagree by one slot. The count now excludes `attempt_number = 0` |
+| Ledger row lock closes the contact-limit race | Two concurrent webhooks for one customer could both read 4/5 and both send — the same TOCTOU the idempotency race had, with no constraint to close it. `_get_ledger` now takes `with_for_update()`, serialising per-customer decisions end to end |
+| Anchored rate-limit windows | The reset keyed off the last contact, so contacts spaced just inside the window kept the tally alive — "5 per 24h" was really "5 per 24h from the last contact". Windows now anchor at their first contact (`*_window_started_at`, migration 0004); legacy rows upgrade on their next write |
+| Reconcile retries transient failures | The sweep consumed an event on the first exception — a database blip permanently skipped a real payment failure. Events now re-arm up to 3 `processing_attempts` before resting with the error recorded |
+| Stale scheduler claims re-park | A deploy overlapping the fire sweep marked the agent's most deliberate decision failed-outcome-unknown even though Razorpay was never called. The claim marker vs `phase=write_ahead` marker now distinguishes pre-API crashes (re-parked +1min) from genuine unknowns (still fail-closed) |
+| Rate limits on the recovery page | The one public unauthenticated surface had no throttle: token guessing, `/pay` hammering and link-mint floods were all free. Fixed-window per-IP limits (30 page views / 6 pay starts per minute) |
+| Scheduler tick time budget | 50 due fires × 10s Razorpay timeout could run a tick ~8 minutes against a 60s interval — the backlog compounded exactly when Razorpay was slow. The fire sweep now yields at 80% of the interval; the rest waits for the next tick |
+| Dedicated Razorpay thread pool | Link creation ran on the shared default executor (min(32, cpu+4) workers) where it competed with everything else in the process. The money path now owns an 8-worker pool |
+| Scheduler heartbeat | A tick that logs and swallows an exception is indistinguishable from a scheduler that died days ago. Every tick stamps a `scheduler_heartbeat` row; the Operations view reads it and flags staleness past 3 minutes |
 | Rolling rate-limit windows | `total_retries_24h` only ever incremented — a customer's fifth retry *ever* tripped a limit named "per 24h", permanently |
 | True IST clock | `(utc_hour + 5) % 24` dropped the +30 minutes, skewing the blackout check for half of every hour |
 | Blackout-aware `retry_at` | Deferrals approved at 22:30 landed inside the blackout at 23:05 and died at fire time, having already spent an attempt slot |

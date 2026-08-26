@@ -102,6 +102,11 @@ services:
       # it never touches git. A dedicated secret, not the webhook one.
       - key: RECOVERY_LINK_SECRET
         generateValue: true
+      # Keys the HMAC that masks customer identifiers inside LLM prompts.
+      # Dedicated for the same reason RECOVERY_LINK_SECRET is: the webhook
+      # secret proves Razorpay's identity and must not unmask customers too.
+      - key: PII_MASK_SECRET
+        generateValue: true
       # The origin customers open the link on. Taken from the service itself so
       # it is correct the moment the service exists; override with a custom
       # domain once you have one, since an onrender.com host in an SMS asking
