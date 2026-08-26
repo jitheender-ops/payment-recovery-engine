@@ -220,6 +220,23 @@ class Settings(BaseSettings):
             url = "postgresql://" + url[len("postgres://"):]
         return url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
+    @field_validator("public_base_url", mode="after")
+    @classmethod
+    def _ensure_scheme(cls, url: str) -> str:
+        """
+        Prepend https:// when the platform handed us a bare host.
+
+        render.yaml sources this via `fromService: {property: host}`, which
+        returns a hostname with no scheme (e.g. "recovery-api.onrender.com").
+        url_for() does f"{base}/recover/{token}" with no scheme of its own, so
+        without this every link sent to a customer would render as
+        "recovery-api.onrender.com/recover/..." — not a URL an SMS app will
+        reliably linkify, and not what the field's own docstring promises.
+        """
+        if url and not url.startswith(("http://", "https://")):
+            return f"https://{url}"
+        return url
+
     def require_razorpay_credentials(self) -> None:
         """
         Fail fast if the credentials needed to serve webhooks are missing.

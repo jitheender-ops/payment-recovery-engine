@@ -59,3 +59,19 @@ def test_sqlite_is_left_alone() -> None:
     """The test harness uses aiosqlite; normalisation must not touch it."""
     settings = Settings(database_url="sqlite+aiosqlite:///./test.db")
     assert settings.database_url == "sqlite+aiosqlite:///./test.db"
+
+
+def test_public_base_url_gets_a_scheme_when_render_hands_us_a_bare_host() -> None:
+    """render.yaml sources this via fromService {property: host} — no scheme."""
+    settings = Settings(public_base_url="recovery-api.onrender.com")
+    assert settings.public_base_url == "https://recovery-api.onrender.com"
+
+
+def test_public_base_url_with_a_scheme_is_left_alone() -> None:
+    settings = Settings(public_base_url="https://pay.example.in")
+    assert settings.public_base_url == "https://pay.example.in"
+
+
+def test_public_base_url_empty_stays_empty() -> None:
+    """Empty means unconfigured; url_for() depends on this to fail closed."""
+    assert Settings(public_base_url="").public_base_url == ""
