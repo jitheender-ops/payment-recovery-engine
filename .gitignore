@@ -45,6 +45,9 @@ Thumbs.db
 # Docker
 *.log
 
+# Node (typescript/ replica)
+node_modules/
+
 # Coverage
 .coverage
 .coverage.*

@@ -119,6 +119,17 @@ class Settings(BaseSettings):
     escalation_backoff_hours: int = 24
 
     # ── Customer recovery page ───────────────────────────────────────────
+    # The merchant's display name, shown as the page's trust anchor: an SMS
+    # link asking for money with no visible merchant name reads as phishing,
+    # and the UPI app studies put interface identity at the top of the trust
+    # stack. Public information — a plain str, not a secret. Empty falls back
+    # to a neutral phrase, but every real deployment should set it.
+    merchant_name: str = ""
+    # Optional support deep-link, digits only (country code + number, as in a
+    # wa.me URL). A human escalation path is a top dunning best practice, and
+    # WhatsApp is where Indian customers expect to reach a business. Empty
+    # hides the button and the page falls back to "reply to our message".
+    support_whatsapp: str = ""
     # Signs the /recover/<token> links handed to customers. A DEDICATED secret,
     # not the Razorpay webhook one: a leak of either must not be a leak of both,
     # and they authorise completely different things — one proves Razorpay's

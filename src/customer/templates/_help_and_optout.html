@@ -1,0 +1,15 @@
+{# Help and control: shared by the payable and stopped states. A human
+   escalation path (WhatsApp, if configured) and the customer's stop button —
+   visible but quiet. The opt-out wires cases.record_opt_out: consent is
+   withdrawn AND every open case for this customer closes. #}
+<div class="sec"><h2>{{ t('sec_help') }}</h2></div>
+{% if whatsapp %}
+<div class="helprow">
+  <a class="btn btn-quiet" href="https://wa.me/{{ whatsapp }}?text={{ ('Payment ' ~ order_ref) | urlencode }}" rel="nofollow noopener" target="_blank">{{ t('help_whatsapp') }}</a>
+</div>
+{% endif %}
+<div class="optout">
+  <form method="post" action="/recover/{{ token }}/optout">
+    <button type="submit">{{ t('opt_out') }}</button>
+  </form>
+</div>

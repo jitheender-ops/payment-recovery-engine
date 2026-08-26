@@ -601,3 +601,27 @@ async def test_tick_stamps_the_heartbeat(
     assert row is not None
     assert row.last_tick_at is not None
     assert "retries_fired" in (row.last_tick_counts or {})
+
+
+async def test_expired_cases_also_get_their_links_cancelled(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """`expired` is terminal too — its links must die with the case."""
+    case = await _open_case(db_sessionmaker, "pay_expired", state="expired")
+    await _insert_attempt(
+        db_sessionmaker,
+        key="retry_expired_0",
+        payment_id="pay_expired",
+        case=case,
+        result="superseded",
+        external_ref="plink_EXPIRED",
+    )
+
+    fake = _FakeExecutor()
+    orch = get_orchestrator()
+    monkeypatch.setattr(orch, "_executor", fake)
+
+    async with db_sessionmaker() as session:
+        assert await scheduler.cancel_links_for_closed_cases(session, orch) == 1
+    assert fake.calls == ["plink_EXPIRED"]

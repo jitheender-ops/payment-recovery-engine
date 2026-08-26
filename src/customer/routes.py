@@ -33,6 +33,7 @@ from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -41,13 +42,52 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import recovery_link
+from src.config import get_settings
 from src.customer.explain import explain
+from src.customer.i18n import Translator, pick
 from src.database import get_session
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# How long an attempt may sit unresolved before "we are confirming" stops being
+# a fair thing to say. Razorpay's capture webhook normally lands in seconds; a
+# quarter of an hour means something is wrong, and the customer deserves the
+# honest "we don't know yet" rather than a spinner forever.
+CONFIRMING_WINDOW = timedelta(minutes=15)
+
+# Failure classes where UPI is the honest recommendation. The research is
+# blunt about why: the OTP step is India's biggest drop-off, and UPI skips it.
+# The page makes UPI the primary button's verb and the /pay route mints a
+# UPI-ONLY link (upi_link=True) — the recommendation is enforced, not
+# decorative. Everything else stays a generic link payable by anything.
+_UPI_RECOMMENDED_CLASSES = {
+    "3ds_dropoff",
+    "card_limit_exceeded",
+    "issuer_decline",
+    "insufficient_funds",
+    "invalid_card",
+    "expired_instrument",
+}
+
+
+def _recommended_rail(failure_class: str | None) -> str | None:
+    return "upi" if (failure_class or "") in _UPI_RECOMMENDED_CLASSES else None
+
+
+def _ist(dt: datetime) -> datetime:
+    """The page speaks IST — the timezone the blackout and the bank run on."""
+    return dt.astimezone(ZoneInfo("Asia/Kolkata"))
+
+
+def _format_expiry(expires_at: datetime, lang: str) -> str:
+    """'Sat, 28 Aug, 11 AM' in IST — honest urgency, not a fake countdown."""
+    local = _ist(expires_at)
+    if lang == "hi":
+        return local.strftime("%a, %d %b · %I:%M %p")
+    return local.strftime("%a, %d %b, %I:%M %p")
 
 # ── Rate limiting ───────────────────────────────────────────────────────────
 # This is the one public, unauthenticated surface in the product (the token in
@@ -113,9 +153,10 @@ def _money(paise: int) -> str:
 
 async def _load(session: AsyncSession, token: str) -> tuple[Any, Any, Any] | None:
     """(case, failure, latest_attempt) for a valid token, else None."""
-    case_id = recovery_link.verify(token)
-    if case_id is None:
+    verified = recovery_link.verify_with_expiry(token)
+    if verified is None:
         return None
+    case_id, _expires_at = verified
     case = await session.get(RecoveryCase, case_id)
     if case is None:
         return None
@@ -183,24 +224,56 @@ def _live_link(attempt: Any) -> str | None:
 async def recovery_page(
     request: Request, token: str, session: AsyncSession = Depends(get_session)
 ) -> Any:
-    """Show one customer their own failed payment and what to do about it."""
+    """
+    Show one customer their own failed payment and what to do about it.
+
+    The reader's order of anxiety sets the page order: is my money gone →
+    what happened → what do I do. Everything on the page is read from the
+    database on this request; nothing is inferred from the URL beyond the
+    token that names the case.
+    """
     _check_rate_limit(request, kind="page", limit=_PAGE_LIMIT)
+
+    settings = get_settings()
+    lang = pick(request.query_params.get("lang"), request.headers.get("accept-language"))
+    t = Translator(lang)
+
     loaded = await _load(session, token)
     if loaded is None:
         # One response for expired, forged and unknown alike. Distinguishing
         # them tells someone probing the URL which guesses are getting warmer.
         return templates.TemplateResponse(
-            request, "expired.html", {}, status_code=404
+            request, "expired.html",
+            {"t": t, "lang": lang, "merchant_name": settings.merchant_name},
+            status_code=404,
         )
 
     case, failure, attempt = loaded
+
+    # The token's REAL deadline, surfaced as honest urgency: it is the exact
+    # instant the consent window closes and the link stops working. No fake
+    # countdown anywhere on this page.
+    verified = recovery_link.verify_with_expiry(token)
+    expires_at = verified[1] if verified else None
+
     detail = explain(failure.failure_class if failure else None)
     state = _view_state(case, attempt, detail.retryable)
+
+    # Confirming resolves itself: one automatic re-check after a few seconds,
+    # then the honest "we'll message you" instead of a spinner that can spin
+    # for a minute. The ?r=1 flag stops the loop after the single re-check.
+    auto_refresh = state == "confirming" and not request.query_params.get("r")
+
+    recommended_rail = _recommended_rail(failure.failure_class if failure else None)
 
     return templates.TemplateResponse(
         request,
         "recover.html",
         {
+            "t": t,
+            "lang": lang,
+            "merchant_name": settings.merchant_name or None,
+            "whatsapp": settings.support_whatsapp or None,
             "state": state,
             "detail": detail,
             "amount": _money(case.amount_at_risk),
@@ -209,10 +282,46 @@ async def recovery_page(
             "method": failure.method if failure else None,
             "bank": (failure.bank or failure.card_issuer) if failure else None,
             "failed_at": failure.failed_at if failure else case.opened_at,
+            "expires_line": (
+                _format_expiry(expires_at, lang) if expires_at else None
+            ),
+            "recommended_rail": recommended_rail,
+            "auto_refresh": auto_refresh,
             "token": token,
             "has_link": _live_link(attempt) is not None,
         },
     )
+
+
+@router.post("/recover/{token}/optout")
+async def opt_out(
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
+) -> Any:
+    """
+    The customer's stop button, on the page itself.
+
+    Compliance and trust in one control: the dunning research is explicit
+    that a visible way out raises conversion for everyone else, and the
+    engine already has the machinery — this wires the page to
+    cases.record_opt_out, which withdraws consent AND closes every open case
+    for the customer rather than just skipping one message.
+    """
+    _check_rate_limit(request, kind="pay", limit=_PAY_LIMIT)
+    verified = recovery_link.verify_with_expiry(token)
+    if verified is None:
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    case_id, _ = verified
+    case = await session.get(RecoveryCase, case_id)
+    if case is None or not case.customer_id:
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    from src.cases import record_opt_out
+
+    await record_opt_out(session, case.customer_id)
+    await session.commit()
+    logger.info("Customer opt-out from recovery page: case=%s", case.id)
+    return RedirectResponse(f"/recover/{token}", status_code=303)
 
 
 @router.post("/recover/{token}/pay")
@@ -255,6 +364,12 @@ async def start_payment(
 
     from src.executor.retry_executor import RetryExecutor
 
+    # The recommended rail is ENFORCED here, not just suggested: a card
+    # drop-off gets a UPI-ONLY link (upi_link=True in the executor), so the
+    # page's primary verb and the payment object agree. A generic link for
+    # everything else keeps every method available.
+    recommended = _recommended_rail(failure.failure_class)
+
     # Deterministic key, same construction the orchestrator uses, so a link
     # created here occupies an attempt slot rather than sitting outside the
     # budget the guardrail enforces.
@@ -263,7 +378,7 @@ async def start_payment(
         result = await RetryExecutor().execute_retry(
             payment_failure=failure,
             action_type="retry_now",
-            target_rail=None,
+            target_rail=recommended,
             idempotency_key=idem,
         )
     except Exception:

@@ -16,7 +16,7 @@
   reading four sentences once.
 #}
 <!doctype html>
-<html lang="en">
+<html lang="{{ lang or 'en' }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -25,6 +25,10 @@
    Razorpay and to the font host, and out of search indexes entirely. #}
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
+{% if auto_refresh %}{# One self-recheck for a confirming payment, then honest
+   silence — a spinner that can spin for a minute is a broken promise. #}
+<meta http-equiv="refresh" content="8; url=/recover/{{ token }}?r=1">
+{% endif %}
 <title>{% block title %}Your payment{% endblock %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -62,9 +66,9 @@
   .quiet{color:var(--quiet)}
   .small{font-size:.92rem}
 
-  /* Masthead: a hairline rule, not a logo lockup. This service is not the
-     point of the page. TODO: when the merchant name is plumbed through
-     PaymentFailure, it belongs here — it is a better trust anchor than ours. */
+  /* Masthead: the merchant's name is the trust anchor, ours is the fine
+     print. An SMS link asking for money with no visible merchant name reads
+     as phishing — identity goes first, in the merchant's own words. */
   .masthead{max-width:33rem; margin:0 auto;
             padding:var(--sp-4) var(--sp-4) var(--sp-3);
             display:flex; align-items:baseline; gap:var(--sp-2);
@@ -72,6 +76,17 @@
             letter-spacing:.16em; text-transform:uppercase; color:var(--quiet)}
   .masthead::after{content:""; flex:1; height:1px; background:var(--rule);
                    align-self:center; margin-left:var(--sp-1)}
+  .masthead .who{color:var(--ink); font-weight:600; letter-spacing:.1em}
+  .langtoggle{margin-left:auto}
+  .langtoggle a{color:var(--quiet); text-decoration:underline;
+                text-underline-offset:2px}
+  .langtoggle a:hover{color:var(--ink)}
+
+  /* Hero: who this is about, in one line, above the fold. */
+  .hero{margin:0 0 var(--sp-4)}
+  .hero .to{margin:0; font-size:1rem; color:var(--ink)}
+  .hero .to strong{font-weight:600}
+  .hero .sub{margin:.15rem 0 0; font-size:.9rem; color:var(--quiet)}
 
   /* ---- The money ---------------------------------------------------- */
   .amount{font-family:var(--mono); font-weight:600; font-size:3rem;
@@ -154,6 +169,47 @@
   .btn-quiet{background:transparent; color:var(--ink); border-color:var(--rule)}
   .btn-quiet:hover{background:var(--field); color:var(--ink)}
 
+  /* ---- Trust strip: sits AT the button, where hesitation peaks. The
+     research puts security cues exactly at the moment of payment, not in a
+     footer nobody reaches. Lock is an inline SVG — no emoji, no webfont. -- */
+  .trust{margin:var(--sp-3) 0 0; display:flex; flex-wrap:wrap; align-items:center;
+         justify-content:center; gap:var(--sp-2) var(--sp-4);
+         font-size:.8rem; color:var(--quiet)}
+  .trust .lock{flex:none}
+  .trust .marks{font-family:var(--mono); font-size:.68rem; font-weight:600;
+                letter-spacing:.08em; text-transform:uppercase; white-space:nowrap}
+
+  /* ---- Timeline: three rows, past to future. The customer's story, not a
+     log. The middle row carries the plain-language reason. --------------- */
+  .timeline{margin:0; padding:0; list-style:none}
+  .timeline li{position:relative; padding:0 0 var(--sp-4) var(--sp-5);
+               border-left:1px solid var(--rule); margin-left:var(--sp-2)}
+  .timeline li:last-child{border-left-color:transparent; padding-bottom:0}
+  .timeline li::before{content:""; position:absolute; left:-4px; top:.2rem;
+                       width:7px; height:7px; border-radius:50%;
+                       background:var(--quiet)}
+  .timeline li.done::before{background:var(--ink)}
+  .timeline li.safe::before{background:var(--settled)}
+  .timeline .when{display:block; font-family:var(--mono); font-size:.68rem;
+                  letter-spacing:.09em; text-transform:uppercase;
+                  color:var(--quiet); margin-bottom:.1rem}
+  .timeline .what{margin:0}
+
+  /* ---- Expiry: the link's real deadline, honest urgency --------------- */
+  .expires{margin:var(--sp-3) 0 0; font-size:.86rem; color:var(--quiet)}
+  .expires .mono{color:var(--ink); font-weight:600}
+
+  /* ---- Help & control ------------------------------------------------- */
+  .helprow{display:flex; flex-wrap:wrap; gap:var(--sp-3); align-items:center;
+           margin-top:var(--sp-3)}
+  .helprow .btn-quiet{width:auto; min-height:48px; padding:var(--sp-2) var(--sp-4)}
+  .optout{margin:var(--sp-4) 0 0; text-align:center}
+  .optout button{background:none; border:none; padding:var(--sp-2);
+                 color:var(--quiet); font:inherit; font-size:.86rem;
+                 text-decoration:underline; text-underline-offset:2px;
+                 cursor:pointer}
+  .optout button:hover{color:var(--halt)}
+
   /* ---- The register: a passbook, set in mono and right-aligned -------- */
   .register{margin:0; border-top:1px solid var(--rule-soft)}
   .register div{display:flex; justify-content:space-between; gap:var(--sp-4);
@@ -214,7 +270,13 @@
 </style>
 </head>
 <body>
-<div class="masthead">Payment recovery</div>
+<div class="masthead">
+  {% if merchant_name %}<span class="who">{{ merchant_name }}</span><span>·</span>{% endif %}
+  <span>{{ t('masthead') if t else 'Payment recovery' }}</span>
+  {% if t %}
+  <span class="langtoggle"><a href="/recover/{{ token }}?lang={{ t.other[0] }}" hreflang="{{ t.other[0] }}" rel="nofollow">{{ t.other[1] }}</a></span>
+  {% endif %}
+</div>
 <main>{% block content %}{% endblock %}</main>
 <footer>{% block footer %}{% endblock %}</footer>
 </body>

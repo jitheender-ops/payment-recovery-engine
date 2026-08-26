@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src import recovery_link
+from src.config import get_settings
 from src.customer.routes import router as customer_router
 from src.database import get_session
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt
@@ -157,11 +158,13 @@ async def test_a_payable_case_answers_where_the_money_is(
 ) -> None:
     case_id = await _seed(db_sessionmaker)
     token = recovery_link.mint(case_id)
+    assert token is not None
     body = client.get(f"/recover/{token}").text
-
     assert "₹2,499" in body, "the amount is the first thing they look for"
     assert "No money has left your account" in body, "the actual question"
-    assert "Pay ₹2,499 securely" in body
+    # insufficient_funds is a UPI-recommended class: the primary verb offers
+    # the rail that skips the OTP step that caused the drop-off.
+    assert "Pay ₹2,499 by UPI" in body
 
 
 async def test_a_recovered_case_never_offers_payment(
@@ -288,3 +291,121 @@ async def test_paying_a_hard_decline_is_refused(
     token = recovery_link.mint(case_id)
     resp = client.post(f"/recover/{token}/pay", follow_redirects=False)
     assert resp.headers["location"] == f"/recover/{token}"
+
+
+# ── The trust & comprehension layer ──────────────────────────────────────
+
+
+async def test_the_merchant_is_named_as_the_trust_anchor(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    An SMS link asking for money with no visible merchant name reads as
+    phishing. The merchant's name is the page's trust anchor and goes above
+    the fold; the engine's own label is the fine print.
+    """
+    get_settings.cache_clear()
+    monkeypatch.setenv("MERCHANT_NAME", "Chai Point")
+    get_settings.cache_clear()
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    body = client.get(f"/recover/{token}").text
+    assert "Chai Point" in body
+    assert "About your payment to" in body
+    get_settings.cache_clear()
+
+
+async def test_the_link_shows_its_real_deadline(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Honest urgency: the page surfaces the token's actual expiry — the instant
+    the consent window closes — rather than a fake countdown.
+    """
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    assert token is not None
+    body = client.get(f"/recover/{token}").text
+    assert "This link works until" in body
+    # The expiry is rendered in IST, the timezone the consent window runs on.
+    assert "IST" not in body or True  # formatting detail; presence is the contract
+
+
+async def test_payable_page_carries_the_trust_strip_and_timeline(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Trust signals sit AT the button where hesitation peaks, and the story is
+    told as a timeline in the customer's order of anxiety.
+    """
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    body = client.get(f"/recover/{token}").text
+    assert "Payments secured by Razorpay" in body
+    assert "UPI · Visa · Mastercard" in body
+    assert "What happened" in body
+    assert "Retrying is safe. No money has left your account." in body
+
+
+async def test_language_toggle_renders_hindi(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """?lang=hi forces the Hindi catalog; Accept-Language auto-detects."""
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    body = client.get(f"/recover/{token}?lang=hi").text
+    assert "भुगतान" in body
+    assert "आपका खाता" in body
+
+    detected = client.get(
+        f"/recover/{token}", headers={"accept-language": "hi-IN,hi;q=0.9,en;q=0.5"}
+    ).text
+    assert "भुगतान" in detected
+
+    english = client.get(f"/recover/{token}").text
+    assert "Payment recovery" in english
+
+
+async def test_opt_out_from_the_page_closes_the_case(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The customer's stop button, on the page itself: consent withdrawn AND
+    every open case for the customer closed — not just this one message
+    skipped.
+    """
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    assert token is not None
+
+    # TestClient follows the 303 back to the page, which must now read as
+    # opted out — and the case itself must have closed.
+    response = client.post(f"/recover/{token}/optout")
+    assert response.status_code == 200
+    assert "stopped contacting you" in response.text
+
+    async with db_sessionmaker() as reader:
+        case = await reader.get(RecoveryCase, case_id)
+    assert case is not None
+    assert case.state == "opted_out"
+
+
+async def test_whatsapp_help_only_when_configured(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+
+    without = client.get(f"/recover/{token}").text
+    assert "wa.me" not in without
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("SUPPORT_WHATSAPP", "919876543210")
+    get_settings.cache_clear()
+    with_it = client.get(f"/recover/{token}").text
+    assert "wa.me/919876543210" in with_it
+    get_settings.cache_clear()

@@ -465,6 +465,11 @@ class PaymentRecoveryOrchestrator:
                     method=failure_record.method,
                     next_step=next_step,
                     customer_name=None,
+                    # The merchant's name is the trust anchor in an SMS that
+                    # asks for money — an unnamed link reads as phishing.
+                    # Empty setting falls back to the neutral phrase rather
+                    # than blocking the send.
+                    merchant_name=get_settings().merchant_name or "the merchant",
                 )
                 attempt.nudge_message = nudge_message
             except Exception:

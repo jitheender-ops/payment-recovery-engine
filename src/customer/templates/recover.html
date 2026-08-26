@@ -2,16 +2,22 @@
   One customer, one failed payment, one page.
 
   Order is the reader's order of anxiety, not ours:
-    1. how much            the number they are worried about
-    2. where it physically is   the custody rail — the actual question
-    3. what happened       in their words
-    4. what to do          exactly one primary action
-    5. the record          folded away; nobody reads a bank name first
+    0. who is asking for money   the merchant's name — an SMS link with no
+                                 visible merchant reads as phishing
+    1. how much                  the number they are worried about
+    2. where it physically is    the custody rail — the actual question
+    3. what happened             the timeline, in their words
+    4. what to do                exactly one primary action, with the trust
+                                 strip AT the button where hesitation peaks
+    5. the record                folded away; nobody reads a bank name first
+    6. the way out               opt-out and help, visible but quiet
 
   `state` is computed server-side in routes.py on every request. This template
   never infers status from anything it was handed, and the rail below is a
   rendering of that one variable — it cannot show "received" unless the server
-  said recovered.
+  said recovered. All chrome strings go through t() (src/customer/i18n.py);
+  the per-class prose comes from explain.py and is the next translation
+  frontier — it renders in English until that pass is native-reviewed.
 #}
 {% extends "base.html" %}
 {% block title %}
@@ -31,6 +37,13 @@
   "payable":       ("at-you",     "",                "Still with you", "No money has left your account."),
 }[state] %}
 
+{% if merchant_name %}
+<div class="hero">
+  <p class="to">{{ t('hero_about') }} <strong>{{ merchant_name }}</strong></p>
+  <p class="sub">{{ t('masthead') }}</p>
+</div>
+{% endif %}
+
 {% set shown = recovered if state == "recovered" else amount %}
 <p class="amount{% if shown|length > 9 %} amount-long{% endif %}">{{ shown }}</p>
 
@@ -40,9 +53,9 @@
     <div class="rail-block {{ rail[0] }} {{ rail[1] }}"></div>
   </div>
   <div class="rail-legend" aria-hidden="true">
-    <span {% if rail[0] == "at-you" %}class="here"{% endif %}>Your account</span>
-    <span {% if rail[0] == "at-transit" %}class="here"{% endif %}>In transit</span>
-    <span {% if rail[0] == "at-them" %}class="here"{% endif %}>Merchant</span>
+    <span {% if rail[0] == "at-you" %}class="here"{% endif %}>{{ t('rail_you') }}</span>
+    <span {% if rail[0] == "at-transit" %}class="here"{% endif %}>{{ t('rail_transit') }}</span>
+    <span {% if rail[0] == "at-them" %}class="here"{% endif %}>{{ t('rail_merchant') }}</span>
   </div>
   <p class="rail-verdict">{{ rail[2] }}.</p>
 </div>
@@ -61,7 +74,12 @@
     we're waiting for your bank to confirm it. This usually takes under a
     minute. Paying now could charge you twice.</p>
   </div>
-  <a class="btn btn-quiet" href="/recover/{{ token }}">Check again</a>
+  {% if auto_refresh %}
+  <p class="quiet small">{{ t('confirming_auto') }}</p>
+  {% else %}
+  <p class="quiet small">{{ t('unknown_sms') }}</p>
+  {% endif %}
+  <a class="btn btn-quiet" href="/recover/{{ token }}?r=1">{{ t('check_again') }}</a>
 
 {% elif state == "unknown" %}
   <h1>We can't confirm this payment yet</h1>
@@ -71,10 +89,11 @@
     out that the first one succeeded. Check your bank statement, or contact
     support with the reference below.</p>
   </div>
-  <a class="btn btn-quiet" href="/recover/{{ token }}">Check again</a>
+  <p class="quiet small">{{ t('unknown_sms') }}</p>
+  <a class="btn btn-quiet" href="/recover/{{ token }}">{{ t('check_again') }}</a>
 
 {% elif state == "opted_out" %}
-  <h1>We've stopped contacting you</h1>
+  <h1>{{ t('opt_out_done') }}</h1>
   <div class="note">
     <p>You asked us not to contact you about this payment, and we haven't.
     {{ detail.money }}</p>
@@ -85,11 +104,12 @@
   <div class="note">
     <p>{{ detail.money }}</p>
   </div>
-  <div class="sec"><h2>What to do</h2></div>
+  <div class="sec"><h2>{{ t('sec_what_to_do') }}</h2></div>
   <p>{{ detail.next }}</p>
   {% if state == "stopped" %}
     <p class="quiet small">We're no longer retrying this payment automatically.</p>
   {% endif %}
+  {% include "_help_and_optout.html" %}
 
 {% else %}{# payable #}
   <h1>{{ detail.headline }}</h1>
@@ -97,7 +117,25 @@
     <p>{{ detail.money }}</p>
   </div>
 
-  <div class="sec"><h2>What to do</h2></div>
+  {# The customer's story in three rows: attempted → what the bank said →
+     what is true about a retry. A log is our view; this is theirs. ------- #}
+  <div class="sec"><h2>{{ t('sec_what_happened') }}</h2></div>
+  <ol class="timeline">
+    <li class="done">
+      <span class="when">{{ t('timeline_attempted_at', date=failed_at.strftime("%d %b, %H:%M")) if failed_at else t('timeline_attempted') }}</span>
+      <p class="what">{{ t('timeline_attempted') }}{% if method %} · {{ method }}{% if bank %} · {{ bank }}{% endif %}{% endif %}</p>
+    </li>
+    <li class="done">
+      <span class="when">&nbsp;</span>
+      <p class="what">{{ t('timeline_result_reason', reason=detail.headline[0].lower() + detail.headline[1:]) if lang == 'en' else t('timeline_result') }}</p>
+    </li>
+    <li class="safe">
+      <span class="when">&nbsp;</span>
+      <p class="what">{{ t('timeline_safe') }}</p>
+    </li>
+  </ol>
+
+  <div class="sec"><h2>{{ t('sec_what_to_do') }}</h2></div>
   <p>{{ detail.next }}</p>
 
   {% if request.query_params.get("error") %}
@@ -115,14 +153,22 @@
    the page. A CSRF token would be theatre here, not protection. #}
 <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -- capability-token auth: the path secret IS the authority (see routes.py) -->
 <form method="post" action="/recover/{{ token }}/pay" id="payform">
-    <button class="btn" type="submit" id="paybtn">Pay {{ amount }} securely</button>
+    <button class="btn" type="submit" id="paybtn">{% if recommended_rail == "upi" %}{{ t('pay_upi', amount=amount) }}{% else %}{{ t('pay_securely', amount=amount) }}{% endif %}</button>
   </form>
+  <div class="trust">
+    <svg class="lock" width="12" height="14" viewBox="0 0 12 14" fill="none" aria-hidden="true"><rect x="1" y="6" width="10" height="7" rx="1" fill="currentColor"/><path d="M3.5 6V4.5a2.5 2.5 0 0 1 5 0V6" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>
+    <span>{{ t('trust_secured') }}</span>
+    <span class="marks">UPI · Visa · Mastercard</span>
+  </div>
   <p class="quiet small" style="margin:var(--sp-3) 0 0">
-    Opens Razorpay. You'll come back here once it's done.
+    {{ t('pay_note') }} {{ t('pay_other_methods') }}
   </p>
+  {% if expires_line %}
+  <p class="expires">{{ t('expires_line', when='</span>' + expires_line + '<span class="mono">') | safe }}</p>
+  {% endif %}
 {% endif %}
 
-<div class="sec"><h2>This payment</h2></div>
+<div class="sec"><h2>{{ t('sec_this_payment') }}</h2></div>
 <dl class="register">
   <div><dt>Reference</dt><dd>{{ order_ref }}</dd></div>
   {% if method %}<div><dt>Method</dt><dd>{{ method }}{% if bank %} · {{ bank }}{% endif %}</dd></div>{% endif %}
@@ -136,6 +182,7 @@
     This page shows only your own payment and the link expires on its own.
   </p>
 </details>
+{% include "_help_and_optout.html" %}
 {% endif %}
 
 {% if state == "payable" %}
@@ -148,7 +195,7 @@
     if (!f || !b) return;
     f.addEventListener('submit', function () {
       b.setAttribute('aria-disabled', 'true');
-      b.textContent = 'Opening Razorpay…';
+      b.textContent = {{ t('pay_opening') | tojson }};
       setTimeout(function () { b.disabled = true; }, 0);
     });
   })();
@@ -157,6 +204,9 @@
 {% endblock %}
 
 {% block footer %}
-  Trouble with this payment? Reply to the message we sent you and quote
+  {{ t('help_footer') }}
   <span class="mono">{{ order_ref }}</span>.
+  {% if whatsapp %}
+  <a href="https://wa.me/{{ whatsapp }}" rel="nofollow noopener" target="_blank">WhatsApp</a>
+  {% endif %}
 {% endblock %}

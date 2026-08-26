@@ -32,6 +32,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.actions import RetryAction
@@ -515,7 +516,9 @@ async def cancel_links_for_closed_cases(
         .join(RecoveryCase, RecoveryCase.id == RetryAttempt.recovery_case_id)
         .where(
             RetryAttempt.external_ref.is_not(None),
-            RecoveryCase.state.in_(["recovered", "exhausted", "abandoned", "opted_out"]),
+            RecoveryCase.state.in_(
+                ["recovered", "exhausted", "abandoned", "expired", "opted_out"]
+            ),
             RetryAttempt.result.notin_(["cancelled"]),
         )
         .order_by(RetryAttempt.created_at)
@@ -552,14 +555,29 @@ async def _stamp_heartbeat(session: AsyncSession, counts: dict[str, int], now: d
     scheduler that died days ago — unless something OUTSIDE the loop remembers
     when it last ran. The Operations view reads this row; a last_tick_at older
     than a couple of intervals means nothing is firing deferred retries.
+
+    The first tick after boot can race a second worker (WEB_CONCURRENCY > 1):
+    both see "no row", both insert id=1, and the loser's IntegrityError would
+    otherwise fail the WHOLE tick's commit — discarding the work all five
+    sweeps just did. So the insert runs inside a SAVEPOINT: the loser's
+    rollback undoes only its own insert, and it re-reads and stamps the
+    winner's row instead. The rest of the tick's work is untouched.
     """
     heartbeat = await session.get(SchedulerHeartbeat, 1)
     if heartbeat is None:
-        heartbeat = SchedulerHeartbeat(id=1, last_tick_at=now, last_tick_counts=counts)
-        session.add(heartbeat)
-    else:
-        heartbeat.last_tick_at = now
-        heartbeat.last_tick_counts = counts
+        nested = await session.begin_nested()
+        try:
+            session.add(SchedulerHeartbeat(id=1, last_tick_at=now, last_tick_counts=counts))
+            await nested.commit()
+        except IntegrityError:
+            await nested.rollback()
+            heartbeat = await session.get(SchedulerHeartbeat, 1)
+            if heartbeat is None:  # pragma: no cover — only if the table is gone
+                return
+        else:
+            return
+    heartbeat.last_tick_at = now
+    heartbeat.last_tick_counts = counts
     await session.flush()
 
 

@@ -32,8 +32,10 @@ from __future__ import annotations
 import base64
 import hmac
 import logging
+import re
 import time
 import uuid
+from datetime import UTC, datetime
 from hashlib import sha256
 
 from src.config import get_settings, reveal
@@ -81,6 +83,19 @@ def verify(token: str) -> uuid.UUID | None:
     lets someone probe the difference between "expired" and "bad signature",
     which is a slow oracle for the secret.
     """
+    verified = verify_with_expiry(token)
+    return verified[0] if verified else None
+
+
+def verify_with_expiry(token: str) -> tuple[uuid.UUID, datetime] | None:
+    """
+    (case, expiry instant) for a valid token, else None.
+
+    The page shows the link's REAL deadline — "this link works until Sat,
+    11 AM" — because an honest deadline outperforms a fake countdown and the
+    consent window is the one we actually enforce. Same one-return-value
+    failure discipline as verify(): every failure looks identical.
+    """
     secret = reveal(get_settings().recovery_link_secret)
     if not secret or not token or token.count(_SEP) != 1:
         return None
@@ -102,9 +117,12 @@ def verify(token: str) -> uuid.UUID | None:
         return None
     case_hex, _, expiry = payload.partition(_SEP)
     try:
-        if int(expiry) < int(time.time()):
+        expiry_epoch = int(expiry)
+        if expiry_epoch < int(time.time()):
             return None
-        return uuid.UUID(hex=case_hex)
+        if not re.fullmatch(r"[0-9a-f]{32}", case_hex):
+            return None
+        return uuid.UUID(hex=case_hex), datetime.fromtimestamp(expiry_epoch, tz=UTC)
     except ValueError:
         return None
 

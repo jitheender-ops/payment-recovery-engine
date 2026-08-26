@@ -102,6 +102,15 @@ services:
       # it never touches git. A dedicated secret, not the webhook one.
       - key: RECOVERY_LINK_SECRET
         generateValue: true
+      # The merchant's display name — the trust anchor on the recovery page
+      # and in SMS. Public information; an unnamed payment link reads as
+      # phishing, so set this to the name customers actually know.
+      - key: MERCHANT_NAME
+        sync: false
+      # Optional WhatsApp support number (digits only, with country code).
+      # Empty hides the button; the page falls back to "reply to our message".
+      - key: SUPPORT_WHATSAPP
+        sync: false
       # Keys the HMAC that masks customer identifiers inside LLM prompts.
       # Dedicated for the same reason RECOVERY_LINK_SECRET is: the webhook
       # secret proves Razorpay's identity and must not unmask customers too.
