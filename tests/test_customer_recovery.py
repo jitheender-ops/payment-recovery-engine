@@ -23,10 +23,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src import recovery_link
 from src.config import get_settings
+from src.customer import routes as customer_routes
 from src.customer.routes import router as customer_router
 from src.database import get_session
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt
@@ -409,3 +411,220 @@ async def test_whatsapp_help_only_when_configured(
     with_it = client.get(f"/recover/{token}").text
     assert "wa.me/919876543210" in with_it
     get_settings.cache_clear()
+
+
+# ── Self-serve loopholes found in review ─────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _isolated_rate_buckets() -> Iterator[None]:
+    """
+    The bucket map lives at module scope and survives between tests, so the
+    shared 'unknown' client IP would otherwise inherit the pay budget spent
+    by earlier tests and hand one test another test's 429.
+    """
+    customer_routes._RATE_LIMIT_BUCKETS.clear()
+    yield
+    customer_routes._RATE_LIMIT_BUCKETS.clear()
+
+
+class _FakeLinkExecutor:
+    """Stands in for the Razorpay-backed executor: counts link creations."""
+
+    instances = 0
+
+    def __init__(self) -> None:
+        type(self).instances += 1
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute_retry(
+        self,
+        payment_failure: Any,
+        action_type: str,
+        target_rail: str | None,
+        idempotency_key: str,
+        nudge_message: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append({"idempotency_key": idempotency_key, "target_rail": target_rail})
+        return {
+            "success": True,
+            "payment_link_id": f"plink_{idempotency_key[-6:]}",
+            "short_url": f"https://rzp.io/i/{idempotency_key[-6:]}",
+            "target_rail": target_rail,
+        }
+
+
+async def test_a_double_tap_mints_exactly_one_link(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    THE double-pay loophole: the self-serve /pay route used to create links
+    WITHOUT writing an attempt row, so nothing recorded the link, a second
+    tap found no 'live link' and minted another — two live payment objects
+    for one case, both payable. The write-ahead row is what closes it.
+    """
+    _FakeLinkExecutor.instances = 0
+    fake = _FakeLinkExecutor()
+    monkeypatch.setattr(
+        "src.executor.retry_executor.RetryExecutor", lambda: fake
+    )
+
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    assert token is not None
+
+    first = client.post(f"/recover/{token}/pay", follow_redirects=False)
+    assert first.status_code == 303
+    assert "rzp.io" in first.headers["location"]
+    # Second tap lands on the live link (reuse) or loses the write-ahead race;
+    # either way no new payment object may exist.
+    client.post(f"/recover/{token}/pay", follow_redirects=False)
+
+    # Exactly ONE link was ever created: either the second tap lost the
+    # idempotency race or it was redirected to the live first link.
+    assert len(fake.calls) == 1
+
+    async with db_sessionmaker() as reader:
+        rows = (
+            await reader.execute(
+                select(RetryAttempt).where(
+                    RetryAttempt.idempotency_key.like("selfserve_%")
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].result == "success"
+    assert rows[0].external_ref is not None
+
+
+async def test_self_serve_payment_is_attributed_not_self_recovered(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    Without an attempt row, a capture on a customer-opened link matched
+    nothing and fell through to order_ref — counted as revenue but never
+    credited to the engine. The row carries the breadcrumb now.
+    """
+    _FakeLinkExecutor.instances = 0
+    monkeypatch.setattr(
+        "src.executor.retry_executor.RetryExecutor", lambda: _FakeLinkExecutor()
+    )
+
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    assert token is not None
+
+    response = client.post(f"/recover/{token}/pay", follow_redirects=False)
+    assert response.status_code == 303
+
+    async with db_sessionmaker() as reader:
+        row = (
+            await reader.execute(
+                select(RetryAttempt).where(
+                    RetryAttempt.idempotency_key.like("selfserve_%")
+                )
+            )
+        ).scalar_one()
+
+    from src.cases import attribute_capture
+
+    async with db_sessionmaker() as session:
+        credited = await attribute_capture(
+            session,
+            amount=249900,
+            recovered_ref="pay_selfserve_capture",
+            idempotency_key=row.idempotency_key,
+        )
+        await session.commit()
+
+    assert credited is not None
+    assert credited.id == case_id
+    assert credited.recovered_via_attempt_id == row.id, (
+        "a capture on our own breadcrumb must credit the engine"
+    )
+
+
+async def test_opt_out_closes_the_case_even_without_a_customer_identity(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    A webhook with no email/contact leaves the case without customer_id —
+    the opt-out used to silently no-op there, re-rendering the payable page
+    to someone who just pressed stop.
+    """
+    pid = f"pay_anon_{uuid.uuid4().hex[:8]}"
+    async with db_sessionmaker() as session:
+        failure = PaymentFailure(
+            payment_id=pid, order_id="order_anon", amount=10000, method="card",
+            error_code="BAD_REQUEST_ERROR", failure_class="insufficient_funds",
+            is_retryable=True, webhook_event_id=uuid.uuid4(),
+            failed_at=datetime.now(UTC),
+        )
+        session.add(failure)
+        await session.flush()
+        case = RecoveryCase(
+            risk_type="payment_failure", subject_ref=pid, amount_at_risk=10000,
+            amount_recovered=0, state="open", max_attempts=3, attempts_used=1,
+            customer_id=None,
+        )
+        session.add(case)
+        await session.commit()
+        case_pk = case.id
+
+    token = recovery_link.mint(case_pk)
+    assert token is not None
+    client.post(f"/recover/{token}/optout")
+
+    async with db_sessionmaker() as reader:
+        closed = await reader.get(RecoveryCase, case_pk)
+    assert closed is not None
+    assert closed.state == "opted_out"
+
+    body = client.get(f"/recover/{token}").text
+    assert "stopped contacting you" in body
+
+
+async def test_recovered_state_shows_a_real_receipt(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A confirmation that names nothing is not a receipt: amount, reference
+    (the UTR their bank statement will carry), and when."""
+    pid = f"pay_receipt_{uuid.uuid4().hex[:8]}"
+    async with db_sessionmaker() as session:
+        failure = PaymentFailure(
+            payment_id=pid, order_id="order_rcpt", amount=200000, method="upi",
+            error_code="BAD_REQUEST_ERROR", failure_class="insufficient_funds",
+            is_retryable=True, webhook_event_id=uuid.uuid4(),
+            failed_at=datetime.now(UTC),
+        )
+        session.add(failure)
+        case = RecoveryCase(
+            risk_type="payment_failure", subject_ref=pid, amount_at_risk=200000,
+            amount_recovered=200000, state="recovered", max_attempts=3,
+            attempts_used=1, customer_id="c@example.com",
+            recovered_ref="pay_SUCCESS99",
+            recovered_at=datetime.now(UTC),
+        )
+        session.add(case)
+        await session.commit()
+        case_pk = case.id
+
+    token = recovery_link.mint(case_pk)
+    assert token is not None
+    body = client.get(f"/recover/{token}").text
+    assert "₹2,000" in body
+    assert "pay_SUCCESS99" in body
+    assert "Receipt" in body
+
+
+async def test_the_charged_but_failed_faqs_exists(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    body = client.get(f"/recover/{token}").text
+    assert "I was charged, but this page says failed" in body

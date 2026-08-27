@@ -326,3 +326,47 @@ sight.
 - [ ] Dark mode renders; reduced-motion kills animation; focus rings visible.
 - [ ] Rate limits return 429 per IP beyond the window budget.
 - [ ] Total document <20KB; zero third-party scripts.
+
+---
+
+## 10. Addendum — self-serve integrity & the receipt (round 2)
+
+### F13. Receipt on the recovered state
+A confirmation that names nothing is not a receipt. When `state == "recovered"`,
+render a receipt register above "This payment": **Amount paid**, **Payment
+reference** (`recovered_ref` — the id their bank statement will carry), and
+**Received on** (IST). Omit rows whose data is absent.
+
+### F14. "I was charged, but this page says failed" FAQ
+The single most common anxiety after a temp-hold decline. A folded `<details>`
+on the payable state answering: slow banks confirm out of order; money that
+left is either a 3–5 working-day hold or an already-successful payment;
+you are never charged twice for this reference.
+
+### I1. Self-serve /pay MUST be write-ahead (the double-pay loophole)
+The pay route creates a Razorpay Payment Link. If it does that WITHOUT first
+writing its own `retry_attempts` row (idempotency_key `selfserve_<payment>_<n>`,
+result `pending`, bound to the case), then:
+- two taps a second apart each find no "live link" and mint TWO live links —
+  both payable, nothing downstream merges them;
+- the UNIQUE constraint on `idempotency_key` has no row to enforce against,
+  so the deterministic key protects nothing;
+- captures on such links match no attempt breadcrumb and fall through to
+  order-match, mislabeling engine-earned revenue as customer self-recovery;
+- the case's attempt budget never moves.
+
+Rule: **insert the attempt row first (pending) → flush → on unique-violation
+lose cleanly → create the link → record outcome + external_ref + short_url.**
+Reuse check reads those rows. Same ordering discipline as the orchestrator's
+money block; the customer surface enforces the same correctness.
+
+### I2. Opt-out must never silently no-op
+When the webhook carried no email/contact, the case has `customer_id = NULL`
+and there is no ledger row to withdraw — but THIS case must still close as
+`opted_out`. Re-rendering a payable page to someone who pressed "stop" is
+the exact complaint an opt-out exists to prevent.
+
+### I3. Rate-limit GC purges stale buckets, not just empty ones
+Per-IP fixed-window buckets live in-process. The GC pass (triggered past a
+population threshold) must drop every bucket whose newest hit has aged out —
+purging only empty ones lets a slow drip from many IPs grow memory forever.

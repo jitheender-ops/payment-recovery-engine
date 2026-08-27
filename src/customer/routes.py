@@ -39,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import recovery_link
@@ -122,10 +123,15 @@ def _check_rate_limit(request: Request, *, kind: str, limit: int) -> None:
         logger.warning("Rate limit hit: %s (%d in window)", key, len(bucket))
         raise HTTPException(status_code=429, detail="Too many requests")
     bucket.append(now_mono)
-    # Opportunistic GC: the dict holds one small deque per IP; drop idle ones
-    # so a scan of many IPs cannot grow it without bound.
+    # GC once the map grows beyond the expected population of live clients:
+    # drop every bucket whose newest hit has aged out of the window — not just
+    # empty ones, or a slow drip from many IPs grows the dict without bound.
     if len(_RATE_LIMIT_BUCKETS) > 10_000:
-        for stale_key in [k for k, v in _RATE_LIMIT_BUCKETS.items() if not v]:
+        stale = [
+            k for k, v in _RATE_LIMIT_BUCKETS.items()
+            if not v or now_mono - v[-1] > _RATE_LIMIT_WINDOW_SECONDS
+        ]
+        for stale_key in stale:
             del _RATE_LIMIT_BUCKETS[stale_key]
 
 # How long an attempt may sit unresolved before "we are confirming" stops being
@@ -278,6 +284,11 @@ async def recovery_page(
             "detail": detail,
             "amount": _money(case.amount_at_risk),
             "recovered": _money(case.amount_recovered),
+            "recovered_ref": case.recovered_ref,
+            "recovered_at": (
+                _ist(case.recovered_at).strftime("%d %b %Y, %H:%M")
+                if case.recovered_at else None
+            ),
             "order_ref": (failure.order_id if failure else None) or case.subject_ref,
             "method": failure.method if failure else None,
             "bank": (failure.bank or failure.card_issuer) if failure else None,
@@ -313,12 +324,26 @@ async def opt_out(
 
     case_id, _ = verified
     case = await session.get(RecoveryCase, case_id)
-    if case is None or not case.customer_id:
+    if case is None:
         return RedirectResponse(f"/recover/{token}", status_code=303)
 
-    from src.cases import record_opt_out
+    if case.customer_id:
+        # The full stop: withdraw consent AND close every open case this
+        # customer has, not just the one on screen.
+        from src.cases import record_opt_out
 
-    await record_opt_out(session, case.customer_id)
+        await record_opt_out(session, case.customer_id)
+    else:
+        # No identifiable customer (the webhook carried no email/contact), so
+        # there is no ledger row to opt out — but THIS case must still die.
+        # Silently re-rendering the payable page here was a loophole: a
+        # customer pressing "stop" and getting offered payment again is the
+        # exact complaint an opt-out exists to prevent.
+        from src.cases import close_case
+
+        close_case(case, "opted_out", "customer withdrew consent (unidentified)")
+        session.add(case)
+
     await session.commit()
     logger.info("Customer opt-out from recovery page: case=%s", case.id)
     return RedirectResponse(f"/recover/{token}", status_code=303)
@@ -362,7 +387,9 @@ async def start_payment(
     if failure is None:  # pragma: no cover — a case with no failure row
         return RedirectResponse(f"/recover/{token}", status_code=303)
 
+    from src.cases import attach_attempt
     from src.executor.retry_executor import RetryExecutor
+    from src.models import RetryAttempt
 
     # The recommended rail is ENFORCED here, not just suggested: a card
     # drop-off gets a UPI-ONLY link (upi_link=True in the executor), so the
@@ -370,10 +397,43 @@ async def start_payment(
     # everything else keeps every method available.
     recommended = _recommended_rail(failure.failure_class)
 
-    # Deterministic key, same construction the orchestrator uses, so a link
-    # created here occupies an attempt slot rather than sitting outside the
-    # budget the guardrail enforces.
+    # Deterministic key, WRITE-AHEAD of the Razorpay call — same discipline as
+    # the orchestrator's money block, and for the first version of this route
+    # the row was simply missing: two taps a second apart each found no
+    # "live link" (the check reads attempts, and there was none), each minted
+    # its own link, and the customer could pay both. The UNIQUE constraint on
+    # idempotency_key is what actually closes that race — but it needs a ROW
+    # to bite on. Recording the attempt also makes attribution true (a
+    # capture on this link credits the case instead of reading as
+    # self-recovery) and spends one unit of the case's budget honestly.
     idem = f"selfserve_{case.subject_ref}_{case.attempts_used}"
+    attempt_row = RetryAttempt(
+        payment_failure_id=failure.id,
+        payment_id=failure.payment_id,
+        idempotency_key=idem,
+        attempt_number=case.attempts_used + 1,
+        action_type="retry_now",
+        target_rail=recommended,
+        agent_type="customer",
+        agent_reasoning="Customer-initiated from the recovery page",
+        guardrail_passed=True,
+        result="pending",
+        channel="payment_link",
+        created_at=datetime.now(UTC),
+    )
+    session.add(attempt_row)
+    try:
+        await session.flush()
+    except IntegrityError:
+        # Lost the race to another tap of the same button. Their row owns the
+        # slot; redirecting re-renders the page, which will now read the
+        # winner's pending attempt as "confirming".
+        await session.rollback()
+        logger.info("Self-serve race lost on %s — the other tap owns it", idem)
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+    attach_attempt(case, attempt_row)
+    await session.commit()
+
     try:
         result = await RetryExecutor().execute_retry(
             payment_failure=failure,
@@ -383,9 +443,29 @@ async def start_payment(
         )
     except Exception:
         logger.exception("Self-serve link creation failed for case %s", case.id)
+        attempt_row.result = "failed"
+        attempt_row.result_details = {"error": "Self-serve link creation failed"}
+        attempt_row.executed_at = datetime.now(UTC)
+        session.add(attempt_row)
+        await session.commit()
         return RedirectResponse(f"/recover/{token}?error=1", status_code=303)
 
     url = result.get("short_url") if result.get("success") else None
+    attempt_row.executed_at = datetime.now(UTC)
+    if url:
+        attempt_row.result = "success"
+        attempt_row.external_ref = result.get("payment_link_id")
+        attempt_row.result_details = {
+            "success": True,
+            "short_url": str(url),
+            "self_serve": True,
+        }
+    else:
+        attempt_row.result = "failed"
+        attempt_row.result_details = {"error": result.get("error", "link failed")}
+    session.add(attempt_row)
+    await session.commit()
+
     if not url:
         return RedirectResponse(f"/recover/{token}?error=1", status_code=303)
     return RedirectResponse(str(url), status_code=303)

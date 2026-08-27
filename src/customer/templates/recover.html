@@ -66,6 +66,16 @@
     <p><strong>This payment is complete.</strong> Nothing further is needed.
     You can close this page.</p>
   </div>
+  {# The receipt: what they paid, the reference their bank statement will
+     carry, and when. A confirmation that names nothing is not a receipt. #}
+  {% if recovered_ref or recovered_at %}
+  <div class="sec"><h2>{{ t('sec_receipt') }}</h2></div>
+  <dl class="register">
+    {% if recovered %}<div><dt>{{ t('receipt_paid') }}</dt><dd>{{ recovered }}</dd></div>{% endif %}
+    {% if recovered_ref %}<div><dt>{{ t('receipt_reference') }}</dt><dd class="mono">{{ recovered_ref }}</dd></div>{% endif %}
+    {% if recovered_at %}<div><dt>{{ t('receipt_received') }}</dt><dd>{{ recovered_at }} IST</dd></div>{% endif %}
+  </dl>
+  {% endif %}
 
 {% elif state == "confirming" %}
   <h1>We're confirming your payment</h1>
@@ -181,6 +191,10 @@
     Payment is handled by Razorpay. We never see or store your card details.
     This page shows only your own payment and the link expires on its own.
   </p>
+</details>
+<details>
+  <summary>{{ t('faq_charged_q') }}</summary>
+  <p class="small quiet" style="margin-top:.5rem">{{ t('faq_charged_a') }}</p>
 </details>
 {% include "_help_and_optout.html" %}
 {% endif %}

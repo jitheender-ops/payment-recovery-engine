@@ -62,8 +62,8 @@ htmlcov/
 payment-recovery-engine-main/
 *-main/
 
-# Machine-local Claude Code settings — not shared config.
-.claude/settings.local.json
+# Local Claude Code config — not shared.
+.claude/
 
 # Regenerable knowledge-graph cache (1.6M of content-hashed AST blobs).
 graphify-out/

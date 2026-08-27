@@ -42,6 +42,20 @@ CATALOGS: dict[str, dict[str, str]] = {
         "sec_what_to_do": "What to do",
         "sec_this_payment": "This payment",
         "sec_help": "Need a hand?",
+        "sec_receipt": "Receipt",
+        # receipt (recovered state)
+        "receipt_paid": "Amount paid",
+        "receipt_reference": "Payment reference",
+        "receipt_received": "Received on",
+        # FAQ
+        "faq_charged_q": "I was charged, but this page says failed",
+        "faq_charged_a": (
+            "Rarely, a slow bank confirms a payment after it reported failure. "
+            "If money left your account, it is either a temporary hold "
+            "(released in 3 to 5 working days) or an already-successful "
+            "payment updating out of order. Either way you are never charged "
+            "twice for this reference."
+        ),
         # timeline rows (payable state)
         "timeline_attempted": "Payment attempted",
         "timeline_attempted_at": "on {date}",
@@ -84,6 +98,10 @@ CATALOGS: dict[str, dict[str, str]] = {
         "sec_what_to_do": "क्या करें",
         "sec_this_payment": "यह भुगतान",
         "sec_help": "मदद चाहिए?",
+        "sec_receipt": "रसीद",
+        "receipt_paid": "भुगतान राशि",
+        "receipt_reference": "भुगतान संदर्भ",
+        "receipt_received": "प्राप्त हुआ",
         "timeline_attempted": "भुगतान की कोशिश हुई",
         "timeline_attempted_at": "{date} को",
         "timeline_result": "बैंक ने भुगतान रोक दिया",
