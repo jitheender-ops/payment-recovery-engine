@@ -39,7 +39,7 @@
 
 {% if merchant_name %}
 <div class="hero">
-  <p class="to">{{ t('hero_about') }} <strong>{{ merchant_name }}</strong></p>
+  <p class="to">{{ t(hero_key) }} <strong>{{ merchant_name }}</strong></p>
   <p class="sub">{{ t('masthead') }}</p>
 </div>
 {% endif %}
@@ -127,9 +127,12 @@
     <p>{{ detail.money }}</p>
   </div>
 
-  {# The customer's story in three rows: attempted → what the bank said →
-     what is true about a retry. A log is our view; this is theirs. ------- #}
+  {# The customer's story in rows. Payment rail: attempted → what the bank
+     said → what is true about a retry. Risk types (cart, subscription,
+     invoice, autopay): what happened → what is true about paying. A log is
+     our view; this is theirs. ------------------------------------------- #}
   <div class="sec"><h2>{{ t('sec_what_happened') }}</h2></div>
+  {% if is_payment %}
   <ol class="timeline">
     <li class="done">
       <span class="when">{{ t('timeline_attempted_at', date=failed_at.strftime("%d %b, %H:%M")) if failed_at else t('timeline_attempted') }}</span>
@@ -144,6 +147,18 @@
       <p class="what">{{ t('timeline_safe') }}</p>
     </li>
   </ol>
+  {% else %}
+  <ol class="timeline">
+    <li class="done">
+      <span class="when">{{ t('timeline_attempted_at', date=failed_at.strftime("%d %b, %H:%M")) if failed_at else '' }}</span>
+      <p class="what">{{ t(risk_timeline_key) if risk_timeline_key else detail.headline }}</p>
+    </li>
+    <li class="safe">
+      <span class="when">&nbsp;</span>
+      <p class="what">{{ t('timeline_safe') }}</p>
+    </li>
+  </ol>
+  {% endif %}
 
   <div class="sec"><h2>{{ t('sec_what_to_do') }}</h2></div>
   <p>{{ detail.next }}</p>
@@ -174,7 +189,12 @@
     {{ t('pay_note') }} {{ t('pay_other_methods') }}
   </p>
   {% if expires_line %}
-  <p class="expires">{{ t('expires_line', when='</span>' + expires_line + '<span class="mono">') | safe }}</p>
+  {# No `| safe`: the date is rendered through normal autoescaping. The old
+     form injected raw `</span>…<span>` around the value and marked the whole
+     string safe — an XSS anti-pattern (and malformed HTML) even though the
+     value is a strftime date today. Autoescape keeps it safe whatever the
+     value ever becomes. #}
+  <p class="expires">{{ t('expires_line', when=expires_line) }}</p>
   {% endif %}
 {% endif %}
 
@@ -182,20 +202,19 @@
 <dl class="register">
   <div><dt>Reference</dt><dd>{{ order_ref }}</dd></div>
   {% if method %}<div><dt>Method</dt><dd>{{ method }}{% if bank %} · {{ bank }}{% endif %}</dd></div>{% endif %}
-  {% if failed_at %}<div><dt>Attempted</dt><dd>{{ failed_at.strftime("%d %b %Y, %H:%M") }}</dd></div>{% endif %}
+  {% if failed_at %}<div><dt>{{ t('register_attempted') if is_payment else t('register_opened') }}</dt><dd>{{ failed_at.strftime("%d %b %Y, %H:%M") }}</dd></div>{% endif %}
 </dl>
 {% if state == "payable" %}
 <details>
-  <summary>Is it safe to pay here?</summary>
-  <p class="small quiet" style="margin-top:.5rem">
-    Payment is handled by Razorpay. We never see or store your card details.
-    This page shows only your own payment and the link expires on its own.
-  </p>
+  <summary>{{ t('faq_safe_q') }}</summary>
+  <p class="small quiet" style="margin-top:.5rem">{{ t('faq_safe_a') }}</p>
 </details>
+{% if is_payment %}
 <details>
   <summary>{{ t('faq_charged_q') }}</summary>
   <p class="small quiet" style="margin-top:.5rem">{{ t('faq_charged_a') }}</p>
 </details>
+{% endif %}
 {% include "_help_and_optout.html" %}
 {% endif %}
 

@@ -553,6 +553,11 @@ class _FakeRequest:
 def test_rate_limit_blocks_after_budget(
     monkeypatch: Any,
 ) -> None:
+    # XFF is honoured only behind a trusted proxy (the leftmost entry is
+    # client-spoofable otherwise) — these bucketing tests run as that
+    # deployment would.
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
     customer_routes._RATE_LIMIT_BUCKETS.clear()
     request = _FakeRequest("1.2.3.4")
     for _ in range(customer_routes._PAY_LIMIT):
@@ -567,11 +572,14 @@ def test_rate_limit_blocks_after_budget(
     # The page bucket is independent of the pay bucket.
     customer_routes._check_rate_limit(request, kind="page", limit=customer_routes._PAGE_LIMIT)
     customer_routes._RATE_LIMIT_BUCKETS.clear()
+    get_settings.cache_clear()
 
 
 def test_rate_limit_window_releases(
     monkeypatch: Any,
 ) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
     customer_routes._RATE_LIMIT_BUCKETS.clear()
     request = _FakeRequest("9.9.9.9")
     bucket = customer_routes._RATE_LIMIT_BUCKETS.setdefault("pay:9.9.9.9", deque())
@@ -579,6 +587,7 @@ def test_rate_limit_window_releases(
     monkeypatch.setattr(customer_routes.time, "monotonic", lambda: 1e9)
     customer_routes._check_rate_limit(request, kind="pay", limit=1)
     customer_routes._RATE_LIMIT_BUCKETS.clear()
+    get_settings.cache_clear()
 
 
 # ── Fix 15: the scheduler stamps its heartbeat ───────────────────────────────

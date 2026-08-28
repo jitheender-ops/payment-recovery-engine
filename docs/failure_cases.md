@@ -161,3 +161,31 @@ outbox/two-phase write, which is not implemented.
 3. Fail-closed by construction: the slot stays spent (a link MIGHT exist), but attribution still works — matching reads the idempotency-key breadcrumb, never `result`.
 
 **What a reviewer sees:** The dashboard "In flight" tile counts only genuinely unresolved work; lost attempts are visible as failed-with-reason instead of pending-forever.
+
+---
+
+## 12. Orphaned Payment Link After a Mid-Call Crash
+
+**Trigger:** The write-ahead row is committed, the Razorpay `payment_link.create` call succeeds, but the process dies before the response is recorded. The link exists on Razorpay's side; our attempt row has no `external_ref`, so `cancel_links_for_closed_cases()` — which finds links BY that column — can never see it to cancel it.
+
+**System response (mitigations, in order):**
+1. The attempt resolves fail-closed via `reconcile_stale_attempts()` (case 11): the slot stays spent, so the payment's budget is not reopened.
+2. The orphan link stays payable — that residual risk cannot be removed while `razorpay-python` offers no way to look a link up by our notes. It is bounded by Razorpay's own link expiry and by the consent window the link was minted inside.
+3. If the customer pays it, attribution STILL works: `attribute_capture` resolves through the idempotency-key breadcrumb in the link's notes, which the executor wrote at creation and which survives the crash.
+4. If the case is already terminal when that late payment lands, the money is recorded as an `overpayment` audit event for manual refund instead of being double-credited or silently dropped.
+
+**What a reviewer sees:** A `reconciled` event for the unknown outcome, and — only if the orphan link is paid — an `overpayment` event naming the amount and the payment to refund. No silent money, no inflated recovery figures.
+
+---
+
+## 13. Merchant Risk Event Lost Between 200 and Processing
+
+**Trigger:** A merchant POSTs an abandoned cart / halted subscription / overdue invoice / failed mandate debit to `/risks`; the process restarts or crashes between the 200 and the background task finishing. The merchant's webhook client, like Razorpay's, will not re-send after a 200 — and a re-delivery that does arrive is deduped away on `event_id`, so it cannot rescue the lost one.
+
+**System response:**
+1. The risk router commits the event to `risk_events` BEFORE returning 200, so it is durably stored even if processing never starts.
+2. A failed background task re-arms the event (`processed=False`, `processing_attempts` incremented) up to the shared `EVENT_RECONCILE_MAX_ATTEMPTS` cap — one number, one meaning, across both event stores.
+3. The scheduler's `reconcile_risk_events()` sweep re-runs risk events still `processed=False` past the age threshold; events that raise every tick rest with `processing_error` recorded so they cannot starve the batch.
+4. Processing is idempotent end to end: `process_risk_event` opens the case via the get-or-create path, so a re-run after a partial first attempt can never open a second case (which would double the attempt budget) or double-chase a budget slot (the UNIQUE idempotency key breaks that tie).
+
+**What a reviewer sees:** A reconciled risk event in the logs; the cart, subscription, invoice or mandate gets its chase on the next tick instead of never — and at most one case and one chase per budget slot however many times the event replays.

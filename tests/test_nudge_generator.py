@@ -40,7 +40,8 @@ def _with_llm(gen: NudgeGenerator, monkeypatch: Any, reply: str | Exception) -> 
     prompts: list[str] = []
 
     async def fake(client: Any, failure_class: str, amount_display: str, method: str,
-                   next_step: str, customer_name: str | None, merchant_name: str) -> str:
+                   next_step: str, customer_name: str | None, merchant_name: str,
+                   risk_type: str | None = None) -> str:
         prompts.append(
             f"{failure_class}|{amount_display}|{method}|{next_step}|{customer_name}|{merchant_name}"
         )
@@ -120,6 +121,60 @@ async def test_every_failure_class_has_a_template(generator: NudgeGenerator) -> 
         message = await generator.generate(**{**ARGS, "failure_class": fc})
         assert message.strip(), f"empty nudge for {fc}"
         assert len(message) <= 160
+
+
+async def test_risk_templates_never_say_payment_failed(
+    generator: NudgeGenerator,
+) -> None:
+    """Three of the four chaser types never attempted a payment — the nudge
+    must not tell the customer one failed."""
+    for fc in (
+        "abandoned_checkout", "subscription_charge_failed",
+        "invoice_overdue", "mandate_debit_failed",
+    ):
+        message = await generator.generate(**{**ARGS, "failure_class": fc})
+        assert "payment failed" not in message.lower()
+        assert len(message) <= 160
+
+
+# ── Risk-aware prompt wording ────────────────────────────────────────────
+
+
+def test_the_risk_prompt_never_claims_a_failed_payment() -> None:
+    """The LLM writes what the prompt tells it. A cart that never paid must
+    not be introduced to the model as "Payment of ₹X failed"."""
+    from src.messaging.nudge_generator import build_llm_prompt
+
+    for risk_type, failure_class in (
+        ("checkout_abandonment", "abandoned_checkout"),
+        ("invoice_overdue", "invoice_overdue"),
+    ):
+        prompt = build_llm_prompt(
+            failure_class=failure_class,
+            amount_display="2,499.00",
+            method="unknown",
+            next_step="Pay below whenever you're ready.",
+            customer_name=None,
+            merchant_name="Acme",
+            risk_type=risk_type,
+        )
+        assert "failed" not in prompt.lower()
+        assert "via unknown" not in prompt
+
+
+def test_the_payment_prompt_still_names_the_failure() -> None:
+    from src.messaging.nudge_generator import build_llm_prompt
+
+    prompt = build_llm_prompt(
+        failure_class="insufficient_funds",
+        amount_display="2,499.00",
+        method="card",
+        next_step="Please try again.",
+        customer_name=None,
+        merchant_name="Acme",
+    )
+    assert "failed" in prompt.lower()
+    assert "via card" in prompt
 
 
 # ── What reaches the provider ────────────────────────────────────────────

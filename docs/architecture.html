@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Payment Recovery Engine — Architecture &amp; Working Mechanism</title>
+<style>
+  :root {
+    --ink: #1a1d21;
+    --ink-soft: #4a5058;
+    --ink-faint: #6b7280;
+    --paper: #fbfaf8;
+    --card: #ffffff;
+    --line: #e4e1db;
+    --accent: #0f6b5c;
+    --accent-soft: #e8f2ef;
+    --warn: #9a3412;
+    --warn-soft: #fef3ec;
+    --money: #14532d;
+    --money-soft: #ecfdf3;
+    --code-bg: #22262b;
+    --code-ink: #d8dee6;
+    --det: #1e40af;
+    --det-soft: #eff4ff;
+    --llm: #7c2d12;
+    --llm-soft: #fff4ed;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--sans);
+    background: var(--paper);
+    color: var(--ink);
+    line-height: 1.65;
+    font-size: 15.5px;
+  }
+  .layout { display: flex; max-width: 1440px; margin: 0 auto; }
+
+  /* ── Sidebar ─────────────────────────────────────────────── */
+  nav.toc {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 270px; min-width: 270px; height: 100vh; overflow-y: auto;
+    padding: 28px 18px 40px 26px;
+    border-right: 1px solid var(--line);
+    background: var(--paper);
+  }
+  nav.toc .brand { font-weight: 700; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; }
+  nav.toc .sub { font-size: 12px; color: var(--ink-faint); margin-bottom: 22px; }
+  nav.toc a {
+    display: block; padding: 5px 10px; margin: 1px 0;
+    color: var(--ink-soft); text-decoration: none; font-size: 13.5px;
+    border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+  }
+  nav.toc a:hover { color: var(--ink); background: #f1efe9; }
+  nav.toc a.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+  nav.toc a.l2 { padding-left: 24px; font-size: 12.5px; }
+
+  /* ── Main ────────────────────────────────────────────────── */
+  main { flex: 1; min-width: 0; padding: 48px 56px 120px; max-width: 980px; }
+  header.doc-head { border-bottom: 2px solid var(--ink); padding-bottom: 22px; margin-bottom: 36px; }
+  header.doc-head h1 { font-size: 30px; line-height: 1.2; letter-spacing: -.01em; }
+  header.doc-head .lede { margin-top: 10px; color: var(--ink-soft); font-size: 16px; max-width: 720px; }
+  header.doc-head .meta { margin-top: 14px; font-family: var(--mono); font-size: 12px; color: var(--ink-faint); }
+
+  section { margin-bottom: 58px; scroll-margin-top: 24px; }
+  h2 {
+    font-size: 21px; letter-spacing: -.01em; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line); margin-bottom: 18px;
+  }
+  h2 .no { font-family: var(--mono); font-size: 13px; color: var(--accent); margin-right: 10px; }
+  h3 { font-size: 16.5px; margin: 26px 0 10px; }
+  h4 { font-size: 14.5px; margin: 18px 0 8px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .05em; font-size: 12.5px; }
+  p { margin-bottom: 12px; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 5px; }
+  strong { font-weight: 650; }
+  code {
+    font-family: var(--mono); font-size: .86em;
+    background: #efede7; padding: 1.5px 5px; border-radius: 4px;
+    color: #3f3a33;
+  }
+  pre {
+    background: var(--code-bg); color: var(--code-ink);
+    padding: 16px 18px; border-radius: 8px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.8px; line-height: 1.6;
+    margin: 14px 0 18px;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+  .filepath { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 20px; font-size: 13.8px; }
+  th {
+    text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--ink-faint); border-bottom: 2px solid var(--line); padding: 7px 10px;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 8px 10px; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td code { white-space: nowrap; }
+  .num { font-family: var(--mono); font-size: 12.8px; }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-soft);
+    padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; font-size: 14px;
+  }
+  .callout.money { border-color: var(--money); background: var(--money-soft); }
+  .callout.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .callout .tag {
+    display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .07em;
+    text-transform: uppercase; margin-right: 8px; color: var(--accent);
+  }
+  .callout.money .tag { color: var(--money); }
+  .callout.warn .tag { color: var(--warn); }
+
+  /* ── Flow diagrams (pure CSS) ────────────────────────────── */
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0; margin: 18px 0 22px; }
+  .flow .stage {
+    flex: 1; min-width: 150px; padding: 12px 14px;
+    border: 1px solid var(--line); background: var(--card);
+    position: relative;
+  }
+  .flow .stage:first-child { border-radius: 8px 0 0 8px; }
+  .flow .stage:last-child { border-radius: 0 8px 8px 0; }
+  .flow .stage + .stage { border-left: none; }
+  .flow .stage .st-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+  .flow .stage ul { margin: 0 0 0 16px; font-size: 12.5px; color: var(--ink-soft); }
+  .flow .stage li { margin-bottom: 2px; }
+  .flow .stage.det { border-top: 3px solid var(--det); }
+  .flow .stage.det .st-label { color: var(--det); }
+  .flow .stage.llm { border-top: 3px solid var(--llm); }
+  .flow .stage.llm .st-label { color: var(--llm); }
+  .flow .stage.exec { border-top: 3px solid var(--money); }
+  .flow .stage.exec .st-label { color: var(--money); }
+
+  .pipeline { display: flex; flex-direction: column; gap: 0; margin: 18px 0 22px; }
+  .pipeline .step {
+    display: flex; gap: 14px; padding: 12px 16px;
+    border: 1px solid var(--line); border-bottom: none; background: var(--card);
+  }
+  .pipeline .step:first-child { border-radius: 8px 8px 0 0; }
+  .pipeline .step:last-child { border-bottom: 1px solid var(--line); border-radius: 0 0 8px 8px; }
+  .pipeline .step .n {
+    font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--card);
+    background: var(--ink); border-radius: 50%; width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px;
+  }
+  .pipeline .step .body { flex: 1; }
+  .pipeline .step .t { font-weight: 650; font-size: 14px; }
+  .pipeline .step .d { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+  .pipeline .step .where { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); margin-top: 4px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+    padding: 16px 18px;
+  }
+  .panel h4 { margin-top: 0; }
+  .panel.rail-a { border-top: 3px solid var(--det); }
+  .panel.rail-b { border-top: 3px solid var(--accent); }
+
+  .pill {
+    display: inline-block; font-family: var(--mono); font-size: 11.5px;
+    padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line);
+    background: #f4f2ec; color: var(--ink-soft); white-space: nowrap;
+  }
+  .pill.ok { background: var(--money-soft); border-color: #bce5cd; color: var(--money); }
+  .pill.bad { background: var(--warn-soft); border-color: #f3c9b4; color: var(--warn); }
+  .pill.info { background: var(--det-soft); border-color: #c4d4f5; color: var(--det); }
+
+  .er { font-family: var(--mono); font-size: 12.5px; }
+  .er .tbl { border: 1px solid var(--line); border-radius: 8px; background: var(--card); margin-bottom: 12px; overflow: hidden; }
+  .er .tbl .name { background: #f1efe9; padding: 7px 12px; font-weight: 700; border-bottom: 1px solid var(--line); }
+  .er .tbl .name small { font-weight: 400; color: var(--ink-faint); margin-left: 8px; }
+  .er .tbl .cols { padding: 8px 12px; color: var(--ink-soft); line-height: 1.9; }
+  .er .k { color: var(--accent); font-weight: 600; }
+  .er .c { color: var(--ink-faint); }
+
+  footer.doc-foot {
+    margin-top: 70px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-size: 12.5px; color: var(--ink-faint);
+  }
+
+  @media (max-width: 900px) {
+    nav.toc { display: none; }
+    main { padding: 28px 20px 80px; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+  @media print {
+    nav.toc { display: none; }
+    main { max-width: 100%; padding: 0; }
+    pre { white-space: pre-wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ════════════════════ SIDEBAR ════════════════════ -->
+<nav class="toc">
+  <div class="brand">Payment Recovery Engine</div>
+  <div class="sub">Architecture &amp; Working Mechanism</div>
+  <a href="#overview">1. What this system is</a>
+  <a href="#principle">2. Core design principle</a>
+  <a href="#rails">3. The two rails</a>
+  <a href="#flow-payment">4. Payment rail, end to end</a>
+  <a href="#flow-risk">5. Risk rail, end to end</a>
+  <a href="#decision">6. The decision pipeline</a>
+  <a href="#guardrail" class="l2">6.1 Guardrail rules</a>
+  <a href="#fallback" class="l2">6.2 Degradation chain</a>
+  <a href="#money">7. Money-safety invariants</a>
+  <a href="#attribution" class="l2">7.1 Revenue attribution</a>
+  <a href="#cases">8. Case lifecycle</a>
+  <a href="#chasers">9. The four chasers</a>
+  <a href="#scheduler">10. Scheduler &amp; sweeps</a>
+  <a href="#selfheal" class="l2">10.1 Self-healing</a>
+  <a href="#customer">11. Customer-facing surface</a>
+  <a href="#security">12. Security model</a>
+  <a href="#data">13. Data model</a>
+  <a href="#modules">14. Module map</a>
+  <a href="#observability">15. Observability</a>
+  <a href="#verification">16. Verification</a>
+  <a href="#config">17. Configuration</a>
+  <a href="#running">18. Running it</a>
+</nav>
+
+<!-- ════════════════════ MAIN ════════════════════ -->
+<main>
+<header class="doc-head">
+  <h1>Payment Recovery Engine</h1>
+  <p class="lede">
+    An AI-assisted engine that recovers revenue stuck in failed payments and
+    uncollected dues. It listens for Razorpay payment failures, accepts
+    merchant-reported revenue-at-risk events, decides — through a
+    deterministic-guardrailed LLM agent — whether, when and how to chase, and
+    collects through Razorpay Payment Links, attributing every recovered rupee
+    back to the attempt that earned it.
+  </p>
+  <div class="meta">FastAPI · PostgreSQL · Razorpay · Anthropic/OpenAI · XGBoost fallback · Alembic · Streamlit dashboard</div>
+</header>
+
+<!-- ─────────────────── 1. OVERVIEW ─────────────────── -->
+<section id="overview">
+  <h2><span class="no">01</span>What this system is</h2>
+  <p>
+    Money goes missing in two distinct ways, and the engine hunts both:
+  </p>
+  <ul>
+    <li>
+      <strong>A payment was attempted and failed.</strong> A card charge declined, a UPI
+      collect request timed out, a bank was down. Razorpay reports these through
+      <code>payment.failed</code> webhooks — the engine classifies the failure, decides
+      whether a retry can succeed, and re-presents the payment through a fresh
+      Payment Link on the rail most likely to work.
+    </li>
+    <li>
+      <strong>No payment was ever attempted, but revenue is at risk.</strong> A cart was
+      abandoned at checkout, a subscription renewal didn't go through, a B2B
+      invoice is past due, a pre-approved mandate debit failed. These exist only
+      in the merchant's own systems, so the merchant pushes them to the engine's
+      <code>/risks</code> endpoint, and dedicated <em>chasers</em> pursue each type on its own
+      policy: how many touches, how far apart, for how long.
+    </li>
+  </ul>
+  <p>
+    Both kinds of money share one spine: a <strong>recovery case</strong> with a bounded
+    attempt budget, an escalation ladder, a consent window, and a recovered
+    amount. Recovery always goes out as a Razorpay Payment Link; when the
+    customer pays it, a brand-new payment id is born, and the engine's
+    attribution machinery joins that new payment back to the attempt that
+    sent the link.
+  </p>
+  <div class="callout">
+    <span class="tag">Headline question</span>
+    The whole design serves one metric: <strong>how much money did the engine
+    recover, and which of its actions earned it?</strong> Every table, every audit
+    event, and the distinction between <em>recovered</em> and
+    <em>recovered-via-our-attempt</em> exists so that number is answerable and honest.
+  </div>
+</section>
+
+<!-- ─────────────────── 2. PRINCIPLE ─────────────────── -->
+<section id="principle">
+  <h2><span class="no">02</span>Core design principle: Deterministic → LLM → Deterministic</h2>
+  <p>
+    The LLM is sandwiched between two deterministic layers. This is the single
+    most important architectural decision in the system.
+  </p>
+  <div class="flow">
+    <div class="stage det">
+      <div class="st-label">Deterministic · pre-LLM</div>
+      <ul>
+        <li>HMAC signature verify</li>
+        <li>Idempotency / dedup</li>
+        <li>Event store</li>
+        <li>Error-code classifier</li>
+      </ul>
+    </div>
+    <div class="stage llm">
+      <div class="st-label">LLM · constrained</div>
+      <ul>
+        <li>Policy agent</li>
+        <li>Fixed action space</li>
+        <li>JSON contract</li>
+        <li>Untrusted input labelled</li>
+      </ul>
+    </div>
+    <div class="stage det">
+      <div class="st-label">Deterministic · post-LLM</div>
+      <ul>
+        <li>Action schema validation</li>
+        <li>Business-rule guardrail</li>
+        <li>Idempotency key</li>
+        <li>Write-ahead, then execute</li>
+      </ul>
+    </div>
+  </div>
+  <ul>
+    <li>
+      <strong>Pre-LLM determinism handles what a lookup table can solve.</strong> Calling an
+      LLM to classify <code>insufficient_funds</code> from a structured error code would be
+      wasteful and fragile — a YAML map does it in microseconds, identically, forever.
+    </li>
+    <li>
+      <strong>Post-LLM determinism is the safety net.</strong> The LLM may hallucinate; the
+      guardrail validates every proposed action against hard business rules before
+      anything touches money or contacts a customer. The guardrail checks
+      <em>all</em> rules and reports <em>all</em> violations — no short-circuiting — so the
+      audit trail shows the complete picture of every decision.
+    </li>
+    <li>
+      <strong>The LLM's action space is fixed and small:</strong>
+      <span class="pill">retry_now</span>
+      <span class="pill">retry_at</span>
+      <span class="pill">switch_rail</span>
+      <span class="pill">nudge_customer</span>
+      <span class="pill">abandon</span>
+      — it can propose, never invent.
+    </li>
+  </ul>
+</section>
+
+<!-- ─────────────────── 3. RAILS ─────────────────── -->
+<section id="rails">
+  <h2><span class="no">03</span>The two rails</h2>
+  <div class="grid2">
+    <div class="panel rail-a">
+      <h4>Payment rail — webhook-driven</h4>
+      <p style="font-size:13.5px; color:var(--ink-soft)">
+        Trigger: Razorpay <code>payment.failed</code> webhook. A payment exists and has a
+        <code>payment_failures</code> row behind the case. Retries can re-present a charge;
+        <code>switch_rail</code> means "ask for the same money on a different instrument".
+        Consent window: 72h from failure (global setting). Budget: 3 attempts.
+      </p>
+      <p style="font-size:13px">
+        <span class="pill info">payment_failure</span> risk_type ·
+        failure classes from the deterministic classifier ·
+        capture attribution can also match on <code>order_id</code> (self-recovery).
+      </p>
+    </div>
+    <div class="panel rail-b">
+      <h4>Risk rail — merchant-driven (the chasers)</h4>
+      <p style="font-size:13.5px; color:var(--ink-soft)">
+        Trigger: merchant POSTs an HMAC-signed event to <code>/risks</code>. There is
+        <strong>no payment behind the case</strong> — <code>retry_attempts.payment_failure_id</code>
+        and <code>.payment_id</code> stay NULL. "Retry" therefore always means
+        <em>mint a Payment Link and deliver it</em>; there is no silent re-present.
+        Per-type consent windows (48h–720h) anchor at case open.
+      </p>
+      <p style="font-size:13px">
+        <span class="pill ok">checkout_abandonment</span>
+        <span class="pill ok">subscription_failure</span>
+        <span class="pill ok">invoice_overdue</span>
+        <span class="pill ok">mandate_failure</span>
+      </p>
+    </div>
+  </div>
+  <p>
+    The two rails share everything below the trigger: one case table, one
+    decision pipeline, one guardrail, one executor, one attribution machinery,
+    one recovery page. <code>risk_type</code> says how the money went missing;
+    <code>subject_ref</code> identifies it in that source's namespace (a payment id, a cart
+    id, an invoice number, a mandate token). The pair is UNIQUE
+    (<code>uq_recovery_case_subject</code>), which is what makes re-ingestion idempotent.
+  </p>
+</section>
+
+<!-- ─────────────────── 4. PAYMENT FLOW ─────────────────── -->
+<section id="flow-payment">
+  <h2><span class="no">04</span>Payment rail, end to end</h2>
+  <div class="pipeline">
+    <div class="step"><div class="n">1</div><div class="body">
+      <div class="t">Webhook arrives — verify, store, acknowledge</div>
+      <div class="d">Razorpay POSTs to <code>/webhooks/razorpay</code>. The raw body's HMAC-SHA256 is checked against <code>X-Razorpay-Signature</code> before anything else. The event is stored (<code>webhook_events</code>, deduplicated by Razorpay event id) and the endpoint returns <strong>200 in &lt;10ms</strong>. All real work runs in a background task — the gateway must never be kept waiting, and a slow consumer must never cause redeliveries.</div>
+      <div class="where">src/ingestion/router.py · src/ingestion/signature.py · src/ingestion/idempotency.py</div>
+    </div></div>
+    <div class="step"><div class="n">2</div><div class="body">
+      <div class="t">Classify the failure — deterministically</div>
+      <div class="d">Razorpay's 5-tuple error codes map through an in-memory YAML table onto a failure taxonomy: <code>insufficient_funds</code>, <code>bank_downtime</code>, <code>network_error</code>, <code>upi_collect_timeout</code>, <code>3ds_dropoff</code>, <code>issuer_decline</code>, <code>card_limit_exceeded</code>, <code>payment_timeout</code>, plus the non-retryables <code>hard_decline</code>, <code>fraud_block</code>, <code>customer_cancelled</code>, <code>invalid_card</code>, <code>expired_instrument</code>. Each class carries an <code>is_retryable</code> verdict. No LLM is involved.</div>
+      <div class="where">src/classifier/mapper.py · src/classifier/taxonomy.py · src/classifier/error_codes.yaml</div>
+    </div></div>
+    <div class="step"><div class="n">3</div><div class="body">
+      <div class="t">Open (or find) the recovery case</div>
+      <div class="d">Get-or-create on <code>(risk_type, subject_ref)</code>. Re-ingesting the same failure lands on the existing case — a second case for one payment would double both the attempt budget and the recovered amount. The UNIQUE constraint plus an IntegrityError re-fetch closes the race between concurrent webhooks.</div>
+      <div class="where">src/cases.py::open_case</div>
+    </div></div>
+    <div class="step"><div class="n">4</div><div class="body">
+      <div class="t">Hard decline? Abandon without an agent call</div>
+      <div class="d">Fraud blocks, customer cancellations and broken instruments fail again by definition. Retrying them would burn money and goodwill against the same wall — the case closes as <code>abandoned</code> deterministically, and the LLM is never consulted.</div>
+      <div class="where">src/orchestrator.py::process_payment_failure</div>
+    </div></div>
+    <div class="step"><div class="n">5</div><div class="body">
+      <div class="t">Build context, ask the policy agent</div>
+      <div class="d">A <code>FailureContext</code> captures the facts: failure class, amount, rail, hour-of-day and weekday in IST, retry/nudge counts in the last 24h, consent window. The LLM policy agent answers with a constrained JSON action. Gateway error text rides in as <em>untrusted data, explicitly labelled not-instructions</em> in the prompt.</div>
+      <div class="where">src/agent/actions.py · src/agent/policy_agent.py · src/agent/prompts.py</div>
+    </div></div>
+    <div class="step"><div class="n">6</div><div class="body">
+      <div class="t">Guardrail validates the action</div>
+      <div class="d">Every rule runs, every violation is reported: action schema, hard-decline blocklist, consent window, attempt budget, per-customer contact limits, IST blackout (23:00–07:00), amount ceiling. A rejected action is recorded as a <code>rejected</code> attempt — the audit trail keeps the decision, the customer never feels it.</div>
+      <div class="where">src/guardrail/gate.py · src/guardrail/rules.py</div>
+    </div></div>
+    <div class="step"><div class="n">7</div><div class="body">
+      <div class="t">Write-ahead, then execute</div>
+      <div class="d">The attempt row is committed <strong>before</strong> the Razorpay call, never after — a crash between API call and commit must leave a recorded unknown, not a vanished charge. The executor mints the Payment Link (UPI-only when the rail switch is to UPI, with graceful fallback), carries the personalized nudge as the link's checkout description, and notifies by SMS/email. The link id is stored as <code>external_ref</code> — the attribution join key.</div>
+      <div class="where">src/orchestrator.py::_execute_and_record · src/executor/retry_executor.py</div>
+    </div></div>
+    <div class="step"><div class="n">8</div><div class="body">
+      <div class="t">Money comes home — attribute the capture</div>
+      <div class="d">When the customer pays the link, Razorpay sends <code>payment.captured</code> with a <strong>brand-new payment id</strong>. The engine joins it home through the link id, the idempotency-key breadcrumb in the link's notes, or the order id (self-recovery — money counts, engine takes no credit). The case closes as <code>recovered</code>; late payments on terminal cases are logged as <em>overpayments</em> for manual refund, never double-credited.</div>
+      <div class="where">src/cases.py::attribute_capture</div>
+    </div></div>
+  </div>
+  <div class="callout">
+    <span class="tag">Latency budget</span>
+    Signature &lt;1ms · idempotency &lt;5ms · classification &lt;1ms · LLM agent &lt;3s ·
+    guardrail &lt;1ms · nudge generation &lt;3s (3s timeout, template fallback) ·
+    Razorpay call &lt;2s. <strong>Total &lt;10s, fully async</strong> — the webhook itself answers in milliseconds.
+  </div>
+</section>
+
+<!-- ─────────────────── 5. RISK FLOW ─────────────────── -->
+<section id="flow-risk">
+  <h2><span class="no">05</span>Risk rail, end to end</h2>
+  <div class="pipeline">
+    <div class="step"><div class="n">1</div><div class="body">
+      <div class="t">Merchant pushes a risk event</div>
+      <div class="d"><code>POST /risks</code> with <code>X-Risk-Signature</code> (HMAC-SHA256 over the raw body, same discipline as the Razorpay webhook). Schema boundaries are honest: amount is capped at the 32-bit paise ceiling, currency is INR-only (the whole customer-facing stack — ₹ display, UPI rail, IST blackout — assumes rupees), malformed JSON gets a clean 400. With <code>RISK_WEBHOOK_SECRET</code> unset, every event is rejected — the surface is closed until configured on purpose.</div>
+      <div class="where">src/ingestion/risk_router.py</div>
+    </div></div>
+    <div class="step"><div class="n">2</div><div class="body">
+      <div class="t">Store, deduplicate, acknowledge</div>
+      <div class="d">The event lands in <code>risk_events</code> with a deterministic dedup key — the merchant's <code>event_id</code> when supplied, otherwise derived from <code>(risk_type, reference_id, occurred_at)</code>. A redelivery collides onto the same key and the UNIQUE constraint turns it into a clean 200. The response returns immediately; processing runs in the background.</div>
+      <div class="where">src/models.py::RiskEvent</div>
+    </div></div>
+    <div class="step"><div class="n">3</div><div class="body">
+      <div class="t">Open the case with the type's policy</div>
+      <div class="d">The per-type policy supplies the attempt budget, the consent window, and the first-touch time. The case opens with <code>next_action_at</code> set — that is the handle the scheduler's sweep grips, since risk types have no inbound webhook to re-trigger them.</div>
+      <div class="where">src/orchestrator.py::process_risk_event · src/chasers/policy.py</div>
+    </div></div>
+    <div class="step"><div class="n">4</div><div class="body">
+      <div class="t">Immediate types chase at ingestion; deferred types wait</div>
+      <div class="d">Invoices and subscription failures act immediately (<code>first_action_hours = 0</code>) — the first chase runs right inside the background task. Carts wait 1h and mandates 24h: their first touch is parked on <code>next_action_at</code> and picked up by the chase sweep. Before any chase, three gates: the stopping rules, the consent window (a case past its window closes as <code>expired</code>), and the IST blackout (a chase during quiet hours defers to the window's edge without spending an attempt).</div>
+      <div class="where">src/orchestrator.py::chase_case</div>
+    </div></div>
+    <div class="step"><div class="n">5</div><div class="body">
+      <div class="t">Decide → guardrail → deliver</div>
+      <div class="d">The same decision pipeline as the payment rail, with one semantic difference: <strong>every non-abandon action delivers the link</strong>. A risk case has no instrument to re-present silently, so a "retry" that nobody is told about would be a dead chase reporting success. The nudge message is generated for every action — with risk-aware wording, because three of the four types never attempted a payment and the customer must never be told one failed.</div>
+      <div class="where">src/orchestrator.py::_execute_case_and_record · src/messaging/nudge_generator.py</div>
+    </div></div>
+    <div class="step"><div class="n">6</div><div class="body">
+      <div class="t">The ladder climbs until money, budget, or window ends it</div>
+      <div class="d">Each touch pushes <code>next_action_at</code> out by the type's re-chase interval; the escalation backoff widens the gap per rung. A capture closes the case as <code>recovered</code>; a spent budget closes it <code>exhausted</code>; a passed window closes it <code>expired</code>; an opt-out closes it <code>opted_out</code> — forever.</div>
+      <div class="where">src/cases.py · src/scheduler.py::chase_due_cases</div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ─────────────────── 6. DECISION PIPELINE ─────────────────── -->
+<section id="decision">
+  <h2><span class="no">06</span>The decision pipeline</h2>
+  <p>
+    One function — <code>_decide_action</code> — serves every decision path (live webhook,
+    chase sweep, fired retry), so the distinction between "who was configured to
+    decide" and "who actually decided" lives in exactly one place.
+  </p>
+
+  <h3 id="fallback">The degradation chain, and why it is watched</h3>
+  <div class="pipeline">
+    <div class="step"><div class="n">A</div><div class="body">
+      <div class="t">LLM policy agent</div>
+      <div class="d">Proposes an action with reasoning and confidence. Its output must pass schema validation; gateway text in the prompt is fenced as untrusted data.</div>
+    </div></div>
+    <div class="step"><div class="n">B</div><div class="body">
+      <div class="t">Silent-degradation detector</div>
+      <div class="d"><code>PolicyAgent.decide()</code> never raises — it swallows LLM errors and returns its own private heuristic. "An agent object exists" therefore says nothing about whether the LLM answered. The orchestrator compares the agent's <code>fallback_count</code> across the call: if it moved, the LLM degraded, and its private heuristic (which abandons ~70% of recoverable payments) is <strong>refused</strong>.</div>
+    </div></div>
+    <div class="step"><div class="n">C</div><div class="body">
+      <div class="t">XGBoost baseline / rule-based heuristics</div>
+      <div class="d">A trained model when one exists for the failure class; deterministic per-class rules otherwise (and always for the four risk classes, which are ours, not the gateway's). This layer is what the audit trail records as <code>agent_type = "xgboost"</code> — the trail says who <em>actually</em> decided.</div>
+    </div></div>
+  </div>
+
+  <h3 id="guardrail">6.1 Guardrail rules — all checked, all reported</h3>
+  <table>
+    <tr><th>Rule</th><th>What it stops</th><th>Applies to self-serve pay?</th></tr>
+    <tr><td>Action schema</td><td>Hallucinated/malformed actions from the LLM</td><td>Yes</td></tr>
+    <tr><td>Hard-decline blocklist</td><td>Retrying fraud blocks, cancellations, broken instruments</td><td>Yes</td></tr>
+    <tr><td>Consent window</td><td>Chasing after our authority to act has lapsed</td><td>Yes</td></tr>
+    <tr><td>Attempt budget</td><td>Unbounded retries per case</td><td>Yes</td></tr>
+    <tr><td>Idempotency key</td><td>Double-execution races</td><td>Yes</td></tr>
+    <tr><td>IST blackout (23:00–07:00)</td><td>Contacts during quiet hours — bank success rates crater and people sleep</td><td><strong>No</strong> — a customer choosing to pay at 3am is not outreach</td></tr>
+    <tr><td>Per-customer contact limits (24h)</td><td>Nagging — retries and nudges counted per channel</td><td><strong>No</strong> — same reason</td></tr>
+    <tr><td>Amount ceiling (₹50,000 default)</td><td>Engine-initiated retries above the configured ceiling</td><td><strong>No</strong> — bounds <em>our</em> initiative, not a payer's own choice</td></tr>
+  </table>
+  <p>
+    The self-serve subset is deliberate, and documented in code: the rules that
+    bound <em>our outreach</em> fall away when the customer initiates; the rules that
+    protect <em>the money</em> (schema, blocklist, window, budget, idempotency) never do.
+  </p>
+</section>
+
+<!-- ─────────────────── 7. MONEY SAFETY ─────────────────── -->
+<section id="money">
+  <h2><span class="no">07</span>Money-safety invariants</h2>
+  <div class="callout money">
+    <span class="tag">Invariant 1 — Write-ahead</span>
+    The attempt row is committed <strong>before</strong> the Razorpay call, on every path that
+    moves money. Recording it afterwards leaves a window where money has moved
+    and nothing in the database says so: a crash there would vanish the attempt,
+    free the idempotency slot, and let the next event charge the customer twice.
+    Committing first makes a crash a <em>recorded unknown</em>, which the stale-attempt
+    sweep resolves fail-closed. This ordering is a correctness property, not a
+    style choice — it is duplicated nowhere and reordered never.
+  </div>
+  <div class="callout money">
+    <span class="tag">Invariant 2 — Deterministic idempotency keys</span>
+    <code>retry_{payment_id}_{attempt}</code> · <code>chase_{risk_type}_{ref}_{attempt}</code> ·
+    <code>selfserve_{ref}_{attempt}</code>. The keys are derived from facts, not generated,
+    and <code>retry_attempts.idempotency_key</code> is UNIQUE. Two workers racing on the
+    same case both compute the same key; the constraint lets exactly one through
+    <em>before</em> Razorpay is called. The loser rolls back and logs the race.
+  </div>
+  <div class="callout money">
+    <span class="tag">Invariant 3 — Reuse, never re-mint</span>
+    While an attempt's link is live, the customer page sends them back to the
+    existing link instead of creating another. Every retry otherwise mints a NEW
+    link while old ones stay payable on Razorpay's side — the classic double-pay
+    setup. When a case reaches a terminal state, a sweep cancels every link it
+    spawned, so nothing can be paid late.
+  </div>
+  <div class="callout money">
+    <span class="tag">Invariant 4 — Never chase a pending attempt</span>
+    If the latest attempt is still unresolved, the case is untouched — offering
+    another payment while one is in flight is how a customer ends up paying
+    twice. Stale pendings (crash mid-call) are resolved fail-closed after 15
+    minutes by the reconciliation sweep.
+  </div>
+  <div class="callout money">
+    <span class="tag">Invariant 5 — Fail closed everywhere</span>
+    Unset secrets reject all traffic (webhooks, risk events, recovery pages).
+    Unknown states resolve against acting. A link whose status cannot be
+    confirmed renders as <em>unknown</em> and refuses the pay button rather than
+    guessing.
+  </div>
+
+  <h3 id="attribution">7.1 Revenue attribution — joining new money home</h3>
+  <p>
+    Recovery goes out as a Payment Link; the payment that eventually succeeds
+    carries an id the engine has never seen. <code>attribute_capture</code> resolves it,
+    most specific first:
+  </p>
+  <table>
+    <tr><th>#</th><th>Match on</th><th>Meaning</th><th>Credit</th></tr>
+    <tr><td>1</td><td><code>link_id</code> → <code>retry_attempts.external_ref</code></td><td>They paid the exact link we sent</td><td>Engine's recovery</td></tr>
+    <tr><td>2</td><td><code>notes.retry_idempotency_key</code> → <code>idempotency_key</code></td><td>Razorpay copies link notes onto the payment; the breadcrumb the executor wrote joins it home even if the link id is missing</td><td>Engine's recovery</td></tr>
+    <tr><td>3</td><td><code>order_id</code> → the case's subject (payment rail only)</td><td>The customer paid on their own, no link of ours involved</td><td>Money counts, <code>recovered_via_attempt_id</code> stays NULL — the headline never takes credit for the control group</td></tr>
+  </table>
+  <p>
+    A capture matching a <strong>terminal</strong> case is an overpayment — a superseded or
+    orphaned link paid late. It is logged loudly as an <code>overpayment</code> event for
+    manual refund and nothing is credited twice. On attribution, every still-pending
+    attempt on the case is marked <code>superseded</code>: the money arrived, further action
+    is moot.
+  </p>
+</section>
+
+<!-- ─────────────────── 8. CASE LIFECYCLE ─────────────────── -->
+<section id="cases">
+  <h2><span class="no">08</span>Case lifecycle</h2>
+  <p>
+    <code>recovery_cases</code> is the centre of the schema, not <code>payment_failures</code>. A
+    failed card charge, an abandoned cart, a halted subscription, an overdue
+    invoice and a dead mandate are all money we might get back; they differ only
+    in how they were detected. One case table, one attempt budget, one set of
+    terminal states, one recovered-amount column — not five parallel pipelines.
+  </p>
+  <table>
+    <tr><th>State</th><th>Meaning</th><th>Who writes it</th></tr>
+    <tr><td><span class="pill">open</span></td><td>Money at risk, budget remaining, chaseable</td><td><code>open_case</code></td></tr>
+    <tr><td><span class="pill ok">recovered</span></td><td>Captured ≥ amount at risk; <code>recovered_ref</code> holds the NEW payment id</td><td><code>attribute_capture</code></td></tr>
+    <tr><td><span class="pill bad">exhausted</span></td><td>Attempt budget spent without recovery</td><td>chase ladder / fire path</td></tr>
+    <tr><td><span class="pill bad">abandoned</span></td><td>Hard decline, or the agent gave up with reason</td><td>classifier path / agent action</td></tr>
+    <tr><td><span class="pill bad">expired</span></td><td>Consent window passed — too old to chase</td><td><code>chase_case</code>, before spending an agent call</td></tr>
+    <tr><td><span class="pill bad">opted_out</span></td><td>Customer asked us to stop — never expires, never reopens</td><td>opt-out path</td></tr>
+  </table>
+
+  <h3>The three stopping rules, and where each lives</h3>
+  <table>
+    <tr><th>Rule</th><th>Column</th><th>Enforced by</th></tr>
+    <tr><td>Attempt budget spent</td><td><code>attempts_used / max_attempts</code></td><td><code>stop_reason()</code></td></tr>
+    <tr><td>Consent withdrawn</td><td><code>retry_ledger.consent_status</code></td><td><code>stop_reason()</code> — never expires</td></tr>
+    <tr><td>Contact not yet due</td><td><code>next_action_at</code></td><td><code>stop_reason()</code> — expires on its own</td></tr>
+  </table>
+  <p>
+    <code>next_action_at</code> is written by two things: the escalation backoff in
+    <code>attach_attempt()</code> (24h × escalation level — the gap widens per rung), and a
+    promise-to-pay, which takes the <em>later</em> of the promise date and whatever the
+    ladder had already scheduled. A promise is permission to wait, not permission
+    to contact sooner. A broken promise pulls <code>next_action_at</code> back to <em>now</em>
+    rather than NULL — NULL means "a webhook is this case's trigger", and
+    clearing it would release the case into a queue nothing reads.
+  </p>
+  <p>
+    Every transition is written to <code>case_events</code> — opened, contacted, escalated,
+    deferred, stopped, attributed, closed — with the actor (system, agent type,
+    customer, scheduler) and a JSON detail payload. The audit trail is not a
+    by-product; it is the evidence that the headline number rests on.
+  </p>
+</section>
+
+<!-- ─────────────────── 9. CHASERS ─────────────────── -->
+<section id="chasers">
+  <h2><span class="no">09</span>The four chasers</h2>
+  <p>
+    Each risk type is a policy record — bounds, not scripts. The agent decides
+    inside them; the guardrail enforces them; the sweep executes to them.
+  </p>
+  <table>
+    <tr>
+      <th>Risk type</th><th>Max touches</th><th>Consent window</th><th>First touch</th>
+      <th>Re-chase every</th><th>Preferred rail</th><th>Failure class (ours)</th>
+    </tr>
+    <tr>
+      <td><code>checkout_abandonment</code></td><td class="num">2</td><td class="num">48h</td><td class="num">+1h</td>
+      <td class="num">24h</td><td>—</td><td><code>abandoned_checkout</code></td>
+    </tr>
+    <tr>
+      <td><code>subscription_failure</code></td><td class="num">4</td><td class="num">168h (7d)</td><td class="num">immediate</td>
+      <td class="num">24h</td><td>UPI</td><td><code>subscription_charge_failed</code></td>
+    </tr>
+    <tr>
+      <td><code>invoice_overdue</code></td><td class="num">4</td><td class="num">720h (30d)</td><td class="num">immediate</td>
+      <td class="num">72h</td><td>—</td><td><code>invoice_overdue</code></td>
+    </tr>
+    <tr>
+      <td><code>mandate_failure</code></td><td class="num">3</td><td class="num">168h (7d)</td><td class="num">+24h</td>
+      <td class="num">48h</td><td>UPI</td><td><code>mandate_debit_failed</code></td>
+    </tr>
+  </table>
+  <p>The character of each chase, as taught to the policy agent:</p>
+  <ul>
+    <li><strong>Abandoned cart</strong> — a cold cart chased twice is spam. One gentle nudge with the link is the whole play; if a nudge already went out, abandon.</li>
+    <li><strong>Subscription renewal</strong> — treat like a payment failure on an unknown rail; renewals usually die on card OTP drop-offs, so prefer UPI.</li>
+    <li><strong>Overdue invoice</strong> — the counterparty is a business contact. Keep the ladder slow (72h rungs); a promise-to-pay pauses the chase until its date passes.</li>
+    <li><strong>Failed mandate</strong> — the mandate is standing consent to collect, so re-presenting next day is usually right; space the touches, because every touch delivers a link.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag">Copy discipline</span>
+    Three of the four types never attempted a payment, so no customer-facing
+    surface — nudge prompt, fallback template, recovery page — may say "payment
+    failed" for them. The LLM nudge prompt is told the situation per type
+    ("an order was left incomplete — no payment was attempted"), the fallback
+    templates are written per class, and the page renders per-type heroes.
+  </div>
+</section>
+
+<!-- ─────────────────── 10. SCHEDULER ─────────────────── -->
+<section id="scheduler">
+  <h2><span class="no">10</span>Scheduler &amp; sweeps</h2>
+  <p>
+    A single tick every <strong>60 seconds</strong> (configurable) runs the sweeps in a fixed
+    order, stamps a heartbeat, and commits. The fire and chase sweeps share one
+    time budget — a fraction of the tick interval — so back-to-back sweeps can
+    never run the tick long past the interval, stale the heartbeat, and delay
+    deferred work.
+  </p>
+  <table>
+    <tr><th>Order</th><th>Sweep</th><th>What it does</th></tr>
+    <tr><td class="num">1</td><td><code>fire_due_retries</code></td><td>Fires parked <code>retry_at</code> attempts (both rails) whose time has come. Re-validates case state and consent at fire time, re-runs the guardrail, then executes. Claims are atomic — a conditional UPDATE only lands while the row is still pending.</td></tr>
+    <tr><td class="num">2</td><td><code>reconcile_events</code></td><td>Re-runs webhook events whose background task never finished (restart, crash, deploy in the 200-to-task window). Re-arms failures up to a cap, then rests them with the error recorded.</td></tr>
+    <tr><td class="num">3</td><td><code>reconcile_risk_events</code></td><td>The same safety net for <code>/risks</code> events — the <em>only</em> retry mechanism there is, since merchants don't re-deliver after our 200.</td></tr>
+    <tr><td class="num">4</td><td><code>reconcile_stale_attempts</code></td><td>Resolves attempts pending for &gt;15 minutes. Crash <em>before</em> the write-ahead phase → re-parked as scheduled; crash <em>after</em> → resolved fail-closed as failed. Razorpay is never re-called blind.</td></tr>
+    <tr><td class="num">5</td><td><code>cancel_links_for_closed_cases</code></td><td>Kills the Payment Links of terminal cases so they can never be paid late. Already-inert links resolve as success on the first pass; failed cancels retry next tick.</td></tr>
+    <tr><td class="num">6</td><td><code>expire_promises</code></td><td>Promises-to-pay whose date passed with no money → broken; the case's <code>next_action_at</code> returns to now and the chase resumes.</td></tr>
+    <tr><td class="num">7</td><td><code>chase_due_cases</code></td><td>The chaser sweep: all four risk types in one oldest-first query, each case through <code>chase_case</code> until the shared time budget runs out, then yields — the rest waits for the next tick rather than starving it.</td></tr>
+    <tr><td class="num">8</td><td><code>report_due_cases</code></td><td>Counts payment-failure cases still waiting on their next webhook — after the chase, so it reports only what the chase left behind.</td></tr>
+  </table>
+
+  <h3 id="selfheal">10.1 Self-healing, or: what happens when things die</h3>
+  <p>
+    The system assumes every component can fail mid-step, and each failure mode
+    has a named recovery path:
+  </p>
+  <table>
+    <tr><th>Failure</th><th>Consequence without the net</th><th>The net</th></tr>
+    <tr><td>Process dies after 200, before the background task runs</td><td>Event silently lost — merchant never re-sends</td><td>Event stays <code>processed=false</code>; reconcile sweep re-runs it after 5 minutes, up to 3 attempts</td></tr>
+    <tr><td>Crash between write-ahead and Razorpay result</td><td>Attempt pending forever; case frozen</td><td>Stale-attempt sweep resolves fail-closed after 15 minutes</td></tr>
+    <tr><td>Crash before write-ahead (scheduler-fired retry)</td><td>A retry that never happened marked as if it did</td><td>Claim marker distinguishes the phases; pre-write-ahead crashes re-park as scheduled</td></tr>
+    <tr><td>Link paid after its case closed</td><td>Double-counted revenue or hidden customer money</td><td>Overpayment event — loud, refundable, never credited</td></tr>
+    <tr><td>Link cancellation fails (network)</td><td>Payable link on a closed case</td><td>Unmarked, retried every tick until inert</td></tr>
+  </table>
+</section>
+
+<!-- ─────────────────── 11. CUSTOMER ─────────────────── -->
+<section id="customer">
+  <h2><span class="no">11</span>Customer-facing surface</h2>
+  <p>
+    One page — <code>/recover/{token}</code> — answers the question every arriving customer
+    has: <em>"has my money already gone?"</em> before asking for any more. The token is
+    signed, expiring, and scoped to a single case; with
+    <code>RECOVERY_LINK_SECRET</code> unset every token is rejected. The page is
+    deliberately not behind API-key auth — its reader is a member of the public
+    who just had a payment problem.
+  </p>
+  <h3>The seven view states</h3>
+  <p>
+    One function derives the customer-visible state so the template branches
+    once and the ordering is reviewable in one place:
+  </p>
+  <table>
+    <tr><th>State</th><th>Condition (in check order)</th><th>Pay button?</th></tr>
+    <tr><td><span class="pill ok">recovered</span></td><td>Case recovered, or amount_recovered ≥ amount_at_risk</td><td>No</td></tr>
+    <tr><td><span class="pill">opted_out</span></td><td>Customer asked us to stop</td><td>No</td></tr>
+    <tr><td><span class="pill info">confirming</span></td><td>An attempt went out and hasn't resolved, &lt;15 min old — <em>checked before payable: offering payment here is how double-pays happen</em></td><td>No</td></tr>
+    <tr><td><span class="pill info">unknown</span></td><td>Same, but older — admits it cannot confirm</td><td>No</td></tr>
+    <tr><td><span class="pill bad">stopped</span></td><td>Exhausted / abandoned / expired, or the consent window passed (backstop for a window crossing no sweep has seen yet)</td><td>No</td></tr>
+    <tr><td><span class="pill bad">not_retryable</span></td><td>Hard decline — retrying would hit the same wall; the page says so</td><td>No</td></tr>
+    <tr><td><span class="pill ok">payable</span></td><td>Everything else — amount, reassurance, one pay button</td><td>Yes</td></tr>
+  </table>
+  <h3>Self-serve pay</h3>
+  <p>
+    The pay button POSTs to <code>/pay</code>: a guardrail subset runs (schema, blocklist,
+    consent window, budget, idempotency — not blackout or contact limits, since
+    the customer initiates), a write-ahead row with key
+    <code>selfserve_{ref}_{attempt}</code> closes the double-tap race, the link mints, and
+    the customer is redirected straight to Razorpay — <em>not</em> notified about their
+    own click. If the link already exists and is live, they go back to it.
+  </p>
+  <h3>Honesty, language, and trust</h3>
+  <ul>
+    <li><strong>Risk-aware copy.</strong> Per-type heroes ("This invoice is past due", "Your order is still waiting"), per-type timelines, and the payment-only FAQ ("I was charged, but this page says failed") renders only where a payment was actually attempted.</li>
+    <li><strong>English + Hindi</strong> from one key catalog with cross-language fallback; every template key exists in both.</li>
+    <li><strong>The merchant's name is the trust anchor</strong> in any message asking for money — an unnamed link reads as phishing. Unset, it falls back to a neutral phrase rather than blocking the send.</li>
+    <li><strong>Opt-out</strong> is one click, closes every open case for the customer, and the ledger remembers it forever.</li>
+  </ul>
+</section>
+
+<!-- ─────────────────── 12. SECURITY ─────────────────── -->
+<section id="security">
+  <h2><span class="no">12</span>Security model</h2>
+  <table>
+    <tr><th>Surface</th><th>Authentication</th><th>Fail state</th></tr>
+    <tr><td><code>/webhooks/razorpay</code></td><td>HMAC-SHA256 over the raw body → <code>X-Razorpay-Signature</code>, constant-time compare</td><td>401; secret unset → all rejected</td></tr>
+    <tr><td><code>/risks</code></td><td>HMAC-SHA256 over the raw body → <code>X-Risk-Signature</code> (what a merchant's outbound webhook client can produce)</td><td>401; secret unset → all rejected</td></tr>
+    <tr><td><code>/recover/{token}</code>, <code>/pay</code></td><td>Signed, expiring, single-case token in the URL</td><td>Link expired; secret unset → all rejected</td></tr>
+    <tr><td>Dashboard, <code>/openapi.json</code> (non-dev)</td><td>API key header</td><td>401</td></tr>
+    <tr><td><code>/health</code></td><td>None, on purpose — probes cannot hold keys; it says nothing but "up"</td><td>—</td></tr>
+  </table>
+  <h3>Untrusted input discipline</h3>
+  <ul>
+    <li><strong>Gateway error text</strong> (Razorpay's descriptions) enters the LLM prompt fenced as data-not-instructions.</li>
+    <li><strong>Merchant meta</strong> on risk events passes through one funnel — <code>sanitize_meta</code> — reduced to a bounded map of printable strings; nested structures are stringified rather than flattened, so they can't widen the injection surface. The prompt labels the block untrusted.</li>
+    <li><strong>Merchant-typed contact data</strong> is shape-checked at the executor funnel; a misshapen email or phone is dropped (with a logged warning) and the link mints without prefill — a typo must not be able to kill a chase.</li>
+    <li><strong>Nudge templates</strong> render with Jinja2 autoescape on — customer-controlled fields cannot smuggle markup into message bodies.</li>
+    <li><strong>Secrets</strong> live in the environment, never in the repo; <code>.env*</code> is gitignored. Assertion failures are written never to render settings (which would print key ids into CI logs).</li>
+  </ul>
+</section>
+
+<!-- ─────────────────── 13. DATA MODEL ─────────────────── -->
+<section id="data">
+  <h2><span class="no">13</span>Data model</h2>
+  <p>
+    PostgreSQL via SQLAlchemy (async, asyncpg). Alembic owns the production
+    schema; a migration-consistency check proves the ORM, an empty-database
+    migration run, and a <code>create_all</code> schema all agree.
+  </p>
+  <div class="er">
+    <div class="tbl"><div class="name">recovery_cases <small>the centre of the schema</small></div><div class="cols">
+      <span class="k">id</span> uuid PK · <span class="k">risk_type + subject_ref</span> <span class="c">UNIQUE — the natural key</span> · customer_id<br>
+      amount_at_risk <span class="c">paise</span> · amount_recovered · recovered_ref <span class="c">the NEW payment id, not subject_ref</span> · recovered_via_attempt_id <span class="c">NULL = self-recovery, not ours</span><br>
+      state <span class="c">open|recovered|exhausted|abandoned|expired|opted_out</span> · attempts_used / max_attempts · escalation_level<br>
+      due_at <span class="c">when the money was due — receivables aging</span> · next_action_at <span class="c">escalation clock; NULL = webhook-driven</span> · batch_id
+    </div></div>
+    <div class="tbl"><div class="name">retry_attempts <small>one bounded action, write-ahead</small></div><div class="cols">
+      <span class="k">idempotency_key</span> <span class="c">UNIQUE — the race-closer</span> · recovery_case_id FK<br>
+      payment_failure_id, payment_id <span class="c">NULL for non-payment risk types</span> · external_ref <span class="c">Payment Link id — the attribution join key</span><br>
+      action_type · target_rail · agent_type <span class="c">who ACTUALLY decided</span> · guardrail_passed + rejection reason<br>
+      result <span class="c">pending|success|failed|rejected|scheduled|superseded|cancelled|skipped</span> · channel · nudge_message · result_details jsonb
+    </div></div>
+    <div class="tbl"><div class="name">risk_events <small>merchant-pushed, deduplicated</small></div><div class="cols">
+      <span class="k">event_id</span> <span class="c">UNIQUE — merchant's id or derived from the event's natural facts</span> · risk_type · reference_id<br>
+      amount · currency · customer_email/contact/id · occurred_at · due_at · meta jsonb · payload jsonb<br>
+      processed · processing_attempts · processing_error <span class="c">the lost-event safety net</span>
+    </div></div>
+    <div class="tbl"><div class="name">webhook_events / payment_failures <small>the payment rail's detail records</small></div><div class="cols">
+      webhook_events: razorpay_event_id <span class="c">UNIQUE</span> · event_type · payload jsonb · processed<br>
+      payment_failures: payment_id · order_id · amount · failure_class · is_retryable · method · bank · error_code · failed_at
+    </div></div>
+    <div class="tbl"><div class="name">retry_ledger <small>per-customer consent &amp; rate limits</small></div><div class="cols">
+      customer_id <span class="c">UNIQUE</span> · retries/nudges in 24h, per channel · consent_status <span class="c">granted|opted_out — never expires</span> · blocked_until
+    </div></div>
+    <div class="tbl"><div class="name">promises_to_pay / case_events / scheduler_heartbeat <small>promises, audit, pulse</small></div><div class="cols">
+      promises: amount_promised · due_at · status <span class="c">pending|kept|broken|cancelled</span> · resolved_ref<br>
+      case_events: event_type · actor · detail jsonb — the audit trail<br>
+      scheduler_heartbeat: last_tick_at · last_tick_counts jsonb <span class="c">the dashboard's liveness signal</span>
+    </div></div>
+  </div>
+</section>
+
+<!-- ─────────────────── 14. MODULE MAP ─────────────────── -->
+<section id="modules">
+  <h2><span class="no">14</span>Module map</h2>
+  <table>
+    <tr><th>Module</th><th>Responsibility</th></tr>
+    <tr><td><code>src/main.py</code></td><td>FastAPI app, router mounting, lifespan (DB init, scheduler task), docs/openapi gating</td></tr>
+    <tr><td><code>src/ingestion/</code></td><td>Razorpay webhook router, <code>/risks</code> router, HMAC signature verification, event idempotency, background-task wrappers with re-arm</td></tr>
+    <tr><td><code>src/classifier/</code></td><td>Deterministic error-code → failure-class taxonomy (YAML-driven)</td></tr>
+    <tr><td><code>src/orchestrator.py</code></td><td>The pipeline conductor: <code>process_payment_failure</code>, <code>process_risk_event</code>, <code>chase_case</code>, decision fan-out, write-ahead execution, module-level singletons</td></tr>
+    <tr><td><code>src/agent/</code></td><td><code>FailureContext</code>/<code>RetryAction</code> schemas, LLM policy agent with JSON contract, prompt construction + untrusted-input fencing, XGBoost/heuristic baseline</td></tr>
+    <tr><td><code>src/guardrail/</code></td><td>Rule implementations, the gate (full + self-serve subsets), action schema validation</td></tr>
+    <tr><td><code>src/executor/</code></td><td>Razorpay Payment Link creation (off the event loop, dedicated pool), nudge delivery, rail selection, UPI fallback, contact sanitization, link cancellation</td></tr>
+    <tr><td><code>src/cases.py</code></td><td>Case lifecycle: open/attach/close, stopping rules, due-case queries, capture attribution, promises, opt-out</td></tr>
+    <tr><td><code>src/chasers/policy.py</code></td><td>The four per-type chase policies — single source of truth for bounds</td></tr>
+    <tr><td><code>src/scheduler.py</code></td><td>The tick and its eight sweeps, fire-time re-validation, heartbeat</td></tr>
+    <tr><td><code>src/customer/</code></td><td>Recovery page routes, view-state derivation, self-serve pay, explanations, en/hi catalogs, templates</td></tr>
+    <tr><td><code>src/messaging/</code></td><td>Nudge generation (LLM, 3s timeout, risk-aware wording) with Jinja2 template fallback, ≤160 chars</td></tr>
+    <tr><td><code>src/recovery_link.py</code></td><td>Signed expiring single-case tokens (mint/verify)</td></tr>
+    <tr><td><code>src/models.py</code> · <code>src/database.py</code> · <code>src/config.py</code></td><td>ORM models, async engine/session, typed settings with env aliases</td></tr>
+    <tr><td><code>dashboard/</code></td><td>Streamlit ops dashboard: recovery funnel, bank breakdown, cases &amp; audit, operations/heartbeat, eval results</td></tr>
+    <tr><td><code>eval/</code></td><td>Offline evaluation harness comparing policy implementations on replayed failures</td></tr>
+    <tr><td><code>alembic/</code></td><td>Migration chain (0001…0005); applied at boot in production</td></tr>
+    <tr><td><code>scripts/</code></td><td><code>simulate_webhooks.py</code> (payment-rail demo traffic), <code>run_risk_batch.py</code> (chaser demo traffic + captures), <code>recovery_links.py</code> (mint page URLs per state), <code>check_migrations.py</code> (schema-consistency proof)</td></tr>
+  </table>
+</section>
+
+<!-- ─────────────────── 15. OBSERVABILITY ─────────────────── -->
+<section id="observability">
+  <h2><span class="no">15</span>Observability</h2>
+  <ul>
+    <li><strong>Heartbeat</strong> — every tick stamps <code>scheduler_heartbeat</code> with its counts (retries fired, events reconciled, cases chased, links cancelled, promises expired…). The dashboard's Operations view renders it as <em>Scheduler alive / STALE</em> against a 3-minute freshness bound.</li>
+    <li><strong>Audit trail</strong> — <code>case_events</code> records every transition with actor and detail: the evidence behind every recovered rupee and every abandoned case.</li>
+    <li><strong>Attempt rows as telemetry</strong> — <code>agent_type</code> (who decided), <code>guardrail_passed</code> + rejection reasons (what was checked), <code>result</code> (what happened), <code>rail_fallback</code> (was the rail switch downgraded), <code>channel</code> (what actually reached the customer — not what was intended).</li>
+    <li><strong>Dashboard views</strong> — recovery funnel (failed → retryable → contacted → recovered), bank breakdown, case register with promises and events, operations panel, eval results.</li>
+    <li><strong>Structured logs</strong> at every money-moving step: link ids, idempotency keys, race outcomes, fallback triggers, overpayments (at WARNING, refund-required).</li>
+  </ul>
+</section>
+
+<!-- ─────────────────── 16. VERIFICATION ─────────────────── -->
+<section id="verification">
+  <h2><span class="no">16</span>Verification</h2>
+  <table>
+    <tr><th>Gate</th><th>Command</th><th>What it proves</th></tr>
+    <tr><td>Lint</td><td><code>.venv/bin/ruff check src eval scripts tests</code></td><td>Style + static defects</td></tr>
+    <tr><td>Types</td><td><code>.venv/bin/mypy --strict src scripts eval</code></td><td>Full strict typing across the codebase</td></tr>
+    <tr><td>Tests</td><td><code>.venv/bin/python -m pytest -q</code></td><td>362 tests — pipeline, guardrail, races, sweeps, attribution, page states, security boundaries</td></tr>
+    <tr><td>Migrations</td><td><code>.venv/bin/python scripts/check_migrations.py</code></td><td>Empty-DB→head, migrated schema = ORM exactly, head→base→head, create_all→head no-op</td></tr>
+    <tr><td>Live smoke</td><td><code>scripts/run_risk_batch.py --count 16 --capture-rate 0.5</code></td><td>End-to-end on real Postgres + Razorpay test mode: ingestion → chase → link → capture → attribution → audit</td></tr>
+  </table>
+  <p>
+    Tests run on SQLite with a JSONB shim and mocked external calls for speed
+    and determinism (LLM clients pinned to template fallback, Razorpay stubbed);
+    the live smoke script exercises the real integrations. Race-closing
+    behaviour that SQLite cannot express (row locks, UNIQUE-under-concurrency)
+    is verified against real PostgreSQL.
+  </p>
+</section>
+
+<!-- ─────────────────── 17. CONFIG ─────────────────── -->
+<section id="config">
+  <h2><span class="no">17</span>Configuration</h2>
+  <table>
+    <tr><th>Setting</th><th>Default</th><th>Purpose</th></tr>
+    <tr><td><code>RAZORPAY_KEY_ID / _SECRET</code></td><td>—</td><td>Payment Link API credentials (test mode for development)</td></tr>
+    <tr><td><code>RAZORPAY_WEBHOOK_SECRET</code></td><td>—</td><td>Webhook HMAC; unset → all webhooks rejected</td></tr>
+    <tr><td><code>RISK_WEBHOOK_SECRET</code></td><td>—</td><td><code>/risks</code> HMAC; unset → all risk events rejected</td></tr>
+    <tr><td><code>RECOVERY_LINK_SECRET</code></td><td>—</td><td>Page token signing; unset → every token rejected</td></tr>
+    <tr><td><code>PUBLIC_BASE_URL</code></td><td>—</td><td>Base for recovery-page URLs carried in nudges</td></tr>
+    <tr><td><code>MERCHANT_NAME</code></td><td>—</td><td>Trust anchor in customer-facing copy; falls back to a neutral phrase</td></tr>
+    <tr><td><code>LLM_PROVIDER / LLM_MODEL</code></td><td>—</td><td>Policy agent + nudge generation provider</td></tr>
+    <tr><td><code>MAX_RETRIES_PER_PAYMENT</code></td><td class="num">3</td><td>Default attempt budget (payment rail)</td></tr>
+    <tr><td><code>CONSENT_WINDOW_HOURS</code></td><td class="num">72</td><td>Global consent window (payment rail); risk types carry their own</td></tr>
+    <tr><td><code>AMOUNT_CEILING_PAISE</code></td><td class="num">5,000,000 (₹50k)</td><td>Guardrail ceiling for engine-initiated retries</td></tr>
+    <tr><td><code>RETRY_BLACKOUT_START/END_HOUR</code></td><td class="num">23 / 7</td><td>IST quiet hours — no outreach</td></tr>
+    <tr><td><code>SCHEDULER_INTERVAL_SECONDS</code></td><td class="num">60</td><td>Tick period</td></tr>
+    <tr><td><code>ATTEMPT_STALE_AFTER_SECONDS</code></td><td class="num">900</td><td>Pending attempts older than this resolve fail-closed</td></tr>
+    <tr><td><code>EVENT_RECONCILE_AFTER_SECONDS</code></td><td class="num">300</td><td>Unprocessed events become eligible for re-run after this</td></tr>
+  </table>
+</section>
+
+<!-- ─────────────────── 18. RUNNING ─────────────────── -->
+<section id="running">
+  <h2><span class="no">18</span>Running it</h2>
+  <pre><code># 1. Environment
+cp .env.example .env          # fill Razorpay test keys, LLM key, the three secrets
+
+# 2. Schema (production path — migrations at boot; dev may init_db)
+PYTHONPATH=. .venv/bin/alembic upgrade head
+
+# 3. API + scheduler
+PYTHONPATH=. .venv/bin/uvicorn src.main:app --port 8000
+
+# 4. Drive traffic
+.venv/bin/python scripts/simulate_webhooks.py --count 20      # payment rail
+.venv/bin/python scripts/run_risk_batch.py --count 16 \
+    --capture-rate 0.5 --seed 42                              # the four chasers
+
+# 5. See the pages
+.venv/bin/python scripts/recovery_links.py                    # one URL per page state
+
+# 6. Verify
+.venv/bin/ruff check src eval scripts tests
+.venv/bin/mypy --strict src scripts eval
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/check_migrations.py</code></pre>
+  <p>
+    Production deploys to Render with a managed PostgreSQL
+    (<code>render.yaml</code>); the migration chain runs at boot and the scheduler runs
+    in-process with the API.
+  </p>
+
+  <h3>Known gaps (documented, deliberate)</h3>
+  <ul>
+    <li><strong>Promises-to-pay have no production entry surface yet</strong> — the plumbing (record, pause chase, expire, resolve on capture) is built and tested; wiring an inbound channel is future work.</li>
+    <li><strong>Hindi copy needs native review</strong> before real sends.</li>
+    <li><strong>The offline eval harness covers the payment rail</strong>; chaser-specific evaluation is future work.</li>
+    <li><strong>Voice/WhatsApp channels</strong> are modeled in the channel enum but not shipped — SMS/link is the live channel.</li>
+  </ul>
+</section>
+
+<footer class="doc-foot">
+  Payment Recovery Engine — architecture reference. Generated from the codebase;
+  where this document and the code disagree, the code (and its tests) wins.
+  Companion docs: <span class="filepath">docs/architecture.md</span> ·
+  <span class="filepath">docs/failure_cases.md</span> ·
+  <span class="filepath">docs/eval_methodology.md</span>
+</footer>
+</main>
+</div>
+
+<script>
+  // Scroll-spy for the sidebar — highlights the section in view.
+  const links = Array.from(document.querySelectorAll('nav.toc a'));
+  const byId = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(a => a.classList.remove('active'));
+        const link = byId.get(e.target.id);
+        if (link) link.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -80% 0px' });
+  document.querySelectorAll('section[id], h3[id]').forEach(s => observer.observe(s));
+</script>
+</body>
+</html>

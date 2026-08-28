@@ -15,6 +15,7 @@ trusted from decision time.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -346,6 +347,78 @@ async def test_a_still_fresh_event_is_left_to_its_background_task(
         assert await scheduler.reconcile_events(session) == 0
 
 
+async def test_a_dropped_capture_is_reattributed(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    The sweep used to reconcile payment.failed only — a dropped capture was
+    money that arrived and was never attributed, on a case that kept chasing a
+    customer who had already paid. Captures are reconciled now too.
+    """
+    from src.cases import attach_attempt, open_case
+    from src.models import PaymentFailure
+
+    original, link, captured = "pay_caprecon_1", "plink_caprecon_1", "pay_caprecon_new_9"
+    async with db_sessionmaker() as session:
+        failure = PaymentFailure(
+            payment_id=original, order_id="order_caprecon_1", amount=50000,
+            method="card", error_code="BAD_REQUEST_ERROR",
+            failure_class="insufficient_funds", is_retryable=True,
+            webhook_event_id=uuid.uuid4(), failed_at=datetime.now(UTC),
+        )
+        session.add(failure)
+        await session.flush()
+        case = await open_case(
+            session, risk_type="payment_failure", subject_ref=original,
+            amount_at_risk=50000, customer_id="caprecon@example.com",
+        )
+        attempt = RetryAttempt(
+            payment_failure_id=failure.id, payment_id=original,
+            idempotency_key=f"retry_{original}_0", attempt_number=1,
+            action_type="retry_now", agent_type="xgboost",
+            guardrail_passed=True, result="pending",
+        )
+        attach_attempt(case, attempt, external_ref=link)
+        session.add(attempt)
+
+        payload = {
+            "event": "payment.captured",
+            "payload": {
+                "payment": {"entity": {"id": captured, "amount": 50000}},
+                "payment_link": {"entity": {"id": link}},
+            },
+        }
+        session.add(
+            WebhookEvent(
+                razorpay_event_id="evt_dropped_capture_1",
+                event_type="payment.captured",
+                payload=payload,
+                received_at=datetime.now(UTC) - timedelta(hours=1),
+                processed=False,
+            )
+        )
+        await session.commit()
+        case_id = case.id
+
+    async with db_sessionmaker() as session:
+        assert await scheduler.reconcile_events(session) == 1
+        await session.commit()
+
+    async with db_sessionmaker() as reader:
+        case = await reader.get(RecoveryCase, case_id)
+        event = (
+            await reader.execute(
+                select(WebhookEvent).where(
+                    WebhookEvent.razorpay_event_id == "evt_dropped_capture_1"
+                )
+            )
+        ).scalar_one()
+    assert case is not None
+    assert case.state == "recovered", "the dropped capture was never attributed"
+    assert case.amount_recovered == 50000
+    assert event.processed is True
+
+
 # ── the tick ─────────────────────────────────────────────────────────────
 
 
@@ -356,9 +429,13 @@ async def test_tick_reports_what_each_sweep_did(
         assert await scheduler.tick(session) == {
             "retries_fired": 0,
             "events_reconciled": 0,
+            "risk_events_reconciled": 0,
             "attempts_reconciled": 0,
             "links_cancelled": 0,
+            "superseded_links_cancelled": 0,
             "promises_expired": 0,
+            "cases_chased": 0,
+            "due_cases_reported": 0,
         }
 
 

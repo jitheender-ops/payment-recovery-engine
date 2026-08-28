@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -17,7 +18,7 @@ import razorpay
 import requests
 
 from src.config import get_settings, reveal
-from src.models import PaymentFailure
+from src.models import PaymentFailure, RecoveryCase
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,64 @@ logger = logging.getLogger(__name__)
 # (min(32, cpu+4) workers); the money path deserves its own budget so a burst
 # of link creations cannot starve — or be starved by — unrelated thread work.
 _MAX_RAZORPAY_WORKERS = 8
+
+# One pool for the whole process, not one per RetryExecutor. The self-serve
+# pay route constructs an executor per request; a fresh ThreadPoolExecutor
+# each time spawned a fresh set of worker threads that outlived the request,
+# so a busy day leaked threads linearly with traffic. The pool is created
+# lazily on first use (ThreadPoolExecutor starts no threads at construction,
+# but deferring keeps import-time side effects at zero).
+_SHARED_POOL: ThreadPoolExecutor | None = None
+
+
+def _shared_pool() -> ThreadPoolExecutor:
+    global _SHARED_POOL
+    if _SHARED_POOL is None:
+        _SHARED_POOL = ThreadPoolExecutor(
+            max_workers=_MAX_RAZORPAY_WORKERS,
+            thread_name_prefix="razorpay",
+        )
+    return _SHARED_POOL
+
+
+# Shape checks, not RFC validation: just "Razorpay will not 400 on this".
+_EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_CONTACT_SHAPE = re.compile(r"^\+?\d{8,15}$")
+
+
+def sanitize_customer_email(email: str | None) -> str | None:
+    """
+    Merchant-typed email from the risk rail, unvalidated at the boundary.
+
+    Razorpay rejects a misshapen one with a 400, which would fail the whole
+    link call — and a chase that fails at link creation burns the case's
+    attempt budget on a typo. Drop what cannot be real; the link mints fine
+    without a prefilled customer. The payment rail needs no such guard: its
+    emails come from Razorpay's own webhook, already shaped by Razorpay.
+    """
+    if email is None:
+        return None
+    candidate = email.strip()
+    if _EMAIL_SHAPE.match(candidate):
+        return candidate
+    logger.warning(
+        "Dropping misshapen customer email %r — the link mints without it", email
+    )
+    return None
+
+
+def sanitize_customer_contact(contact: str | None) -> str | None:
+    """Same guard for the phone number: strip formatting, keep digit shapes."""
+    if contact is None:
+        return None
+    candidate = re.sub(r"[\s\-()]", "", contact.strip())
+    if _CONTACT_SHAPE.match(candidate):
+        return candidate
+    logger.warning(
+        "Dropping misshapen customer contact %r — the link mints without it",
+        contact,
+    )
+    return None
 
 
 class _TimeoutSession(requests.Session):
@@ -59,19 +118,46 @@ class RetryExecutor:
             session=_TimeoutSession(settings.razorpay_timeout_seconds),
             auth=(settings.razorpay_key_id, reveal(settings.razorpay_key_secret)),
         )
-        # A dedicated pool rather than asyncio.to_thread's shared default: one
-        # slow Razorpay day can hold up to this many calls, and the rest of
-        # the process keeps its own executor untouched.
-        self._pool = ThreadPoolExecutor(
-            max_workers=_MAX_RAZORPAY_WORKERS,
-            thread_name_prefix="razorpay",
-        )
+        # The process-wide dedicated pool (see _shared_pool): one slow
+        # Razorpay day can hold up to this many calls, and the rest of the
+        # process keeps its own executor untouched. Shared across executor
+        # instances so constructing one per request cannot leak threads.
+        self._pool = _shared_pool()
         logger.info("RetryExecutor initialized (key_id=%s...)", settings.razorpay_key_id[:12])
 
     async def _off_thread(self, fn: Any, *args: Any) -> Any:
         """Run a blocking SDK call on the dedicated Razorpay pool."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._pool, lambda: fn(*args))
+
+    async def _create_link(self, link_data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Create the Payment Link, surviving Razorpay refusing the UPI-only flag.
+
+        UPI Payment Links do not exist in Test Mode, and a live account can
+        also lack the feature — either way the 400 is about the FLAG, not the
+        payment. Failing the whole chase over it burns an attempt slot and
+        leaves the money unchased when a generic link (card/UPI/netbanking)
+        would have collected it just as well. So: if a UPI-only request is
+        refused, retry once as a generic link and mark the result
+        rail_fallback=True, so the attempt row records that the rail switch
+        was downgraded from "enforced" to "preferred". Any other BadRequest
+        re-raises — this fallback is for the flag, not a general retry.
+        """
+        try:
+            result = await self._off_thread(self._client.payment_link.create, link_data)
+            return {**result, "rail_fallback": False}
+        except razorpay.errors.BadRequestError as e:
+            if link_data.get("upi_link") and "upi" in str(e).lower():
+                logger.warning(
+                    "UPI-only link refused (%s) — falling back to a generic link", e
+                )
+                fallback = {k: v for k, v in link_data.items() if k != "upi_link"}
+                result = await self._off_thread(
+                    self._client.payment_link.create, fallback
+                )
+                return {**result, "rail_fallback": True}
+            raise
 
     async def cancel_payment_link(self, link_id: str) -> bool:
         """
@@ -127,8 +213,13 @@ class RetryExecutor:
 
         try:
             if action_type in ("retry_now", "retry_at", "switch_rail"):
+                # The nudge message doubles as the link's checkout description:
+                # it is the one customer-visible surface Razorpay gives us, and
+                # without it the personalized message the generator produced was
+                # stored on the attempt row and never delivered anywhere.
                 return await self._create_payment_link(
-                    payment_failure, target_rail, idempotency_key
+                    payment_failure, target_rail, idempotency_key,
+                    description=nudge_message,
                 )
             elif action_type == "nudge_customer":
                 return await self._send_nudge(
@@ -148,13 +239,193 @@ class RetryExecutor:
             logger.exception("Unexpected error executing retry")
             return {"success": False, "error": str(e)}
 
+    async def execute_case_action(
+        self,
+        case: RecoveryCase,
+        action_type: str,
+        target_rail: str | None,
+        idempotency_key: str,
+        nudge_message: str | None = None,
+        customer_email: str | None = None,
+        customer_contact: str | None = None,
+        description: str | None = None,
+        notify_customer: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Execute a recovery action for a case with NO PaymentFailure behind it —
+        an abandoned cart, an overdue invoice, a failed subscription charge or
+        mandate debit. Same contract as execute_retry (returns success /
+        payment_link_id / error), but the amount, currency and customer come
+        from the case and the caller instead of a failure row.
+
+        The recovery path is identical to the payment rail's: a Razorpay
+        Payment Link the customer pays, which mints a brand-new payment id that
+        attribute_capture joins back through external_ref / the idempotency
+        key. So the attribution machinery needs no changes — only the source
+        of the link's inputs differs.
+
+        notify_customer: every case "retry" MINTS A LINK — unlike the payment
+        rail, there is no instrument to re-present silently, so a link nobody
+        tells the customer about is a dead chase that still reports success.
+        All link actions therefore deliver the link, except the self-serve pay
+        route, where the customer is already standing at the checkout (it
+        passes notify_customer=False and redirects them itself).
+        """
+        if action_type == "abandon":
+            logger.info("Abandon action — no API call: case=%s", case.id)
+            return {"success": True, "action": "abandon", "details": "No action taken"}
+
+        # Sanitize once at the funnel so link creation AND the nudge's
+        # notify-channel decision see the same surviving values.
+        customer_email = sanitize_customer_email(customer_email)
+        customer_contact = sanitize_customer_contact(customer_contact)
+
+        try:
+            if action_type in ("retry_now", "retry_at", "switch_rail", "nudge_customer"):
+                if notify_customer:
+                    return await self._send_case_nudge(
+                        case, idempotency_key, nudge_message,
+                        customer_email=customer_email,
+                        customer_contact=customer_contact,
+                        description=description,
+                        target_rail=target_rail,
+                    )
+                return await self._create_case_payment_link(
+                    case, target_rail, idempotency_key,
+                    description=description or nudge_message,
+                    customer_email=customer_email,
+                    customer_contact=customer_contact,
+                )
+            else:
+                logger.warning("Unknown action type: %s", action_type)
+                return {"success": False, "error": f"Unknown action: {action_type}"}
+
+        except razorpay.errors.BadRequestError as e:
+            logger.error("Razorpay BadRequestError: %s", e)
+            return {"success": False, "error": f"Bad request: {e}"}
+        except razorpay.errors.ServerError as e:
+            logger.error("Razorpay ServerError: %s", e)
+            return {"success": False, "error": f"Server error: {e}"}
+        except Exception as e:
+            logger.exception("Unexpected error executing case action")
+            return {"success": False, "error": str(e)}
+
+    async def _create_case_payment_link(
+        self,
+        case: RecoveryCase,
+        target_rail: str | None,
+        idempotency_key: str,
+        description: str | None = None,
+        customer_email: str | None = None,
+        customer_contact: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Payment Link from a case (no PaymentFailure). See
+        _create_payment_link for the rail-enforcement and idempotency notes —
+        both apply identically here."""
+        customer: dict[str, str] = {}
+        if customer_email:
+            customer["email"] = customer_email
+        if customer_contact:
+            customer["contact"] = customer_contact
+
+        link_data: dict[str, Any] = {
+            "amount": case.amount_at_risk,
+            "currency": case.currency,
+            "description": (
+                description[:160]
+                if description
+                else f"Recovery payment for {case.risk_type} {case.subject_ref}"
+            ),
+            "customer": customer,
+            "notify": {"sms": False, "email": False},
+            "notes": {
+                # No original payment exists for these risk types — the case's
+                # natural key stands in so the link is still traceable.
+                "risk_type": case.risk_type,
+                "subject_ref": case.subject_ref,
+                "retry_idempotency_key": idempotency_key,
+                "idempotency_key": idempotency_key,
+                "target_rail": target_rail or "any",
+            },
+        }
+        if target_rail == "upi":
+            link_data["upi_link"] = True
+
+        result = await self._create_link(link_data)
+
+        logger.info(
+            "Case payment link created: id=%s, short_url=%s, case=%s",
+            result.get("id"),
+            result.get("short_url"),
+            case.id,
+        )
+
+        return {
+            "success": True,
+            "payment_link_id": result.get("id"),
+            "short_url": result.get("short_url"),
+            "target_rail": target_rail,
+            "rail_fallback": result.get("rail_fallback", False),
+        }
+
+    async def _send_case_nudge(
+        self,
+        case: RecoveryCase,
+        idempotency_key: str,
+        message: str | None,
+        customer_email: str | None = None,
+        customer_contact: str | None = None,
+        description: str | None = None,
+        target_rail: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Payment Link and notify the customer, case-driven. Mirrors
+        _send_nudge for the no-PaymentFailure risk types. target_rail rides
+        through so a switch-to-UPI keeps its UPI-only link even though every
+        case action now delivers via this path."""
+        link_result = await self._create_case_payment_link(
+            case, target_rail, idempotency_key,
+            description=description or message,
+            customer_email=customer_email,
+            customer_contact=customer_contact,
+        )
+
+        if not link_result.get("success"):
+            return link_result
+
+        link_id = link_result.get("payment_link_id")
+        channels: list[str] = []
+        if link_id:
+            try:
+                if customer_contact:
+                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "sms")
+                    channels.append("sms")
+                    logger.info("SMS notification sent for link %s", link_id)
+                if customer_email:
+                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "email")
+                    channels.append("email")
+                    logger.info("Email notification sent for link %s", link_id)
+            except Exception:
+                logger.warning("Failed to send notification for link %s", link_id)
+
+        link_result["channels"] = channels
+        link_result["nudge_sent"] = True
+        link_result["nudge_message"] = message
+        return link_result
+
     async def _create_payment_link(
         self,
         failure: PaymentFailure,
         target_rail: str | None,
         idempotency_key: str,
+        description: str | None = None,
     ) -> dict[str, Any]:
-        """Create a Razorpay Payment Link for retry."""
+        """Create a Razorpay Payment Link for retry.
+
+        `description`, when given, is the customer-facing nudge message: it is
+        what the payer reads on the hosted checkout, so the personalized text
+        the generator produced actually reaches the customer instead of dying
+        in the attempt row. Kept short — the generator caps at 160 chars.
+        """
         customer: dict[str, str] = {}
         if failure.customer_email:
             customer["email"] = failure.customer_email
@@ -171,7 +442,11 @@ class RetryExecutor:
         link_data: dict[str, Any] = {
             "amount": failure.amount,
             "currency": failure.currency,
-            "description": f"Retry payment for order {failure.order_id or failure.payment_id}",
+            "description": (
+                description[:160]
+                if description
+                else f"Retry payment for order {failure.order_id or failure.payment_id}"
+            ),
             "customer": customer,
             "notify": {"sms": False, "email": False},  # We handle notifications ourselves
             "notes": {
@@ -197,7 +472,7 @@ class RetryExecutor:
         # Runs on the executor's DEDICATED pool (see __init__), so sustained
         # concurrency beyond its workers queues Razorpay work specifically
         # rather than starving the whole process.
-        result = await self._off_thread(self._client.payment_link.create, link_data)
+        result = await self._create_link(link_data)
 
         logger.info(
             "Payment link created: id=%s, short_url=%s, payment=%s",
@@ -211,6 +486,7 @@ class RetryExecutor:
             "payment_link_id": result.get("id"),
             "short_url": result.get("short_url"),
             "target_rail": target_rail,
+            "rail_fallback": result.get("rail_fallback", False),
         }
 
     async def _send_nudge(
@@ -219,9 +495,16 @@ class RetryExecutor:
         idempotency_key: str,
         message: str | None,
     ) -> dict[str, Any]:
-        """Create a Payment Link and notify the customer."""
+        """Create a Payment Link and notify the customer.
+
+        The personalized message is carried as the link's checkout description
+        (the one customer-visible text Razorpay lets us set); notifyBy then
+        sends Razorpay's own SMS/email template pointing at that link.
+        """
         # First create the payment link
-        link_result = await self._create_payment_link(failure, None, idempotency_key)
+        link_result = await self._create_payment_link(
+            failure, None, idempotency_key, description=message
+        )
 
         if not link_result.get("success"):
             return link_result

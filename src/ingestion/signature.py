@@ -16,6 +16,33 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Largest body either signed surface will read. A Razorpay webhook is a few KB
+# and a risk event smaller; a megabyte is generous by two orders of magnitude.
+# The cap matters because the whole body is read into memory and then stored
+# as JSONB: without it, anyone holding a leaked signing secret could grow the
+# event tables without bound, and an unsigned flood still costs a full read
+# before the signature check can reject it.
+MAX_BODY_BYTES = 1_048_576
+
+
+def body_too_large(content_length: str | None, body: bytes | None = None) -> bool:
+    """
+    True when a request body exceeds MAX_BODY_BYTES.
+
+    Checks the declared Content-Length first so an oversized body can be
+    refused before it is read, and the actual length second because a chunked
+    request declares nothing.
+    """
+    if content_length:
+        try:
+            if int(content_length) > MAX_BODY_BYTES:
+                return True
+        except ValueError:
+            # An unparseable Content-Length is not a size we can trust; fall
+            # through to measuring what actually arrived.
+            pass
+    return body is not None and len(body) > MAX_BODY_BYTES
+
 
 def verify_webhook_signature(
     raw_body: bytes,

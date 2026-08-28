@@ -11,8 +11,10 @@ secret. It is:
 
   * unguessable   — forging one requires the secret
   * scoped        — it names exactly one case and grants nothing else
-  * expiring      — it dies with the consent window, so a link forwarded weeks
-                    later stops working rather than reopening a closed case
+  * expiring      — it dies after recovery_link_ttl_hours (a day by default,
+                    never more than the consent window), so a link forwarded
+                    weeks later stops working rather than reopening a closed
+                    case
   * PII-free      — no email, phone, amount or order id in the URL, because
                     URLs end up in SMS logs, browser history and referrer
                     headers
@@ -62,16 +64,26 @@ def mint(case_id: uuid.UUID, *, ttl_hours: int | None = None) -> str | None:
     """
     Build a token for one case, or None when the feature is unconfigured.
 
-    Default lifetime is the consent window. The guardrail already refuses to
-    act on a case past that point, so a link that outlived it would offer a
-    payment the engine itself would not have initiated.
+    Default lifetime is recovery_link_ttl_hours (one day), capped at the
+    consent window. Two bounds, two reasons: the cap exists because the
+    guardrail refuses to act on a case past the consent window, so a link
+    that outlived it would offer a payment the engine itself would not have
+    initiated; the shorter default exists because the URL is a bearer
+    credential in SMS logs and browser history, and every nudge mints a
+    fresh link anyway — nothing needs the long life, so don't hand it out.
     """
     settings = get_settings()
     secret = reveal(settings.recovery_link_secret)
     if not secret:
         return None
-    hours = ttl_hours if ttl_hours is not None else settings.consent_window_hours
-    payload = f"{case_id.hex}{_SEP}{int(time.time()) + hours * 3600}"
+    cap = settings.consent_window_hours
+    if ttl_hours is None:
+        ttl_hours = min(settings.recovery_link_ttl_hours, cap)
+    else:
+        # The cap applies to explicit callers too: a link must never outlive
+        # the engine's authority to act, whoever picks the number.
+        ttl_hours = min(ttl_hours, cap)
+    payload = f"{case_id.hex}{_SEP}{int(time.time()) + ttl_hours * 3600}"
     return f"{_b64(payload.encode())}{_SEP}{_sign(payload, secret)}"
 
 

@@ -36,6 +36,7 @@ st.set_page_config(
 from dashboard import theme  # noqa: E402
 from dashboard.auth import (  # noqa: E402
     dashboard_password,
+    lockout_seconds_remaining,
     password_is_correct,
 )
 
@@ -90,7 +91,12 @@ def require_password() -> None:
         )
         submitted = st.form_submit_button("Sign in", width="stretch")
     if submitted:
-        if password_is_correct(supplied):
+        wait = lockout_seconds_remaining()
+        if wait:
+            st.error(
+                f"Too many failed attempts. Sign-in reopens in {wait}s."
+            )
+        elif password_is_correct(supplied):
             # The password itself is never kept — only the fact that it matched.
             st.session_state["authenticated"] = True
             st.rerun()

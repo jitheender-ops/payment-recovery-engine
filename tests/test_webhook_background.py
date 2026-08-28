@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.cases import attach_attempt, open_case
 from src.ingestion import router as router_mod
-from src.models import PaymentFailure, RecoveryCase, RetryAttempt, WebhookEvent
+from src.models import CaseEvent, PaymentFailure, RecoveryCase, RetryAttempt, WebhookEvent
 
 ORIGINAL = "pay_bg_original_1"
 LINK = "plink_bg_1"
@@ -203,6 +203,46 @@ async def test_a_capture_with_no_payment_id_is_ignored(
     assert (await _case(db_sessionmaker, case_id)).amount_recovered == 0
 
 
+async def test_a_second_capture_on_a_closed_case_is_an_overpayment_not_double_credit(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    Every retry mints a NEW link while the old ones stay live until the cancel
+    sweep reaches them. A customer paying two links in that window used to
+    credit the case TWICE — amount_recovered sailed past amount_at_risk and
+    the headline revenue was inflated. The second money arrival on a terminal
+    case is an overpayment: logged loudly for manual refund, never credited.
+    """
+    case_id = await _seed(db_sessionmaker)
+    await _run(monkeypatch, db_sessionmaker, _captured_payload())
+
+    case = await _case(db_sessionmaker, case_id)
+    assert case.state == "recovered"
+
+    # The same attempt's second live link is paid too — resolves through the
+    # notes idempotency key this time.
+    second = _captured_payload(
+        "pay_bg_second_9",
+        link_id=None,
+        notes={"retry_idempotency_key": "retry_pay_bg_original_1_0"},
+    )
+    await _run(monkeypatch, db_sessionmaker, second)
+
+    case = await _case(db_sessionmaker, case_id)
+    assert case.amount_recovered == 50000, "the second capture double-credited the case"
+    assert case.state == "recovered"
+
+    async with db_sessionmaker() as reader:
+        events = (
+            await reader.execute(
+                select(CaseEvent).where(CaseEvent.recovery_case_id == case_id)
+            )
+        ).scalars().all()
+    overpayments = [e for e in events if e.event_type == "overpayment"]
+    assert len(overpayments) == 1, "the double payment was not surfaced for refund"
+    assert overpayments[0].detail["amount"] == 50000
+
+
 # ── The failed-payment branch ────────────────────────────────────────────
 
 
@@ -214,14 +254,16 @@ async def test_a_missing_event_row_does_not_raise(
     await router_mod._process_event_background("evt_not_stored", "payment.failed", {})
 
 
-async def test_a_raising_pipeline_marks_the_event_instead_of_losing_it(
+async def test_a_raising_pipeline_rearms_the_event_instead_of_burying_it(
     db_sessionmaker: async_sessionmaker[AsyncSession],
     sample_webhook_payload: dict[str, Any],
     monkeypatch: Any,
 ) -> None:
     """
-    An exception must leave a record. Razorpay already got its 200, so an event
-    that fails silently here is a payment nobody will ever look at again.
+    An exception must leave a record AND leave the event retriable. Razorpay
+    already got its 200, so an event marked processed=True here is a payment
+    nobody will ever look at again — the old code did exactly that, and one
+    transient database blip permanently dropped a real payment failure.
     """
     async with db_sessionmaker() as session:
         session.add(
@@ -246,5 +288,80 @@ async def test_a_raising_pipeline_marks_the_event_instead_of_losing_it(
                 select(WebhookEvent).where(WebhookEvent.razorpay_event_id == "evt_boom")
             )
         ).scalar_one()
-    assert event.processed is True
+    assert event.processed is False, "a first failure must stay visible to the reconciler"
+    assert event.processing_attempts == 1
     assert event.processing_error is not None, "the failure left no trace"
+
+
+async def test_a_persistently_raising_pipeline_rests_after_the_cap(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    sample_webhook_payload: dict[str, Any],
+    monkeypatch: Any,
+) -> None:
+    """
+    A payload that raises on EVERY attempt must stop eating sweep batches:
+    after the cap it rests with processed=True and the error recorded.
+    """
+    async with db_sessionmaker() as session:
+        session.add(
+            WebhookEvent(
+                razorpay_event_id="evt_persistent_boom",
+                event_type="payment.failed",
+                payload=sample_webhook_payload,
+            )
+        )
+        await session.commit()
+
+    async def boom(event: Any, session: Any) -> None:
+        raise RuntimeError("pipeline exploded")
+
+    monkeypatch.setattr(router_mod, "async_session_factory", db_sessionmaker)
+    monkeypatch.setattr("src.orchestrator.process_payment_failure", boom)
+    for _ in range(router_mod.EVENT_RECONCILE_MAX_ATTEMPTS):
+        await router_mod._process_event_background(
+            "evt_persistent_boom", "payment.failed", sample_webhook_payload
+        )
+
+    async with db_sessionmaker() as reader:
+        event = (
+            await reader.execute(
+                select(WebhookEvent).where(
+                    WebhookEvent.razorpay_event_id == "evt_persistent_boom"
+                )
+            )
+        ).scalar_one()
+    assert event.processed is True, "the cap must eventually stop the retries"
+    assert event.processing_attempts == router_mod.EVENT_RECONCILE_MAX_ATTEMPTS
+    assert event.processing_error is not None
+
+
+async def test_a_successful_capture_is_marked_processed(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    Most captures match no case (the common path). They must still be marked
+    processed, or the reconciler re-attributes them on every tick.
+    """
+    case_id = await _seed(db_sessionmaker)
+    payload = _captured_payload("pay_stranger_2", link_id="plink_stranger_2")
+    event_id = f"payment.captured_x_{payload['created_at']}"
+
+    async with db_sessionmaker() as session:
+        session.add(
+            WebhookEvent(
+                razorpay_event_id=event_id, event_type="payment.captured", payload=payload
+            )
+        )
+        await session.commit()
+
+    await _run(monkeypatch, db_sessionmaker, payload)
+
+    async with db_sessionmaker() as reader:
+        event = (
+            await reader.execute(
+                select(WebhookEvent).where(WebhookEvent.razorpay_event_id == event_id)
+            )
+        ).scalar_one()
+        case = await reader.get(RecoveryCase, case_id)
+    assert event.processed is True
+    assert case is not None and case.amount_recovered == 0

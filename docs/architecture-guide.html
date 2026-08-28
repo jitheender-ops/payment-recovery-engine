@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Payment Recovery Engine — How It Actually Works</title>
+<style>
+  :root{
+    --ink:#1a2233;
+    --ink-soft:#3d4a63;
+    --muted:#6b7688;
+    --paper:#fbfaf7;
+    --card:#ffffff;
+    --line:#e6e2d8;
+    --brand:#0f6f5c;
+    --brand-soft:#e3f1ed;
+    --gold:#b8860b;
+    --gold-soft:#faf3e0;
+    --red:#b3372f;
+    --red-soft:#fbeae8;
+    --blue:#2b5d8a;
+    --blue-soft:#e9f0f7;
+    --purple:#5b4a8a;
+    --purple-soft:#efeaf7;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);
+    background:var(--paper);
+    line-height:1.65;
+    font-size:17px;
+  }
+  .wrap{max-width:860px;margin:0 auto;padding:0 24px}
+
+  /* ---------- header ---------- */
+  header{
+    background:linear-gradient(160deg,#0d3b31 0%,#0f6f5c 60%,#178a6f 100%);
+    color:#fff;padding:72px 0 56px;
+  }
+  header .kicker{
+    text-transform:uppercase;letter-spacing:.18em;font-size:12px;
+    font-weight:700;opacity:.75;margin-bottom:18px;
+  }
+  header h1{font-size:40px;line-height:1.15;font-weight:800;letter-spacing:-.01em;margin-bottom:18px}
+  header p.lede{font-size:20px;line-height:1.55;opacity:.92;max-width:640px}
+  header .badges{margin-top:28px;display:flex;flex-wrap:wrap;gap:10px}
+  header .badge{
+    background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);
+    padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;
+  }
+
+  /* ---------- nav ---------- */
+  nav.toc{
+    background:var(--card);border-bottom:1px solid var(--line);
+    position:sticky;top:0;z-index:50;box-shadow:0 1px 0 rgba(0,0,0,.02);
+  }
+  nav.toc .wrap{display:flex;flex-wrap:wrap;gap:4px;padding:10px 24px}
+  nav.toc a{
+    font-size:13px;font-weight:600;color:var(--ink-soft);text-decoration:none;
+    padding:6px 11px;border-radius:8px;white-space:nowrap;
+  }
+  nav.toc a:hover{background:var(--brand-soft);color:var(--brand)}
+
+  /* ---------- sections ---------- */
+  section{padding:56px 0 8px}
+  section h2{
+    font-size:29px;font-weight:800;letter-spacing:-.01em;margin-bottom:8px;
+    display:flex;align-items:center;gap:12px;
+  }
+  section h2 .num{
+    flex:0 0 auto;width:38px;height:38px;border-radius:10px;background:var(--brand);
+    color:#fff;font-size:17px;display:flex;align-items:center;justify-content:center;font-weight:800;
+  }
+  section .sub{color:var(--muted);font-size:17px;margin-bottom:26px;max-width:680px}
+  section h3{font-size:20px;font-weight:750;margin:30px 0 10px}
+  p{margin-bottom:14px}
+  strong{font-weight:700}
+  .lead{font-size:18.5px}
+
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:22px 24px;margin:18px 0;box-shadow:0 1px 2px rgba(20,25,40,.04);
+  }
+  .callout{border-left:4px solid var(--brand);background:var(--brand-soft);
+    padding:16px 20px;border-radius:0 10px 10px 0;margin:20px 0}
+  .callout.gold{border-color:var(--gold);background:var(--gold-soft)}
+  .callout.red{border-color:var(--red);background:var(--red-soft)}
+  .callout.blue{border-color:var(--blue);background:var(--blue-soft)}
+  .callout .t{font-weight:750;margin-bottom:4px}
+
+  /* ---------- flow diagram ---------- */
+  .flow{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch;margin:22px 0}
+  .flow .step{
+    flex:1 1 150px;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;padding:14px 14px;position:relative;min-width:140px;
+  }
+  .flow .step .ic{font-size:22px;margin-bottom:6px}
+  .flow .step .nm{font-weight:750;font-size:14.5px;margin-bottom:2px}
+  .flow .step .ds{font-size:12.5px;color:var(--muted);line-height:1.4}
+  .flow .arrow{align-self:center;color:var(--brand);font-size:20px;font-weight:800}
+
+  /* ---------- layer stack ---------- */
+  .layers{margin:24px 0;display:flex;flex-direction:column;gap:10px}
+  .layer{
+    display:flex;gap:16px;align-items:flex-start;border:1px solid var(--line);
+    border-radius:12px;padding:16px 18px;background:var(--card);
+  }
+  .layer .tag{
+    flex:0 0 auto;font-size:12px;font-weight:800;color:#fff;border-radius:8px;
+    padding:5px 10px;letter-spacing:.03em;white-space:nowrap;margin-top:2px;
+  }
+  .layer .body .nm{font-weight:750;font-size:16px}
+  .layer .body .ds{font-size:14.5px;color:var(--ink-soft);margin-top:2px}
+  .l1{background:var(--blue)} .l2{background:var(--purple)} .l3{background:var(--gold)}
+  .l4{background:var(--red)} .l5{background:#2e7d32} .l6{background:#455a64}
+
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14.5px;background:var(--card)}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f4f2ec;font-weight:750;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft)}
+  tr:last-child td{border-bottom:none}
+  td code, p code, li code{
+    font-family:var(--mono);font-size:.86em;background:#f1efe8;border:1px solid #e3e0d5;
+    padding:1px 6px;border-radius:6px;color:#5a3e00;white-space:nowrap;
+  }
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px}
+  .pill.yes{background:#e3f1ed;color:#0f6f5c}
+  .pill.no{background:var(--red-soft);color:var(--red)}
+  .pill.maybe{background:var(--gold-soft);color:var(--gold)}
+
+  ul.clean{margin:8px 0 16px 4px;list-style:none}
+  ul.clean li{padding-left:26px;position:relative;margin-bottom:9px}
+  ul.clean li:before{content:"→";position:absolute;left:0;color:var(--brand);font-weight:800}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+  .mini{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;
+  }
+  .mini .h{font-weight:750;font-size:15px;margin-bottom:5px;display:flex;align-items:center;gap:8px}
+  .mini .b{font-size:14px;color:var(--ink-soft)}
+
+  .big-num{font-size:34px;font-weight:800;color:var(--brand);letter-spacing:-.01em}
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;margin:20px 0}
+  .stat{flex:1 1 180px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .stat .v{font-size:26px;font-weight:800;color:var(--brand)}
+  .stat .k{font-size:13px;color:var(--muted);margin-top:3px}
+
+  footer{margin-top:64px;background:#10241e;color:#cfe3dc;padding:36px 0;font-size:14px}
+  footer .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px}
+  .top-link{font-size:13px;font-weight:700;color:var(--brand);text-decoration:none}
+  hr.soft{border:none;border-top:1px solid var(--line);margin:34px 0}
+  .caption{font-size:13px;color:var(--muted);margin-top:-8px;margin-bottom:18px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="kicker">Payment Failure Recovery Engine · Architecture Guide</div>
+    <h1>When a payment fails, this system decides what to do next — carefully.</h1>
+    <p class="lede">
+      It figures out <strong>whether</strong> to retry, <strong>when</strong> to retry, and
+      <strong>on which payment method</strong> — using AI for the judgment, but wrapping that AI
+      in hard, non-negotiable safety rules so it can never do something reckless with real money.
+    </p>
+    <div class="badges">
+      <span class="badge">Python · FastAPI</span>
+      <span class="badge">PostgreSQL</span>
+      <span class="badge">Claude / GPT + XGBoost</span>
+      <span class="badge">Razorpay</span>
+      <span class="badge">Streamlit dashboard</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#problem">The problem</a>
+    <a href="#idea">The big idea</a>
+    <a href="#journey">A payment's journey</a>
+    <a href="#layers">The six layers</a>
+    <a href="#actions">The 5 actions</a>
+    <a href="#safety">Safety rules</a>
+    <a href="#chasers">The four chasers</a>
+    <a href="#data">The data</a>
+    <a href="#scheduler">The heartbeat</a>
+    <a href="#page">Customer page</a>
+    <a href="#proof">Proving it works</a>
+    <a href="#failures">What can go wrong</a>
+    <a href="#stack">Tech stack</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<!-- ============ PROBLEM ============ -->
+<section id="problem">
+  <h2><span class="num">1</span>The problem this solves</h2>
+  <p class="sub">Failed payments are not rare, and they are not hopeless.</p>
+
+  <p class="lead">
+    In India, roughly 1 in 8 online payments fails. The money isn't gone — the customer usually
+    still wants the thing. The payment just tripped over something: an OTP screen they abandoned,
+    a bank that was briefly down, a card that hit its daily limit, a UPI request they forgot to approve.
+  </p>
+  <p>
+    Most shops respond with a <strong>dumb fixed schedule</strong>: retry the same charge three times,
+    fifteen minutes apart, on the same card. That's wasteful and sometimes rude. Retrying a
+    <em>stolen card</em> or a <em>fraud block</em> is pointless and risky. Retrying a bank that's
+    still down just fails again. And hammering a customer who simply ran out of balance doesn't
+    magically refill their account.
+  </p>
+  <div class="callout">
+    <div class="t">The goal</div>
+    Replace blind retries with a decision that understands <em>why</em> the payment failed —
+    and then prove, with numbers, that the smarter approach recovers more money with fewer attempts.
+  </div>
+  <div class="stat-row">
+    <div class="stat"><div class="v">+₹11.7L</div><div class="k">extra net revenue per ₹1 crore of failed volume, vs. a fixed 3-retry baseline</div></div>
+    <div class="stat"><div class="v">−15%</div><div class="k">fewer retry attempts needed</div></div>
+    <div class="stat"><div class="v">0%</div><div class="k">false retries (retrying things that should never be retried)</div></div>
+  </div>
+  <p class="caption">These aren't hand-picked numbers — they come from the built-in evaluation harness. More on that below.</p>
+</section>
+
+<!-- ============ BIG IDEA ============ -->
+<section id="idea">
+  <h2><span class="num">2</span>The big idea: AI in a straitjacket</h2>
+  <p class="sub">The single most important design decision in the whole system.</p>
+
+  <p class="lead">
+    An LLM is great at judgment — "this looks like a bank outage, wait an hour" — but you should
+    never let one <em>directly move money</em>. So this system sandwiches the AI between two layers
+    of boring, predictable code:
+  </p>
+
+  <div class="flow">
+    <div class="step"><div class="ic">🔒</div><div class="nm">Deterministic<br>(before)</div><div class="ds">Verify the webhook, dedupe it, classify the error with a lookup table. No AI needed for any of this.</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><div class="ic">🧠</div><div class="nm">The AI<br>(constrained)</div><div class="ds">Picks exactly one of 5 fixed actions. It cannot invent anything new or run anything itself.</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><div class="ic">🛡️</div><div class="nm">Deterministic<br>(after)</div><div class="ds">A guardrail checks the choice against 8 hard rules. Only then does anything touch the payment gateway.</div></div>
+  </div>
+
+  <p>
+    Think of it like a hospital. The AI is a talented junior doctor who can <em>recommend</em> a
+    treatment, but they work from a fixed menu of approved options, and every prescription must be
+    signed off by a strict attending physician before it reaches the patient. The junior doctor never
+    touches the medicine cabinet directly.
+  </p>
+
+  <div class="callout gold">
+    <div class="t">Why both sides are deterministic</div>
+    <strong>Before the AI:</strong> anything a simple lookup table can solve, a lookup table solves.
+    Calling an LLM to read a structured error code like <code>insufficient_funds</code> is slow,
+    costly, and fragile.<br>
+    <strong>After the AI:</strong> the AI can hallucinate. The guardrail is the safety net that catches
+    a bad idea <em>before</em> any money moves.
+  </div>
+</section>
+
+<!-- ============ JOURNEY ============ -->
+<section id="journey">
+  <h2><span class="num">3</span>Follow one failed payment, end to end</h2>
+  <p class="sub">The whole system in a single story.</p>
+
+  <p>
+    Priya tries to buy something for ₹2,500 with her card. The bank's OTP page times out and the
+    payment fails. Here's what happens next, step by step:
+  </p>
+
+  <div class="layers">
+    <div class="layer"><span class="tag l1">1 · INGEST</span>
+      <div class="body"><div class="nm">Razorpay sends a webhook</div>
+      <div class="ds">The system first checks the message really is from Razorpay (a cryptographic signature), then checks it hasn't already seen this exact event, then saves it. It replies "got it" in under 10 milliseconds and does the heavy lifting in the background — so Razorpay is never kept waiting.</div></div>
+    </div>
+    <div class="layer"><span class="tag l2">2 · CLASSIFY</span>
+      <div class="body"><div class="nm">What kind of failure is this?</div>
+      <div class="ds">A lookup table reads the error code and labels it — here, <code>3ds_dropoff</code> (customer abandoned the OTP step). This is also where fraud and stolen cards get flagged as "never retry" and are quietly abandoned <em>before</em> the AI is even called.</div></div>
+    </div>
+    <div class="layer"><span class="tag l3">3 · DECIDE</span>
+      <div class="body"><div class="nm">The AI picks an action</div>
+      <div class="ds">The policy agent sees the full context — failure type, amount, time of day, how many times Priya has already been contacted — and chooses one of five actions. For an OTP drop-off it might say: <em>"switch to UPI and nudge her, since UPI has no OTP step."</em></div></div>
+    </div>
+    <div class="layer"><span class="tag l4">4 · GUARDRAIL</span>
+      <div class="body"><div class="nm">The safety check</div>
+      <div class="ds">Eight rules inspect the choice: Is it past 11 PM? Has she been contacted too many times? Is the amount over the ceiling? Is there an idempotency key? If <em>any</em> rule fails, the action is blocked and the reason is written down.</div></div>
+    </div>
+    <div class="layer"><span class="tag l5">5 · MESSAGE</span>
+      <div class="body"><div class="nm">Write a friendly note</div>
+      <div class="ds">If the customer needs to be nudged, a short message (≤160 characters, SMS-sized) is generated — by the AI if it's available, otherwise from a ready-made template. It never blocks the decision.</div></div>
+    </div>
+    <div class="layer"><span class="tag l6">6 · EXECUTE / SCHEDULE</span>
+      <div class="body"><div class="nm">Act on it</div>
+      <div class="ds">The system creates a Razorpay Payment Link and sends it. Or, if the AI said "wait 4 hours," the attempt is parked and the scheduler fires it later — re-checking all the safety rules at that moment, because Priya might have opted out in the meantime.</div></div>
+    </div>
+  </div>
+
+  <p>
+    When Priya eventually pays the link, a <code>payment.captured</code> webhook comes back. The
+    system matches it to the case, marks the money as recovered, and — crucially — records whether
+    <em>our</em> link earned it or whether she would have paid anyway. That honesty is what makes the
+    headline numbers trustworthy.
+  </p>
+</section>
+
+<!-- ============ LAYERS ============ -->
+<section id="layers">
+  <h2><span class="num">4</span>The six layers, in a little more depth</h2>
+  <p class="sub">Each layer has one job and hands off to the next.</p>
+
+  <h3>Layer 1 — Ingestion <span style="color:var(--muted);font-weight:500">(<code>src/ingestion/</code>)</span></h3>
+  <p>
+    The front door. Two kinds of events arrive here: <strong>Razorpay webhooks</strong> (a payment
+    failed or was captured) and <strong>merchant-pushed risk events</strong> (more on those in the
+    <a href="#chasers">chasers</a> section). Every event goes through the same three checks:
+  </p>
+  <ul class="clean">
+    <li><strong>Signature verification</strong> — an HMAC-SHA256 check proves the message really came from Razorpay (or the merchant) and wasn't tampered with. An empty or missing secret means <em>everything is rejected</em> — the system fails closed, not open.</li>
+    <li><strong>Idempotency (dedup)</strong> — webhooks get delivered more than once. A unique table makes sure the same event is only ever processed once.</li>
+    <li><strong>Append-only event store</strong> — the raw event is saved <em>before</em> the system says "OK." If the process crashes a moment later, nothing is lost; a background sweep picks it up.</li>
+  </ul>
+
+  <h3>Layer 2 — Classifier <span style="color:var(--muted);font-weight:500">(<code>src/classifier/</code>)</span></h3>
+  <p>
+    Translates Razorpay's raw error codes into a clean <strong>failure taxonomy</strong> — about 14
+    named classes like <code>insufficient_funds</code>, <code>bank_downtime</code>,
+    <code>3ds_dropoff</code>, <code>fraud_block</code>. Each class carries three yes/no flags:
+    is it retryable? is it a hard decline (never retry)? would switching payment method help?
+    This is pure lookup + rules loaded from a YAML file — deliberately no AI.
+  </p>
+
+  <h3>Layer 3 — Policy Agent <span style="color:var(--muted);font-weight:500">(<code>src/agent/</code>)</span></h3>
+  <p>
+    The brain. It's handed a <code>FailureContext</code> — everything known about this failure and
+    this customer — and must return one of <a href="#actions">five fixed actions</a> as structured
+    JSON. Two implementations exist: an <strong>LLM agent</strong> (Claude or GPT) for real judgment,
+    and an <strong>XGBoost model</strong> as a fast, cheap fallback. If the LLM is down, times out,
+    or returns nonsense, the system silently falls back to XGBoost and <em>records that it did so</em>
+    — a counter makes the degradation visible instead of pretending the AI answered.
+  </p>
+
+  <h3>Layer 4 — Guardrail Gate <span style="color:var(--muted);font-weight:500">(<code>src/guardrail/</code>)</span></h3>
+  <p>
+    The strict attending physician. It runs <em>after</em> the AI decides and <em>before</em> anything
+    executes. It validates the output schema and checks <a href="#safety">8 business rules</a>.
+    It never short-circuits: it checks <strong>all</strong> rules and reports <strong>all</strong>
+    violations, so the audit log shows the complete picture, not just the first problem.
+  </p>
+
+  <h3>Layer 5 — Messaging <span style="color:var(--muted);font-weight:500">(<code>src/messaging/</code>)</span></h3>
+  <p>
+    Writes the customer-facing nudge. Tries the LLM with a tight 3-second timeout; if that fails it
+    uses a Jinja2 template. It's careful with words: for an abandoned cart it will never say
+    "your payment failed," because no payment was ever attempted. The message rides along as the
+    Payment Link's checkout description so the customer actually sees it.
+  </p>
+
+  <h3>Layer 6 — Scheduler <span style="color:var(--muted);font-weight:500">(<code>src/scheduler.py</code>)</span></h3>
+  <p>
+    The heartbeat that makes "wait and retry later" actually happen. It's a simple loop inside the
+    same process (no Celery, no message broker) that wakes every 60 seconds and runs
+    <a href="#scheduler">eight cleanup sweeps</a>. Without it, deferred retries would be written to
+    the database and simply never fire.
+  </p>
+</section>
+
+<!-- ============ ACTIONS ============ -->
+<section id="actions">
+  <h2><span class="num">5</span>The only five things the AI can choose</h2>
+  <p class="sub">A fixed menu. Anything off-menu is rejected automatically.</p>
+
+  <table>
+    <tr><th>Action</th><th>What it means</th><th>Typical use</th></tr>
+    <tr><td><code>retry_now</code></td><td>Charge again immediately</td><td>Transient network or gateway glitch</td></tr>
+    <tr><td><code>retry_at</code></td><td>Charge again at a specific time</td><td>Bank downtime — wait for it to recover</td></tr>
+    <tr><td><code>switch_rail</code></td><td>Retry on a different payment method</td><td>OTP drop-off → suggest UPI; card limit → suggest UPI/netbanking</td></tr>
+    <tr><td><code>nudge_customer</code></td><td>Send the customer a message with a link</td><td>Insufficient funds; UPI request they forgot to approve</td></tr>
+    <tr><td><code>abandon</code></td><td>Give up — do nothing</td><td>Fraud, stolen card, customer cancelled, or too risky</td></tr>
+  </table>
+
+  <div class="callout blue">
+    <div class="t">Why a fixed menu matters</div>
+    The AI's output is validated by Pydantic against a strict schema. If it invents a sixth action,
+    returns malformed JSON, or adds extra fields, the answer is rejected and the system falls back
+    safely. Freeform output is never accepted — that's the difference between an assistant and a liability.
+  </div>
+</section>
+
+<!-- ============ SAFETY ============ -->
+<section id="safety">
+  <h2><span class="num">6</span>What stops it doing something stupid with real money</h2>
+  <p class="sub">This is the first question any fintech reviewer asks. Here's the honest answer.</p>
+
+  <table>
+    <tr><th>#</th><th>Rule</th><th>Default</th></tr>
+    <tr><td>1</td><td><strong>Hard-decline blocklist.</strong> Fraud, stolen cards, and permanent declines are caught <em>before</em> the AI is ever called.</td><td>—</td></tr>
+    <tr><td>2</td><td><strong>Max retries per payment.</strong> One payment can only be retried so many times.</td><td>3</td></tr>
+    <tr><td>3</td><td><strong>Max retries per customer per 24h.</strong> Stops one unlucky person being hammered across many payments.</td><td>5</td></tr>
+    <tr><td>4</td><td><strong>Amount ceiling.</strong> Large amounts need explicit consent, not automatic retry.</td><td>₹50,000</td></tr>
+    <tr><td>5</td><td><strong>Consent window.</strong> Stop chasing after this long.</td><td>72 hours</td></tr>
+    <tr><td>6</td><td><strong>Nudge rate limit.</strong> Max messages per customer per day.</td><td>2 / day</td></tr>
+    <tr><td>7</td><td><strong>Time-of-day blackout.</strong> No retries in the middle of the night (bank success rates crater anyway).</td><td>11 PM – 7 AM IST</td></tr>
+    <tr><td>8</td><td><strong>Idempotency key required.</strong> Every attempt carries a unique, deterministic key so a replayed webhook can't create a second charge.</td><td>always</td></tr>
+  </table>
+
+  <h3>Beyond the eight rules — the deeper safety machinery</h3>
+  <div class="grid2">
+    <div class="mini"><div class="h">🛡️ No short-circuiting</div><div class="b">All rules are checked and all violations reported, so the audit trail is complete — not just the first failure.</div></div>
+    <div class="mini"><div class="h">🔁 Write-ahead logging</div><div class="b">The attempt is saved to the database <em>before</em> Razorpay is called. If we crash mid-call, there's a record, and we can't accidentally charge twice.</div></div>
+    <div class="mini"><div class="h">⏰ Re-check at fire time</div><div class="b">A retry scheduled for 4 hours later is re-validated when it actually fires. If the customer opted out at 11 PM, the 2 AM retry is cancelled — not sent.</div></div>
+    <div class="mini"><div class="h">🌙 Blackout-aware scheduling</div><div class="b">A "retry at 11:05 PM" approved at 10:30 PM gets nudged forward to morning, so it doesn't waste its slot dying at fire time.</div></div>
+    <div class="mini"><div class="h">🧾 Idempotency race fails closed</div><div class="b">If two webhooks race to create the same retry, a database UNIQUE constraint picks one winner <em>before</em> any API call. The loser exits cleanly.</div></div>
+    <div class="mini"><div class="h">📉 Graceful LLM fallback</div><div class="b">If the AI provider is down, XGBoost takes over and a counter records it. The system never blocks, and never pretends the AI answered when it didn't.</div></div>
+  </div>
+</section>
+
+<!-- ============ CHASERS ============ -->
+<section id="chasers">
+  <h2><span class="num">7</span>Beyond failed payments: the four "chasers"</h2>
+  <p class="sub">Not all lost money announces itself with a webhook.</p>
+
+  <p class="lead">
+    A failed card charge is easy — Razorpay tells you about it. But an <strong>abandoned cart</strong>,
+    a <strong>subscription that stopped renewing</strong>, an <strong>overdue invoice</strong>, or a
+    <strong>failed autopay (mandate)</strong> only exist in the merchant's own systems. Nobody sends a
+    webhook for those.
+  </p>
+  <p>
+    So the merchant <em>pushes</em> them to a <code>POST /risks</code> endpoint (also HMAC-signed).
+    The engine opens a "recovery case" and chases it through the <strong>exact same</strong>
+    AI → guardrail → payment-link pipeline. Each type gets its own sensible limits:
+  </p>
+
+  <table>
+    <tr><th>Risk type</th><th>Max contacts</th><th>Consent window</th><th>First touch</th><th>Suggested method</th></tr>
+    <tr><td>Abandoned cart</td><td>2</td><td>48 hours</td><td>after 1 hour</td><td>any</td></tr>
+    <tr><td>Subscription failure</td><td>4</td><td>7 days</td><td>immediately</td><td>UPI</td></tr>
+    <tr><td>Overdue invoice</td><td>4</td><td>30 days</td><td>immediately</td><td>any</td></tr>
+    <tr><td>Failed mandate / autopay</td><td>3</td><td>7 days</td><td>after 24 hours</td><td>UPI</td></tr>
+  </table>
+
+  <div class="callout">
+    <div class="t">One pipeline, five doors in</div>
+    The genius is that these aren't five separate systems. A failed charge, a cold cart, and an overdue
+    invoice are all just "money we might get back." They share one case table, one attempt budget, one
+    set of safety rules, and one recovery flow — they only differ in how they were detected.
+  </div>
+</section>
+
+<!-- ============ DATA ============ -->
+<section id="data">
+  <h2><span class="num">8</span>The data: a ledger built for honesty</h2>
+  <p class="sub">PostgreSQL tables designed so the headline number can't lie.</p>
+
+  <p>
+    The centre of the schema is <code>recovery_cases</code> — one row per unit of money at risk,
+    whatever the source. Everything else hangs off it:
+  </p>
+
+  <table>
+    <tr><th>Table</th><th>What it holds</th></tr>
+    <tr><td><code>webhook_events</code> / <code>risk_events</code></td><td>Append-only log of everything that arrived. Fully replayable.</td></tr>
+    <tr><td><code>payment_failures</code></td><td>The enriched, classified record of a failed payment.</td></tr>
+    <tr><td><code>recovery_cases</code></td><td>The star: money at risk, money recovered, attempt budget, and state (open / recovered / exhausted / abandoned / expired / opted_out).</td></tr>
+    <tr><td><code>retry_attempts</code></td><td>Every attempt with its idempotency key, the AI's decision, whether the guardrail passed, and the outcome.</td></tr>
+    <tr><td><code>retry_ledger</code></td><td>Per-customer tally for rate limits + consent status (granted / opted out).</td></tr>
+    <tr><td><code>promises_to_pay</code></td><td>"I'll pay by Friday" — and whether that promise was kept or broken.</td></tr>
+    <tr><td><code>case_events</code></td><td>Append-only audit trail of <em>everything</em> done to a case. Never edited, never deleted.</td></tr>
+  </table>
+
+  <div class="callout gold">
+    <div class="t">The honesty column: <code>recovered_via_attempt_id</code></div>
+    When money comes back, the system records <em>which of our attempts earned it</em>. If this field
+    is empty, it means the customer paid on their own — that's still a recovery, but the engine
+    doesn't take credit for it. This one column is what separates "we recovered ₹X" from
+    "we can prove our actions recovered ₹X."
+  </div>
+</section>
+
+<!-- ============ SCHEDULER ============ -->
+<section id="scheduler">
+  <h2><span class="num">9</span>The heartbeat: eight sweeps every minute</h2>
+  <p class="sub">A background loop that makes deferred decisions real and cleans up messes.</p>
+
+  <p>
+    The scheduler is an asyncio task living inside the same FastAPI process. Every 60 seconds it runs
+    eight "sweeps." It's deliberately simple — no broker, no second deployment — because at the volume
+    of a single merchant, one indexed poll a minute is plenty.
+  </p>
+
+  <table>
+    <tr><th>Sweep</th><th>What it does, in plain words</th></tr>
+    <tr><td><code>fire_due_retries</code></td><td>"Retry in 4 hours" was said 4 hours ago — fire it now (re-checking safety rules first).</td></tr>
+    <tr><td><code>reconcile_events</code></td><td>A webhook was saved but its background task never ran (crash/deploy). Run it now.</td></tr>
+    <tr><td><code>reconcile_risk_events</code></td><td>Same as above, but for merchant-pushed risk events.</td></tr>
+    <tr><td><code>reconcile_stale_attempts</code></td><td>An attempt was written but we never learned the outcome. Resolve it honestly (fail-closed).</td></tr>
+    <tr><td><code>cancel_links_for_closed_cases</code></td><td>When a case finishes, cancel its payment links so they can't be paid late and double-counted.</td></tr>
+    <tr><td><code>expire_promises</code></td><td>A promise-to-pay date passed with no money. Mark it broken and hand the case back to the chaser.</td></tr>
+    <tr><td><code>chase_due_cases</code></td><td>Find cart/subscription/invoice/mandate cases whose wait is over, and chase them.</td></tr>
+    <tr><td><code>report_due_cases</code></td><td>Count payment-failure cases waiting on their next webhook, so the backlog stays visible.</td></tr>
+  </table>
+
+  <div class="callout blue">
+    <div class="t">A dead-man's switch</div>
+    Every tick stamps a <code>scheduler_heartbeat</code> row. If the scheduler quietly dies, the
+    Operations dashboard notices the heartbeat going stale within a few minutes — instead of nobody
+    realising for days that deferred retries stopped firing.
+  </div>
+</section>
+
+<!-- ============ CUSTOMER PAGE ============ -->
+<section id="page">
+  <h2><span class="num">10</span>The one part customers actually see</h2>
+  <p class="sub">A recovery page, reached by a signed link.</p>
+
+  <p>
+    When the system nudges a customer, it doesn't send a bare "pay me" link. It sends them to a
+    small recovery page (<code>/recover/&lt;token&gt;</code>) that explains what happened, shows the
+    amount, and offers a way to pay. Three rules hold this page together:
+  </p>
+  <ul class="clean">
+    <li><strong>The server decides the state.</strong> The page never guesses. It reads the real case from the database on every request, so a customer who reloads mid-payment sees "still confirming" — the truth — not a made-up answer.</li>
+    <li><strong>Never offer a second payment while the first might still be alive.</strong> A double-tap on a bad connection must not become two charges.</li>
+    <li><strong>Say nothing we don't know.</strong> If a status is genuinely unknown, the page admits it and offers a way forward, instead of picking the optimistic reading.</li>
+  </ul>
+  <p>
+    The link itself is a <strong>signed, expiring token</strong>: unguessable, scoped to exactly one
+    case, valid for about a day, and containing no personal data (because URLs end up in SMS logs and
+    browser history). The page also has a one-click <strong>opt-out</strong> — the customer's stop
+    button — which immediately closes every open case for them. It supports English and Hindi.
+  </p>
+</section>
+
+<!-- ============ PROOF ============ -->
+<section id="proof">
+  <h2><span class="num">11</span>Proving it works: the eval harness</h2>
+  <p class="sub">Almost nobody builds one. This is the loudest signal in the whole project.</p>
+
+  <p class="lead">
+    The team doesn't claim the AI is better — they <em>measure</em> it. A standalone harness
+    simulates ~5,000 failed payments through four policies (no retry, fixed 3-retry, XGBoost, and the
+    LLM agent) across multiple random seeds, and compares the results.
+  </p>
+
+  <h3>The one assumption that matters</h3>
+  <div class="callout">
+    <div class="t">"A retry is not a fresh payment."</div>
+    The payment already failed for a reason, so the bank's normal approval rate tells you little.
+    What matters is the chance the <em>blocker cleared</em>:
+    <div style="font-family:var(--mono);font-size:14px;margin-top:10px;color:var(--ink-soft)">
+      P(retry succeeds) = P(blocker cleared) × P(payment clears once blocker is gone)
+    </div>
+    <div style="margin-top:10px">
+      An earlier version ignored this and reported a fantasy ~73% recovery. The corrected model lands
+      in the 15–30% band that real-world figures show — and a test fails if it drifts out.
+    </div>
+  </div>
+
+  <h3>The result</h3>
+  <table>
+    <tr><th>Policy</th><th>Recovery rate</th><th>False retries</th><th>Net ₹ per ₹1Cr failed</th></tr>
+    <tr><td>No retry</td><td>0%</td><td>0%</td><td>₹0</td></tr>
+    <tr><td>Fixed 3-retry</td><td>19.2%</td><td>8.0%</td><td>₹17.96L</td></tr>
+    <tr><td><strong>XGBoost / rules</strong></td><td><strong>30.2%</strong></td><td><strong>0%</strong></td><td><strong>₹29.66L</strong></td></tr>
+  </table>
+
+  <p>
+    To make sure the difference is real and not luck, the harness uses <strong>common random
+    numbers</strong>: every policy sees the <em>identical</em> scenarios, so outcomes can be compared
+    one-to-one. The verdict: <strong>+11.03 percentage points</strong> recovery with a 95% confidence
+    interval that doesn't touch zero, and <strong>fewer</strong> attempts. Because it recovers more
+    while trying less, it wins at <em>any</em> retry cost — even ₹0.
+  </p>
+  <p class="caption">
+    Honest caveat, stated in the repo itself: the bank simulator is synthetic. The LLM row is also
+    currently blank because the configured API key has no credits — the harness refuses to fill it in
+    with fallback numbers and pretend.
+  </p>
+</section>
+
+<!-- ============ FAILURES ============ -->
+<section id="failures">
+  <h2><span class="num">12</span>What can go wrong — documented, not hidden</h2>
+  <p class="sub">Listing your failure modes reads as senior judgment. Hiding them reads as junior.</p>
+
+  <p>
+    The repo keeps a candid <code>docs/failure_cases.md</code>. A few examples of how the system is
+    designed to fail <em>gracefully</em>:
+  </p>
+
+  <table>
+    <tr><th>Failure</th><th>How the system responds</th></tr>
+    <tr><td>LLM hallucinates / returns garbage</td><td>Schema rejects it, one correction retry, then safe fallback to abandon. Logged for review.</td></tr>
+    <tr><td>LLM provider outage</td><td>XGBoost takes over; a counter records it. No service interruption.</td></tr>
+    <tr><td>Process crashes before a background task runs</td><td>The event was already saved; a reconcile sweep re-runs it next tick.</td></tr>
+    <tr><td>Customer opts out during a deferred wait</td><td>Re-checked at fire time; the scheduled retry is cancelled and audited — not sent.</td></tr>
+    <tr><td>Two webhooks race the same idempotency key</td><td>A UNIQUE constraint picks the winner before any API call; the loser exits cleanly.</td></tr>
+    <tr><td>Crash mid-Razorpay-call</td><td>Write-ahead row survives as "pending," then a sweep resolves it fail-closed. The attempt slot stays spent so nothing is double-charged.</td></tr>
+    <tr><td>Simulator ≠ reality</td><td>Stated plainly as a known limitation, with a path to swap in real bank data.</td></tr>
+  </table>
+</section>
+
+<!-- ============ STACK ============ -->
+<section id="stack">
+  <h2><span class="num">13</span>Tech stack & how to run it</h2>
+  <p class="sub">Boring, proven tools. Nothing exotic.</p>
+
+  <div class="grid2">
+    <div class="mini"><div class="h">🐍 Backend</div><div class="b">Python 3.11+, FastAPI, SQLAlchemy (async), Pydantic v2</div></div>
+    <div class="mini"><div class="h">🗄️ Database</div><div class="b">PostgreSQL (events, failures, retries, ledger). Alembic for migrations.</div></div>
+    <div class="mini"><div class="h">🧠 Intelligence</div><div class="b">Claude / GPT for the policy agent + nudges; XGBoost as the ML baseline/fallback</div></div>
+    <div class="mini"><div class="h">💳 Payments</div><div class="b">Razorpay — webhooks in, Payment Links out (test mode moves no real money)</div></div>
+    <div class="mini"><div class="h">📊 Dashboard</div><div class="b">Streamlit + Plotly — a 6-view operations console, password-gated</div></div>
+    <div class="mini"><div class="h">⏱️ Scheduling</div><div class="b">In-process asyncio loop. No broker. (This is why serverless won't work — the process must stay resident.)</div></div>
+  </div>
+
+  <h3>Run it</h3>
+  <div class="card" style="font-family:var(--mono);font-size:14px;line-height:1.9">
+    cp .env.example .env&nbsp;&nbsp;&nbsp;# add Razorpay test keys + an LLM key<br>
+    ./run.sh&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# build, test, migrate, start API + dashboard + tunnel<br><br>
+    <span style="color:var(--muted)"># watch it work with synthetic traffic:</span><br>
+    python scripts/simulate_webhooks.py --count 24
+  </div>
+  <p>
+    <code>run.sh</code> does the whole job: builds a clean isolated environment, runs the linter +
+    tests + type-checker, trains the XGBoost model if it's missing, starts the API on port 8000 and
+    the dashboard on 8501, and opens a public tunnel — then prints the webhook URL to paste into
+    Razorpay. It refuses to expose anything until all three checks pass.
+  </p>
+
+  <hr class="soft">
+  <p style="color:var(--muted);font-size:15px">
+    <strong>The one-paragraph summary:</strong> This is a recovery engine for failed Indian payments.
+    It ingests webhooks and merchant risk events, classifies each failure with a lookup table, lets a
+    constrained AI pick one of five actions, runs that choice past eight non-negotiable safety rules,
+    then executes it through Razorpay Payment Links — with a background scheduler handling everything
+    deferred, and an eval harness that proves the smart policy beats a dumb fixed retry by a wide,
+    statistically significant margin. The AI does the judging; deterministic code does everything that
+    touches money.
+  </p>
+  <p style="margin-top:18px"><a class="top-link" href="#top" onclick="window.scrollTo({top:0,behavior:'smooth'});return false">↑ Back to top</a></p>
+</section>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>Payment Failure Recovery Engine — Architecture &amp; Working Mechanism</div>
+    <div>Generated from the source code · MIT License</div>
+  </div>
+</footer>
+
+</body>
+</html>

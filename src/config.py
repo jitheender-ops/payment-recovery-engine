@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: SecretStr = SecretStr("")
     razorpay_webhook_secret: SecretStr = SecretStr("")
+    # Signs merchant-pushed risk events (POST /risks: abandoned carts, failed
+    # subscription charges, overdue invoices, failed mandate debits). A
+    # DEDICATED secret, not the Razorpay one: the merchant's systems compute
+    # this HMAC, and a leak of either key must not be a leak of both. Empty
+    # means the /risks surface is OFF and every event is rejected — fail
+    # closed, same as the Razorpay secrets above.
+    risk_webhook_secret: SecretStr = SecretStr("")
     # Per-request timeout for the Razorpay SDK. requests defaults to no timeout
     # at all, so without this a single hung connection blocks a worker forever.
     # Payment-link creation is a fast call; 10s is generous, not tight.
@@ -102,7 +109,14 @@ class Settings(BaseSettings):
     # ── Guardrail Thresholds ─────────────────────────────────────────────
     max_retries_per_payment: int = 3
     max_retries_per_customer_24h: int = 5
-    amount_ceiling_inr: int = 5_000_000  # ₹50,000 in paise
+    # Named in PAISE and valued in paise: the previous name said INR while the
+    # number was paise — one operator-set env var away from a ₹500 ceiling.
+    # The legacy AMOUNT_CEILING_INR env var still loads (AliasChoices) so
+    # existing deployments keep working; new config should use the honest name.
+    amount_ceiling_paise: int = Field(
+        default=5_000_000,  # ₹50,000
+        validation_alias=AliasChoices("amount_ceiling_paise", "amount_ceiling_inr"),
+    )
     consent_window_hours: int = 72
     max_nudges_per_customer_24h: int = 2
     # The window the two rate limits above actually count over. The columns are
@@ -119,6 +133,27 @@ class Settings(BaseSettings):
     escalation_backoff_hours: int = 24
 
     # ── Customer recovery page ───────────────────────────────────────────
+    # Trust X-Forwarded-For when identifying the client for the recovery
+    # page's per-IP rate limits. Set ONLY behind a reverse proxy you control
+    # (Render's LB, nginx, an ALB): the code reads the RIGHTMOST entry, the
+    # one your egress proxy added, which is the only hop a client cannot
+    # forge. The leftmost entry is whatever the client sent, so trusting it
+    # lets an attacker rotate one header value per request and bypass every
+    # limit on the one public unauthenticated surface. With no trusted proxy
+    # (a direct docker deployment) the header is ignored entirely and the
+    # socket peer is used — which is exactly right there.
+    behind_trusted_proxy: bool = False
+    # How many proxies YOU control sit in front of this app. The client IP is
+    # read this many entries from the RIGHT of X-Forwarded-For, because each
+    # trusted hop appends the peer it saw. One hop (a bare Render/ALB/nginx) is
+    # the common case and the default. Get this too LOW behind a two-hop stack
+    # (a CDN in front of the platform LB) and every visitor keys on the same
+    # internal address — one bucket for the whole internet, so the limit stops
+    # being a defence and becomes a denial of service. Too HIGH and you read an
+    # entry the client wrote. Count the hops on the real deployment; a header
+    # with fewer entries than this falls back to the socket peer rather than
+    # trusting a forgeable one.
+    trusted_proxy_hops: int = 1
     # The merchant's display name, shown as the page's trust anchor: an SMS
     # link asking for money with no visible merchant name reads as phishing,
     # and the UPI app studies put interface identity at the top of the trust
@@ -138,6 +173,14 @@ class Settings(BaseSettings):
     # Empty means the page is OFF and every token is rejected. Fail closed, for
     # the same reason api_key and the Razorpay secrets do.
     recovery_link_secret: SecretStr = SecretStr("")
+    # How long a /recover/<token> link stays alive, in hours. The URL is a
+    # bearer credential — it ends up in SMS logs, browser history and backup
+    # archives — so the default is one day, NOT the full consent window.
+    # Nothing in the flow needs the longer life: every nudge mints a FRESH
+    # link, so a shorter life only shrinks the window a leaked URL stays
+    # useful. mint() caps any value at the consent window regardless: a link
+    # must never outlive the engine's own authority to act on the case.
+    recovery_link_ttl_hours: int = 24
     # Absolute origin the customer reaches us on, e.g. https://pay.acme.in —
     # needed because a link inside an SMS cannot be relative. Without it,
     # url_for() returns None and messaging falls back to the raw payment link.

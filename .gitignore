@@ -64,6 +64,7 @@ payment-recovery-engine-main/
 
 # Local Claude Code config — not shared.
 .claude/
+.claude-flow/
 
 # Regenerable knowledge-graph cache (1.6M of content-hashed AST blobs).
 graphify-out/

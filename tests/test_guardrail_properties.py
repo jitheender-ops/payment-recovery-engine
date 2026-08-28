@@ -72,17 +72,17 @@ def test_consent_window_tolerates_naive_datetimes() -> None:
 # ── Amount ceiling ───────────────────────────────────────────────────────
 
 
-@given(amount=st.integers(min_value=0, max_value=S.amount_ceiling_inr))
+@given(amount=st.integers(min_value=0, max_value=S.amount_ceiling_paise))
 def test_every_amount_up_to_the_ceiling_passes(amount: int) -> None:
     passed, _ = RULES.check_amount_ceiling(amount)
     assert passed is True
 
 
 @given(
-    over_by=st.integers(min_value=1, max_value=10_000_000_000 - S.amount_ceiling_inr)
+    over_by=st.integers(min_value=1, max_value=10_000_000_000 - S.amount_ceiling_paise)
 )
 def test_every_amount_above_the_ceiling_fails(over_by: int) -> None:
-    passed, reason = RULES.check_amount_ceiling(S.amount_ceiling_inr + over_by)
+    passed, reason = RULES.check_amount_ceiling(S.amount_ceiling_paise + over_by)
     assert passed is False
     assert "ceiling" in (reason or "").lower()
 

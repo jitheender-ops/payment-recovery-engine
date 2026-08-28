@@ -24,6 +24,7 @@ were never resolved and not one rupee was attributable to the engine.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -111,6 +112,7 @@ CaseEventType = Literal[
     "promise_broken",
     "promise_cancelled",
     "attributed",
+    "overpayment",
     "closed",
     "opted_out",
     "deferred",
@@ -121,6 +123,108 @@ CaseEventType = Literal[
 _TERMINAL: frozenset[str] = frozenset(
     {"recovered", "exhausted", "abandoned", "expired", "opted_out"}
 )
+
+
+def customer_key(
+    *,
+    email: str | None = None,
+    contact: str | None = None,
+    external_id: str | None = None,
+) -> str | None:
+    """
+    The one canonical identity for "this human", shared by both ingestion rails.
+
+    Everything that bounds outreach hangs off this string: the per-customer
+    retry and nudge tallies (retry_ledger.customer_id, UNIQUE) and the opt-out,
+    which closes cases by exact match. Both were derived ad hoc and neither was
+    normalised, so one person routinely held two keys and therefore two of
+    everything:
+
+      * the payment rail keyed on `email or contact` off the webhook, while the
+        risk rail preferred the merchant's own opaque customer_id — so the same
+        person hit by a card decline AND an overdue invoice was two customers
+      * "A@B.com" and "a@b.com" are one inbox and were two keys
+      * "+91 98765 43210" and "+919876543210" are one phone and were two
+
+    Doubling the contact limits is the visible half. The half that matters is
+    the opt-out: a customer who pressed "stop" on their recovery page kept
+    being chased under the sibling identity, which is precisely the failure the
+    button exists to prevent.
+
+    So the CONTACT CHANNEL is the identity, in a fixed order both rails obey —
+    because a contact limit bounds nagging, and nagging happens to an inbox or
+    a phone, not to a merchant's primary key. Email first (the more stable of
+    the two), then phone, then the merchant's id, which is all that is left
+    when there is no contact channel at all.
+
+    The `kind:` prefix keeps the namespaces apart, so a merchant whose customer
+    ids happen to look like email addresses cannot collide with real ones.
+    Returns None when there is nothing identifiable — the caller then skips the
+    ledger entirely, which is the existing behaviour for an anonymous webhook.
+    """
+    if email:
+        # Case-insensitive: the domain always is, and no mail provider anyone
+        # is billing treats the local part as case-sensitive either.
+        cleaned = email.strip().lower()
+        if "@" in cleaned:
+            return f"email:{cleaned}"
+    if contact:
+        # Digits only. "+91 98765-43210", "+919876543210" and "(+91) 9876543210"
+        # are one phone; a bare "9876543210" is genuinely ambiguous about its
+        # country code and stays its own key rather than having one guessed.
+        digits = re.sub(r"\D", "", contact)
+        if len(digits) >= 8:
+            return f"phone:{digits}"
+    if external_id:
+        # Opaque to us, so only whitespace is stripped — case may carry meaning
+        # in the merchant's own namespace.
+        cleaned = external_id.strip()
+        if cleaned:
+            return f"id:{cleaned}"
+    return None
+
+
+def ledger_keys(customer_id: str | None) -> list[str]:
+    """
+    Every key this customer's rows might be stored under, canonical first.
+
+    The canonical form, plus the PRE-migration form of the same identity —
+    the value before the namespace prefix existed. Both are needed because
+    callers now hand over an already-canonical key, so "whatever the caller
+    passed" is no longer the legacy spelling on its own, and a row migration
+    0006 has not reached yet would read as "no ledger". That is not a harmless
+    miss: it hands the customer a FRESH contact budget and loses their consent
+    status, which is the exact failure the canonical key exists to prevent.
+
+    Recovery of the legacy spelling is partial by nature — a phone stored as
+    "+91 98765 43210" canonicalises to "phone:919876543210" and cannot be
+    spelled backwards. Migration 0006 is what actually closes the gap; this
+    covers the deploy window, where the common case (an email, unchanged but
+    for the prefix and case) is recoverable.
+    """
+    canonical = canonical_key(customer_id)
+    if canonical is None:
+        return []
+    keys = [canonical]
+    _, _, bare = canonical.partition(":")
+    for legacy in (customer_id, bare):
+        if legacy and legacy not in keys:
+            keys.append(legacy)
+    return keys
+
+
+def canonical_key(customer_id: str | None) -> str | None:
+    """customer_key() applied to a value that may already be canonical, or legacy."""
+    if not customer_id:
+        return None
+    if customer_id.startswith(("email:", "phone:", "id:")):
+        return customer_id
+    has_at = "@" in customer_id
+    return customer_key(
+        email=customer_id if has_at else None,
+        contact=None if has_at else customer_id,
+        external_id=customer_id,
+    )
 
 
 async def open_case(
@@ -296,9 +400,33 @@ async def attribute_capture(
                             case still matters — otherwise it keeps spending
                             attempt budget chasing money already in the bank.
 
-    Returns the case credited, or None if the capture is unrelated to any case we
-    opened — the common path, since most payments never fail.
+    Returns the case credited, or None if the capture is unrelated to any case
+    we opened — the common path, since most payments never fail. A capture
+    matching a case that is already TERMINAL is an overpayment (a second link
+    paid after the first settled, or an orphaned link paid late): it is logged
+    as an `overpayment` event for manual refund and returned unchanged, never
+    credited twice.
     """
+    # The webhook secret authenticates the SENDER, not the CONTENTS. A leaked
+    # secret, a confused gateway or a bug upstream can hand us any number, and
+    # this function adds it to a running total the dashboard reports as revenue
+    # and the case reads to decide it is settled. So the amount is checked here,
+    # at the point of use, rather than trusted from the parser:
+    #
+    #   * bool before int — in Python a bool IS an int, and True would credit 1
+    #   * a str or dict crashed on `+=` with TypeError, which re-armed the
+    #     event and ate reconcile attempts until the cap
+    #   * <= 0 is not a capture at all. A NEGATIVE amount erases recorded
+    #     recoveries without refunding a rupee; a ZERO one still writes an
+    #     "attributed" audit event and resolves promises as kept, fabricating
+    #     the evidence that money arrived.
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        logger.warning(
+            "Refusing capture %s: amount is not a positive integer (%r)",
+            recovered_ref, amount,
+        )
+        return None
+
     attempt: RetryAttempt | None = None
     if link_id:
         attempt = await _find_attempt(session, RetryAttempt.external_ref == link_id)
@@ -317,6 +445,54 @@ async def attribute_capture(
     if case is None:
         logger.info("Capture %s matched no recovery case", recovered_ref)
         return None
+
+    if case.recovered_ref == recovered_ref:
+        # The same payment id, credited to this case once already — a
+        # redelivery, a reconcile sweep racing the first pass, or a forger.
+        # Crediting again inflates recovered revenue from one real payment,
+        # and on a partially-paid case it can close it as fully recovered.
+        # Checked BEFORE the terminal branch below, because a replay is not an
+        # overpayment: there is no second payment and nothing to refund.
+        #
+        # ponytail: one ref deep — the column holds only the latest. Razorpay
+        # redeliveries are already deduped by event_id at ingestion
+        # (is_duplicate_event); this is the defence-in-depth layer for the
+        # reconcile path. If a case ever takes three or more partial captures,
+        # store the credited refs and test membership instead.
+        logger.warning(
+            "Refusing replayed capture %s on case %s — already credited",
+            recovered_ref, case.id,
+        )
+        return None
+
+    if case.state in _TERMINAL:
+        # Money arrived AFTER the case closed — a payment on a link that was
+        # superseded (another link settled first) or orphaned (its attempt
+        # resolved fail-closed before recording the link id) and cancelled
+        # too late to stop this. Crediting it would double-count recovered
+        # revenue; silently ignoring it would hide a customer's money. The
+        # only honest answers are both: record it loudly as an overpayment —
+        # this is a manual refund, not a recovery — and change nothing else.
+        # The pending-attempt supersede below is skipped on purpose: a
+        # terminal case already resolved its attempts when it closed.
+        log_event(
+            session,
+            case,
+            "overpayment",
+            amount=amount,
+            recovered_ref=recovered_ref,
+            attributed_to_attempt=str(attempt.id) if attempt is not None else None,
+            matched_on=(
+                "link_id" if link_id else "idempotency_key" if idempotency_key else "order_ref"
+            ),
+            reason=f"case already {case.state}: {case.close_reason or 'no reason recorded'}",
+        )
+        logger.warning(
+            "OVERPAYMENT on terminal case %s (%s): %s paise via %s — "
+            "manual refund required",
+            case.id, case.state, amount, recovered_ref,
+        )
+        return case
 
     case.amount_recovered += amount
     case.recovered_ref = recovered_ref
@@ -383,19 +559,51 @@ async def record_opt_out(session: AsyncSession, customer_id: str) -> int:
     Returns the number of cases closed.
     """
     now = datetime.now(UTC)
+    # Normalise before matching. An opt-out that misses the canonical key
+    # closes nothing and silences nobody — see customer_key() for why the two
+    # rails used to disagree about what a customer's key even was.
+    keys = ledger_keys(customer_id)
+    if not keys:
+        logger.warning("Opt-out with no identifiable customer — nothing to close")
+        return 0
+    canonical = keys[0]
     result = await session.execute(
-        select(RetryLedger).where(RetryLedger.customer_id == customer_id)
+        select(RetryLedger)
+        .where(RetryLedger.customer_id.in_(keys))
+        .order_by((RetryLedger.customer_id == canonical).desc())
     )
-    ledger = result.scalar_one_or_none()
+    # first(), not one_or_none(): a legacy row and a canonical row can coexist
+    # until migration 0006 merges them, and an opt-out that raised there would
+    # leave the customer being chased.
+    ledger = result.scalars().first()
     if ledger is None:
-        ledger = RetryLedger(customer_id=customer_id)
+        ledger = RetryLedger(customer_id=canonical)
         session.add(ledger)
+        try:
+            await session.flush()
+        except IntegrityError:
+            # Lost the race to a concurrent opt-out (a double-tap on the
+            # stop button): the customer_id UNIQUE constraint fired. Rolling
+            # back is safe — nothing else has been written in this
+            # transaction yet — and the winner's row is the ledger. Without
+            # this the loser surfaced as a 500 on the one page where a
+            # customer is asking to be left alone.
+            await session.rollback()
+            retried = await session.execute(
+                select(RetryLedger).where(RetryLedger.customer_id.in_(keys))
+            )
+            ledger = retried.scalars().first()
+            if ledger is None:  # pragma: no cover — the winner just committed it
+                raise
     ledger.consent_status = "opted_out"
     ledger.opted_out_at = now
 
+    # Cases too: closing only the canonical key would leave a case opened
+    # before the migration still open, and still being chased, for a customer
+    # who has just pressed stop.
     open_cases = await session.execute(
         select(RecoveryCase).where(
-            RecoveryCase.customer_id == customer_id,
+            RecoveryCase.customer_id.in_(keys),
             RecoveryCase.state == "open",
         )
     )
@@ -408,7 +616,7 @@ async def record_opt_out(session: AsyncSession, customer_id: str) -> int:
         await resolve_promises(session, case, "cancelled", ref=None)
         log_event(session, case, "opted_out", closed_state="opted_out", actor="customer")
         closed += 1
-    logger.info("Opt-out recorded for %s, closed %d open cases", customer_id, closed)
+    logger.info("Opt-out recorded for %s, closed %d open cases", canonical, closed)
     return closed
 
 
@@ -647,6 +855,7 @@ async def due_cases(
     *,
     now: datetime | None = None,
     risk_type: str | None = None,
+    risk_types: tuple[str, ...] | None = None,
     limit: int = 100,
 ) -> list[RecoveryCase]:
     """
@@ -656,6 +865,11 @@ async def due_cases(
     decline announces itself; an overdue invoice, a cold cart and a subscription
     that quietly stopped charging do not, so something has to go looking, and
     `next_action_at` is what it looks at.
+
+    `risk_type` narrows to one type; `risk_types` narrows to a set (the chase
+    sweep wants all four chaser types in ONE oldest-first query, so the
+    longest-waiting case is served first whatever its type). Neither given,
+    every type comes back.
 
     Deliberately excludes cases with `next_action_at IS NULL`. Those are
     webhook-driven — the event is their trigger — and sweeping them would run
@@ -669,6 +883,8 @@ async def due_cases(
     ]
     if risk_type is not None:
         conditions.append(RecoveryCase.risk_type == risk_type)
+    if risk_types is not None:
+        conditions.append(RecoveryCase.risk_type.in_(risk_types))
     result = await session.execute(
         select(RecoveryCase)
         .where(*conditions)

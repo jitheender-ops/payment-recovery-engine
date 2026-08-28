@@ -130,7 +130,47 @@ _UNKNOWN = Explanation(
     True,
 )
 
+# The four chaser-driven risk types (src/chasers/policy.py). Three of these
+# never attempted a payment at all, so the money line says so plainly — and
+# the wording never says "your payment failed", because it didn't.
+_HELD_NOT_CHARGED = (
+    "No money has left your account — nothing was charged."
+)
+_BY_RISK_TYPE: dict[str, Explanation] = {
+    "checkout_abandonment": Explanation(
+        "Your order wasn't completed",
+        _HELD_NOT_CHARGED,
+        "Pay below to finish your order whenever you're ready.",
+        True,
+    ),
+    "subscription_failure": Explanation(
+        "Your subscription renewal didn't go through",
+        _HELD,
+        "Pay below to keep your subscription active.",
+        True,
+    ),
+    "invoice_overdue": Explanation(
+        "This invoice is past due",
+        "No payment has been received for this invoice yet.",
+        "Pay below, or reply to our message if you need more time.",
+        True,
+    ),
+    "mandate_failure": Explanation(
+        "Your autopay debit didn't go through",
+        _HELD,
+        "Pay below, or approve the request in your UPI app if one is pending.",
+        True,
+    ),
+}
 
-def explain(failure_class: str | None) -> Explanation:
-    """The customer-facing reading of a failure class. Never raises."""
+
+def explain(failure_class: str | None, risk_type: str | None = None) -> Explanation:
+    """
+    The customer-facing reading of a failure class or risk type. Never raises.
+
+    For the chaser-driven risk types there is no gateway failure class — the
+    risk type itself names what happened, so it is looked up first.
+    """
+    if risk_type is not None and risk_type in _BY_RISK_TYPE:
+        return _BY_RISK_TYPE[risk_type]
     return _BY_CLASS.get(failure_class or "", _UNKNOWN)

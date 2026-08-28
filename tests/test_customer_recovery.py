@@ -72,6 +72,7 @@ async def _seed(
     attempt_result: str | None = None,
     short_url: str | None = None,
     attempt_age_min: int = 1,
+    failed_at: datetime | None = None,
 ) -> uuid.UUID:
     pid = f"pay_cust_{uuid.uuid4().hex[:8]}"
     async with sm() as session:
@@ -79,7 +80,8 @@ async def _seed(
             payment_id=pid, order_id="order_cust_1", amount=amount, method="card",
             bank="HDFC", error_code="BAD_REQUEST_ERROR", failure_class=failure_class,
             is_retryable=failure_class not in ("fraud_block", "expired_instrument"),
-            webhook_event_id=uuid.uuid4(), failed_at=datetime.now(UTC),
+            webhook_event_id=uuid.uuid4(),
+            failed_at=failed_at or datetime.now(UTC),
         )
         session.add(failure)
         await session.flush()
@@ -150,6 +152,93 @@ def test_the_token_carries_no_pii() -> None:
     token = recovery_link.mint(uuid.uuid4())
     assert token is not None
     assert "@" not in token and "example" not in token
+
+
+def test_the_default_ttl_is_a_day_not_the_whole_consent_window() -> None:
+    """
+    The URL is a bearer credential in SMS logs and browser history. It used to
+    live for the entire 72h consent window; a day is enough (every nudge
+    mints a fresh link), and the consent window remains the hard cap.
+    """
+    token = recovery_link.mint(uuid.uuid4())
+    assert token is not None
+    verified = recovery_link.verify_with_expiry(token)
+    assert verified is not None
+    _, expires_at = verified
+    remaining = expires_at - datetime.now(UTC)
+    assert remaining <= timedelta(hours=24), "default TTL exceeds the one-day default"
+    assert remaining > timedelta(hours=23), "default TTL should be ~24h"
+
+
+def test_an_explicit_ttl_cannot_outlive_the_consent_window() -> None:
+    """The consent window is the engine's authority to act; no link outlives it."""
+    consent_hours = get_settings().consent_window_hours
+    token = recovery_link.mint(uuid.uuid4(), ttl_hours=consent_hours + 100)
+    assert token is not None
+    verified = recovery_link.verify_with_expiry(token)
+    assert verified is not None
+    _, expires_at = verified
+    remaining = expires_at - datetime.now(UTC)
+    # An explicit ttl above the cap is clamped down to it.
+    assert remaining <= timedelta(hours=consent_hours)
+
+
+# ── The consent window on the page itself ────────────────────────────────
+
+
+async def test_a_case_past_the_consent_window_never_offers_payment(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Nothing closes a case when the consent window simply passes — the row
+    stays open until a webhook re-triggers the stopping rule. The page used
+    to render that gap as "payable"; a token's TTL runs from ISSUANCE, so a
+    link minted near the window's end stays open past it. The page must stop
+    offering payment once the window has lapsed, whatever the case row says.
+    """
+    consent_hours = get_settings().consent_window_hours
+    case_id = await _seed(
+        db_sessionmaker,
+        failed_at=datetime.now(UTC) - timedelta(hours=consent_hours + 8),
+    )
+    token = recovery_link.mint(case_id, ttl_hours=consent_hours)
+    assert token is not None
+    body = client.get(f"/recover/{token}").text
+    assert "securely" not in body, "offered payment past the consent window"
+
+
+async def test_pay_is_refused_past_the_consent_window(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """The money path agrees with the page: no link is minted past the window."""
+    monkeypatch.setattr(
+        "src.executor.retry_executor.RetryExecutor", lambda: _FakeLinkExecutor()
+    )
+    consent_hours = get_settings().consent_window_hours
+    case_id = await _seed(
+        db_sessionmaker,
+        failed_at=datetime.now(UTC) - timedelta(hours=consent_hours + 8),
+    )
+    token = recovery_link.mint(case_id, ttl_hours=consent_hours)
+    assert token is not None
+
+    response = client.post(f"/recover/{token}/pay", follow_redirects=False)
+    assert response.status_code == 303
+    assert "rzp.io" not in response.headers.get("location", ""), (
+        "minted a payment link past the consent window"
+    )
+
+    async with db_sessionmaker() as reader:
+        rows = (
+            await reader.execute(
+                select(RetryAttempt).where(
+                    RetryAttempt.idempotency_key.like("selfserve_%")
+                )
+            )
+        ).scalars().all()
+    assert rows == [], "a refused payment must not spend an attempt slot"
 
 
 # ── What the customer sees ───────────────────────────────────────────────
@@ -426,6 +515,71 @@ def _isolated_rate_buckets() -> Iterator[None]:
     customer_routes._RATE_LIMIT_BUCKETS.clear()
     yield
     customer_routes._RATE_LIMIT_BUCKETS.clear()
+
+
+class _FakeRequest:
+    """Just enough of a Request for _client_ip."""
+
+    def __init__(self, headers: dict[str, str], host: str = "203.0.113.9") -> None:
+        self.headers = headers
+
+        class _Client:
+            pass
+
+        self.client = _Client()
+        self.client.host = host  # type: ignore[attr-defined]
+
+
+def test_xff_is_ignored_without_a_trusted_proxy(monkeypatch: Any) -> None:
+    """
+    A direct deployment has no proxy sanitising X-Forwarded-For, so the header
+    is attacker-controlled: trusting it lets one rotated header value per
+    request bypass every per-IP limit. The socket peer is the truth there.
+    """
+    get_settings.cache_clear()
+    monkeypatch.delenv("BEHIND_TRUSTED_PROXY", raising=False)
+    req = _FakeRequest({"x-forwarded-for": "1.2.3.4, 5.6.7.8"}, host="203.0.113.9")
+    assert customer_routes._client_ip(req) == "203.0.113.9"  # type: ignore[arg-type]
+    get_settings.cache_clear()
+
+
+def test_xff_rightmost_entry_is_used_behind_a_trusted_proxy(monkeypatch: Any) -> None:
+    """
+    Behind a proxy we control, the RIGHTMOST entry is the one the egress proxy
+    added — the only hop a client cannot forge. The leftmost is client-supplied
+    spoofing and must never be keyed on.
+    """
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
+    req = _FakeRequest({"x-forwarded-for": "1.2.3.4, 5.6.7.8"}, host="10.0.0.1")
+    assert customer_routes._client_ip(req) == "5.6.7.8"  # type: ignore[arg-type]
+    get_settings.cache_clear()
+
+
+async def test_a_spoofed_leftmost_xff_cannot_evade_the_rate_limit(
+    client: Any,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    The actual exploit: rotate a forged leftmost X-Forwarded-For per request.
+    With no trusted proxy the header is ignored, so every request lands on the
+    same socket-peer bucket and the limit still trips.
+    """
+    get_settings.cache_clear()
+    monkeypatch.delenv("BEHIND_TRUSTED_PROXY", raising=False)
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    assert token is not None
+
+    statuses = [
+        client.get(
+            f"/recover/{token}", headers={"x-forwarded-for": f"9.9.9.{i}"}
+        ).status_code
+        for i in range(customer_routes._PAGE_LIMIT + 1)
+    ]
+    assert statuses[-1] == 429, "rotating a forged XFF header bypassed the limit"
+    get_settings.cache_clear()
 
 
 class _FakeLinkExecutor:

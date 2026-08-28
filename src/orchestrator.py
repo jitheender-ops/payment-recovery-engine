@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -17,15 +18,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src import recovery_link
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
-from src.cases import attach_attempt, close_case, log_event, open_case, stop_reason
+from src.cases import (
+    attach_attempt,
+    canonical_key,
+    close_case,
+    customer_key,
+    ledger_keys,
+    log_event,
+    open_case,
+    stop_reason,
+)
+from src.chasers.policy import RiskPolicy, policy_for
 from src.classifier.mapper import ClassifierMapper
 from src.config import get_settings
 from src.executor.rail_selector import resolve_target_rail
 from src.executor.retry_executor import RetryExecutor
 from src.guardrail.gate import GuardrailGate
-from src.guardrail.rules import IST, clamp_retry_at_out_of_blackout
+from src.guardrail.rules import IST, clamp_retry_at_out_of_blackout, is_in_blackout
 from src.messaging.nudge_generator import NudgeGenerator
-from src.models import PaymentFailure, RecoveryCase, RetryAttempt, RetryLedger, WebhookEvent
+from src.models import (
+    PaymentFailure,
+    RecoveryCase,
+    RetryAttempt,
+    RetryLedger,
+    RiskEvent,
+    WebhookEvent,
+)
+
+if TYPE_CHECKING:
+    from src.agent.xgboost_baseline import XGBoostBaseline
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +77,7 @@ class PaymentRecoveryOrchestrator:
         self._nudge_gen = NudgeGenerator()
         self._executor = RetryExecutor()
         self._agent: PolicyAgent | None = None
+        self._xgboost: XGBoostBaseline | None = None
 
     def _get_agent(self) -> PolicyAgent | None:
         """Lazy-init agent (needs API keys at runtime). None if init failed."""
@@ -65,6 +87,65 @@ class PaymentRecoveryOrchestrator:
             except Exception:
                 logger.warning("Failed to init PolicyAgent — will use XGBoost fallback")
         return self._agent
+
+    def _get_xgboost(self) -> XGBoostBaseline:
+        """Cached baseline: the old path reloaded the model from disk on every
+        fallback decision. Imported lazily so tests that patch the class keep
+        working against a freshly constructed orchestrator."""
+        if self._xgboost is None:
+            from src.agent.xgboost_baseline import XGBoostBaseline
+
+            self._xgboost = XGBoostBaseline()
+        return self._xgboost
+
+    async def _decide_action(
+        self, context: FailureContext, subject: str
+    ) -> tuple[RetryAction, str]:
+        """
+        Agent decision with XGBoost fallback. Returns (action, agent_type).
+
+        agent_type must record who ACTUALLY decided, not who was configured to.
+        PolicyAgent.decide() catches its own LLM errors and returns a heuristic
+        action, so "an agent object exists" says nothing about whether the LLM
+        answered. Comparing its fallback counter across the call is what
+        distinguishes a real LLM decision from a silent degradation — without
+        it the audit trail claims an LLM made calls it never saw.
+
+        Shared by every decision path (live webhook, chaser sweep, fired
+        retry) so the distinction lives in exactly one place.
+        """
+        agent = self._get_agent()
+        action: RetryAction | None = None
+        agent_type = "xgboost"
+        if agent:
+            fallbacks_before = agent.fallback_count
+            try:
+                candidate = await agent.decide(context)
+                if agent.fallback_count == fallbacks_before:
+                    action, agent_type = candidate, "llm"
+                else:
+                    # The LLM degraded. decide() has already swallowed the error
+                    # and handed back its own private heuristic, which abandons
+                    # everything that is not a network error or bank downtime —
+                    # so accepting `candidate` here means a missing API key
+                    # quietly turns the engine into "give up on ~70% of
+                    # recoverable payments".
+                    #
+                    # That is also why the XGBoost path was unreachable in
+                    # practice and the README's "falls back to XGBoost" was not
+                    # true: decide() never raises, so the `except` below never
+                    # fired. The counter told us it degraded; now we act on it.
+                    logger.warning(
+                        "LLM degraded to its internal heuristic — using XGBoost instead: %s",
+                        candidate.reason[:120],
+                    )
+            except Exception:
+                logger.exception("Agent raised, using XGBoost: %s", subject)
+
+        if action is None:
+            action = self._get_xgboost().predict(context)
+            agent_type = "xgboost"
+        return action, agent_type
 
     async def process_payment_failure(
         self, event: WebhookEvent, session: AsyncSession
@@ -151,7 +232,10 @@ class PaymentRecoveryOrchestrator:
             subject_ref=payment_id,
             amount_at_risk=failure_record.amount,
             currency=failure_record.currency,
-            customer_id=failure_record.customer_email or failure_record.customer_contact,
+            customer_id=customer_key(
+                email=failure_record.customer_email,
+                contact=failure_record.customer_contact,
+            ),
             # A day is the natural batch for live traffic, so batch_summary()
             # answers "money recovered across a batch" without anyone having to
             # pass an id. A bulk replay can set its own by opening cases first.
@@ -218,46 +302,26 @@ class PaymentRecoveryOrchestrator:
         # ── Step 5: Build context ─────────────────────────────────────────
         context = await self._build_failure_context(failure_record, session)
 
+        # ── Step 5b: Release the ledger lock before the agent call ────────
+        # _get_ledger() took a FOR UPDATE row lock while the context was
+        # built, and the transaction would otherwise stay open across the LLM
+        # call — up to a minute with the timeout plus the transient retry —
+        # serialising every webhook for this customer behind one inference
+        # call and holding a database connection the whole time. Committing
+        # here persists the failure record and the case (good in itself: the
+        # audit trail exists even if the process dies mid-decision) and
+        # releases the lock. The counts the context carries are re-read fresh
+        # under the lock again below, right before the guardrail runs — so
+        # the serialisation guarantee moves from "hold the lock across the
+        # LLM" to "hold it from validation to commit", which is the span the
+        # TOCTOU actually lives in.
+        await session.commit()
+
         # ── Step 6: Agent decision ────────────────────────────────────────
-        agent = self._get_agent()
-        # agent_type must record who ACTUALLY decided, not who was configured to.
-        # PolicyAgent.decide() catches its own LLM errors and returns a heuristic
-        # action, so "an agent object exists" says nothing about whether the LLM
-        # answered. Comparing its fallback counter across the call is what
-        # distinguishes a real LLM decision from a silent degradation — without
-        # it the audit trail claims an LLM made calls it never saw.
-        from src.agent.xgboost_baseline import XGBoostBaseline
-
-        action = None
-        agent_type = "xgboost"
-        if agent:
-            fallbacks_before = agent.fallback_count
-            try:
-                candidate = await agent.decide(context)
-                if agent.fallback_count == fallbacks_before:
-                    action, agent_type = candidate, "llm"
-                else:
-                    # The LLM degraded. decide() has already swallowed the error
-                    # and handed back its own private heuristic, which abandons
-                    # everything that is not a network error or bank downtime —
-                    # so accepting `candidate` here means a missing API key
-                    # quietly turns the engine into "give up on ~70% of
-                    # recoverable payments".
-                    #
-                    # That is also why the XGBoost path was unreachable in
-                    # practice and the README's "falls back to XGBoost" was not
-                    # true: decide() never raises, so the `except` below never
-                    # fired. The counter told us it degraded; now we act on it.
-                    logger.warning(
-                        "LLM degraded to its internal heuristic — using XGBoost instead: %s",
-                        candidate.reason[:120],
-                    )
-            except Exception:
-                logger.exception("Agent raised, using XGBoost")
-
-        if action is None:
-            action = XGBoostBaseline().predict(context)
-            agent_type = "xgboost"
+        # agent_type must record who ACTUALLY decided, not who was configured
+        # to — see _decide_action, which owns that distinction for every
+        # decision path (live webhook, chaser sweep, fired retry).
+        action, agent_type = await self._decide_action(context, payment_id)
 
         # ── Step 6b: Resolve the target rail ──────────────────────────────
         # Before the guardrail, so Layer 4 validates the action that actually
@@ -307,6 +371,48 @@ class PaymentRecoveryOrchestrator:
         # guarantee has to be enforced at our boundary, not theirs.
         if await self._attempt_exists(idem_key, session):
             logger.info("Attempt %s already executed — skipping (idempotent replay)", idem_key)
+            await session.commit()
+            return
+
+        # ── Step 7b: Re-validate under the lock ───────────────────────────
+        # The lock was released for the agent call, and the world moved in
+        # that window: a capture may have recovered the case, an opt-out may
+        # have closed it, other webhooks may have spent the customer's
+        # tally. (Before the lock was released early, record_opt_out's
+        # ledger write blocked on it until this pipeline committed, which
+        # serialised the two by accident; that accidental guarantee is gone,
+        # so it is replaced by an explicit re-check here.) Re-read the case
+        # and the ledger, re-run the stopping rule, patch the context counts
+        # — the lock then stays held through execution and the ledger bump,
+        # which is the span that actually has to be serialised.
+        await session.refresh(case)
+        fresh_ledger = None
+        if context.customer_id:
+            fresh_ledger = await self._get_ledger(context.customer_id, session)
+            if fresh_ledger is not None:
+                retry_count, nudge_count = self._effective_counts(
+                    fresh_ledger, datetime.now(UTC)
+                )
+                context = context.model_copy(
+                    update={
+                        "retry_count_24h": retry_count,
+                        "nudge_count_24h": nudge_count,
+                    }
+                )
+        stop = stop_reason(case, fresh_ledger)
+        if stop is not None:
+            logger.info(
+                "Case stopped while the agent was deciding: payment=%s reason=%s",
+                payment_id, stop,
+            )
+            log_event(
+                session,
+                case,
+                "deferred" if stop.startswith("next action not due") else "stopped",
+                reason=stop,
+                attempts_used=case.attempts_used,
+                max_attempts=case.max_attempts,
+            )
             await session.commit()
             return
 
@@ -416,6 +522,528 @@ class PaymentRecoveryOrchestrator:
         if customer_id:
             await self._update_retry_ledger(customer_id, action, session)
         await session.commit()
+
+    # ── Chaser-driven risk types ──────────────────────────────────────────
+    # A card decline announces itself through a webhook; an abandoned cart, a
+    # halted subscription, an overdue invoice and a failed mandate debit do
+    # not. Those are pushed to /risks, opened as cases with a next_action_at,
+    # and chased by chase_case() — which runs the SAME pipeline as the payment
+    # rail (agent → guardrail → write-ahead execution → attribution) bounded
+    # by the per-type policy in src/chasers/policy.py. One pipeline, five
+    # doors in.
+
+    async def _latest_risk_event(
+        self, case: RecoveryCase, session: AsyncSession
+    ) -> RiskEvent | None:
+        """The newest risk event that opened/fed this case, for its meta and
+        the customer's email/contact (needed to mint a link days later)."""
+        result = await session.execute(
+            select(RiskEvent)
+            .where(
+                RiskEvent.risk_type == case.risk_type,
+                RiskEvent.reference_id == case.subject_ref,
+            )
+            .order_by(RiskEvent.received_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def _build_case_context(
+        self,
+        case: RecoveryCase,
+        policy: RiskPolicy,
+        session: AsyncSession,
+        *,
+        now: datetime | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> FailureContext:
+        """
+        Assemble a FailureContext from a case with no PaymentFailure behind it.
+
+        The case's opened_at is the consent-window anchor: for a risk type we
+        only learn about when the merchant tells us, "when may we stop chasing"
+        runs from when we started, not from when the money was due.
+        """
+        now = now or datetime.now(UTC)
+
+        retry_count, nudge_count = 0, 0
+        if case.customer_id:
+            ledger_row = await self._get_ledger(case.customer_id, session)
+            if ledger_row:
+                retry_count, nudge_count = self._effective_counts(ledger_row, now)
+
+        prev_attempts = await session.execute(
+            select(RetryAttempt.result)
+            .where(RetryAttempt.recovery_case_id == case.id)
+            .order_by(RetryAttempt.created_at.desc())
+            .limit(5)
+        )
+        previous_outcomes = [r for (r,) in prev_attempts.all() if r]
+
+        local_now = now.astimezone(IST)
+        opened_at = _aware(case.opened_at) or now
+
+        method = "unknown"
+        if isinstance(meta, dict):
+            raw_method = meta.get("method")
+            if isinstance(raw_method, str) and raw_method.strip():
+                method = raw_method.strip()[:50]
+
+        return FailureContext(
+            risk_type=case.risk_type,
+            payment_id=case.subject_ref,
+            order_id=None,
+            failure_class=policy.failure_class,
+            error_code=policy.failure_class.upper(),
+            amount=case.amount_at_risk,
+            currency=case.currency,
+            method=method,
+            customer_id=case.customer_id,
+            retry_count_24h=retry_count,
+            nudge_count_24h=nudge_count,
+            previous_retry_outcomes=previous_outcomes,
+            failed_at=opened_at,
+            current_time=now,
+            hour_of_day=local_now.hour,
+            day_of_week=local_now.weekday(),
+            consent_window_hours=policy.consent_window_hours,
+            risk_meta=meta,
+            is_retryable=True,
+            original_failure_id=None,
+        )
+
+    async def chase_case(
+        self,
+        case: RecoveryCase,
+        session: AsyncSession,
+        *,
+        actor: str = "chaser",
+        now: datetime | None = None,
+    ) -> None:
+        """
+        Run ONE bounded chase step for a chaser-driven case.
+
+        Called by the risk-event background task (first touch) and by the
+        scheduler's chase_due_cases sweep (every later rung). Mirrors the
+        payment rail's discipline exactly: stopping rule before the agent,
+        lock released across the LLM call, re-validation under the lock,
+        guardrail, write-ahead execution, ledger bump.
+        """
+        now = now or datetime.now(UTC)
+        policy = policy_for(case.risk_type)
+        if policy is None:
+            # Not a chaser-driven risk type (payment_failure is webhook-driven;
+            # unknown strings fail closed). The due-case sweep reports these,
+            # never chases them.
+            return
+
+        # Work off this session's own copy of the case. Callers may hand in a
+        # row loaded elsewhere, and the case can also have moved between their
+        # read and this call (closed by opt-out, recovered by a capture); the
+        # re-read is what makes the stopping rule below see the truth.
+        fresh_case = await session.get(RecoveryCase, case.id)
+        if fresh_case is None:  # pragma: no cover — vanished mid-chase
+            return
+        case = fresh_case
+
+        # Money-safety first, same rule as the customer page: never chase
+        # while an earlier attempt may still be alive. A pending write-ahead
+        # row means Razorpay might already have a live link for this case.
+        latest = await session.execute(
+            select(RetryAttempt)
+            .where(RetryAttempt.recovery_case_id == case.id)
+            .order_by(RetryAttempt.created_at.desc())
+            .limit(1)
+        )
+        latest_attempt = latest.scalar_one_or_none()
+        if latest_attempt is not None and latest_attempt.result == "pending":
+            case.next_action_at = now + timedelta(minutes=30)
+            log_event(
+                session, case, "deferred", actor=actor,
+                reason="earlier attempt still pending — not chasing on top of it",
+            )
+            await session.commit()
+            return
+
+        ledger = await self._get_ledger(case.customer_id, session)
+        stop = stop_reason(case, ledger)
+        if stop is not None:
+            log_event(
+                session, case,
+                "deferred" if stop.startswith("next action not due") else "stopped",
+                actor=actor, reason=stop,
+                attempts_used=case.attempts_used, max_attempts=case.max_attempts,
+            )
+            await session.commit()
+            return
+
+        # The consent window is a hard edge, not a guardrail afterthought:
+        # nothing else ever expires an open case, so without this the sweep
+        # keeps knocking past the window, burning budget slots on attempts the
+        # guardrail only rejects — noisy, wasteful, and a case that can never
+        # be chased again stays "open" in every count. Close it as expired
+        # BEFORE spending an agent call or an attempt slot on it.
+        opened = _aware(case.opened_at) or now
+        window_end = opened + timedelta(hours=policy.consent_window_hours)
+        if now > window_end:
+            close_case(
+                case, "expired",
+                f"consent window closed ({policy.consent_window_hours}h "
+                f"from {opened.isoformat()})",
+            )
+            log_event(
+                session, case, "closed", actor=actor,
+                state="expired", reason=case.close_reason,
+            )
+            await session.commit()
+            logger.info(
+                "Case expired past its consent window: case=%s risk=%s",
+                case.id, case.risk_type,
+            )
+            return
+
+        # The blackout is a timing rule, not a case verdict — and the chaser
+        # picks its own moment, unlike the payment rail whose events arrive
+        # when they arrive. Walking into the quiet hours and letting the
+        # guardrail reject the attempt would burn a budget slot on a wall we
+        # knew was there (a cart gone cold at 23:30 could lose both its slots
+        # to blackout rejections without one message going out). Defer to the
+        # window's edge instead: no agent call, no attempt row, budget intact.
+        # The guardrail still validates at execution time — this only stops
+        # the sweep from scheduling into a closed window.
+        if is_in_blackout(now.astimezone(IST).hour):
+            case.next_action_at = clamp_retry_at_out_of_blackout(now)
+            log_event(
+                session, case, "deferred", actor=actor,
+                reason="IST blackout window — deferred to its end",
+                next_action_at=case.next_action_at.isoformat(),
+            )
+            await session.commit()
+            logger.info(
+                "Chase deferred past IST blackout: case=%s until=%s",
+                case.id, case.next_action_at.isoformat(),
+            )
+            return
+
+        event = await self._latest_risk_event(case, session)
+        meta = event.meta if event is not None else None
+        customer_email = event.customer_email if event is not None else None
+        customer_contact = event.customer_contact if event is not None else None
+
+        context = await self._build_case_context(case, policy, session, now=now, meta=meta)
+
+        # Release the ledger lock before the agent call — same reasoning as
+        # step 5b on the payment path. The counts are re-read fresh under the
+        # lock again below, right before the guardrail runs.
+        await session.commit()
+
+        action, agent_type = await self._decide_action(context, case.subject_ref)
+
+        # Resolve the target rail before the guardrail, same as the payment
+        # path: the gate validates the action that actually executes.
+        if action.action == "switch_rail":
+            resolved = resolve_target_rail(
+                context.method, action.rail, context.failure_class
+            )
+            if resolved != action.rail:
+                logger.info(
+                    "Rail override: case=%s agent_chose=%s using=%s",
+                    case.id, action.rail, resolved,
+                )
+                action.rail = resolved
+
+        if action.action == "retry_at" and action.retry_at is not None:
+            action.retry_at = clamp_retry_at_out_of_blackout(action.retry_at)
+
+        # Deterministic idempotency key: (case, attempts_used) fully determines
+        # it, so two workers chasing the same case collide onto the same key
+        # and the UNIQUE constraint hands the attempt to exactly one of them.
+        idem_key = f"chase_{case.risk_type}_{case.subject_ref}_{case.attempts_used}"
+        if await self._attempt_exists(idem_key, session):
+            logger.info("Chase attempt %s already recorded — skipping", idem_key)
+            await session.commit()
+            return
+
+        # Re-validate under the lock: the world moved while the agent decided.
+        await session.refresh(case)
+        fresh_ledger = None
+        if context.customer_id:
+            fresh_ledger = await self._get_ledger(context.customer_id, session)
+            if fresh_ledger is not None:
+                retry_count, nudge_count = self._effective_counts(
+                    fresh_ledger, datetime.now(UTC)
+                )
+                context = context.model_copy(
+                    update={
+                        "retry_count_24h": retry_count,
+                        "nudge_count_24h": nudge_count,
+                    }
+                )
+        stop = stop_reason(case, fresh_ledger)
+        if stop is not None:
+            log_event(
+                session, case,
+                "deferred" if stop.startswith("next action not due") else "stopped",
+                actor=actor, reason=stop,
+                attempts_used=case.attempts_used, max_attempts=case.max_attempts,
+            )
+            await session.commit()
+            return
+
+        guardrail_result = self._guardrail.validate(
+            action, context, idem_key, case.attempts_used
+        )
+
+        attempt = RetryAttempt(
+            payment_failure_id=None,
+            payment_id=None,
+            idempotency_key=idem_key,
+            attempt_number=case.attempts_used + 1,
+            action_type=action.action,
+            target_rail=action.rail,
+            scheduled_at=(
+                action.retry_at.astimezone(UTC) if action.retry_at else None
+            ),
+            agent_reasoning=action.reason,
+            agent_type=agent_type,
+            agent_confidence=action.confidence,
+            guardrail_passed=guardrail_result.passed,
+            guardrail_rejection_reason=(
+                "; ".join(guardrail_result.rejection_reasons)
+                if guardrail_result.rejection_reasons else None
+            ),
+        )
+        attach_attempt(case, attempt)
+
+        if guardrail_result.passed:
+            if action.action == "retry_at" and action.retry_at is not None:
+                attempt.result = "scheduled"
+                session.add(attempt)
+                log_event(
+                    session, case, "deferred", actor=agent_type,
+                    action="retry_at",
+                    scheduled_at=action.retry_at.isoformat(),
+                    reason=action.reason,
+                )
+                # The case's next rung is when the parked retry fires. The
+                # fire sweep re-validates at that moment, same as the payment
+                # rail's deferred retries.
+                case.next_action_at = action.retry_at.astimezone(UTC)
+                await self._update_ledger_and_commit(context.customer_id, action, session)
+                logger.info(
+                    "Chase retry scheduled: case=%s at=%s key=%s",
+                    case.id, action.retry_at.isoformat(), idem_key,
+                )
+                return
+
+            await self._execute_case_and_record(
+                attempt=attempt,
+                case=case,
+                policy=policy,
+                action=action,
+                idem_key=idem_key,
+                actor=agent_type,
+                session=session,
+                customer_email=customer_email,
+                customer_contact=customer_contact,
+            )
+        else:
+            attempt.result = "rejected"
+            logger.warning(
+                "Guardrail rejected chase: case=%s reasons=%s",
+                case.id, guardrail_result.rejection_reasons,
+            )
+
+        session.add(attempt)
+
+        # Where does the ladder go next? attach_attempt already pushed
+        # next_action_at out for a nudge (escalation backoff); every other
+        # outcome needs a floor so the due-case sweep does not re-chase this
+        # case on the very next tick. And if the budget is spent, the case
+        # CLOSES — leaving it open with a stale next_action_at would have the
+        # sweep knocking on a finished case forever.
+        if case.state == "open":
+            if case.attempts_used >= case.max_attempts:
+                close_case(
+                    case, "exhausted",
+                    f"attempt budget spent ({case.attempts_used}/{case.max_attempts})",
+                )
+                log_event(
+                    session, case, "closed", actor=actor,
+                    state="exhausted", reason=case.close_reason,
+                )
+            else:
+                next_at = _aware(case.next_action_at)
+                if next_at is None or next_at <= now:
+                    case.next_action_at = now + timedelta(hours=policy.re_chase_hours)
+
+        if guardrail_result.passed:
+            await self._update_ledger_and_commit(context.customer_id, action, session)
+        else:
+            await session.commit()
+        logger.info(
+            "Chase complete: case=%s risk=%s action=%s guardrail=%s result=%s",
+            case.id, case.risk_type, action.action,
+            guardrail_result.passed, attempt.result,
+        )
+
+    async def _execute_case_and_record(
+        self,
+        *,
+        attempt: RetryAttempt,
+        case: RecoveryCase,
+        policy: RiskPolicy,
+        action: RetryAction,
+        idem_key: str,
+        actor: str,
+        session: AsyncSession,
+        customer_email: str | None,
+        customer_contact: str | None,
+    ) -> None:
+        """
+        Case-driven twin of _execute_and_record: generate any nudge, write the
+        attempt ahead, call Razorpay, record what happened. The write-ahead
+        ordering is the same correctness property — committed BEFORE the
+        Razorpay call, never after — and is not reordered here.
+        """
+        nudge_message: str | None = None
+
+        # Every case action that is not abandon delivers a link, and a link
+        # without a message is a bare demand for money — so the message is
+        # generated for all of them, not just nudge_customer. (The payment
+        # rail generates only for nudge/switch because its retry actions
+        # re-present a charge silently; there is no silent path here.)
+        if action.action != "abandon":
+            try:
+                page = recovery_link.url_for(case.id)
+                next_step = (
+                    f"Check your {policy.subject_noun} and pay securely here: {page}"
+                    if page
+                    else "Please try again using a different payment method."
+                )
+                nudge_message = await self._nudge_gen.generate(
+                    failure_class=policy.failure_class,
+                    amount=case.amount_at_risk,
+                    method="unknown",
+                    next_step=next_step,
+                    customer_name=None,
+                    merchant_name=get_settings().merchant_name or "the merchant",
+                    # The risk type selects honest situation wording — three of
+                    # the four never attempted a payment, and the prompt must
+                    # not open with "your payment failed" for those.
+                    risk_type=case.risk_type,
+                )
+                attempt.nudge_message = nudge_message
+            except Exception:
+                logger.warning("Nudge generation failed — proceeding without nudge")
+
+        if action.action == "abandon":
+            attempt.result = "skipped"
+            return
+
+        # Write-ahead intent log — committed BEFORE the Razorpay call, exactly
+        # as on the payment rail. See _execute_and_record for why this order
+        # is a money-safety property, not a style choice.
+        attempt.result = "pending"
+        attempt.result_details = {"phase": "write_ahead"}
+        session.add(attempt)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Lost the idempotency race to another worker chasing the same
+            # case. The UNIQUE constraint fires BEFORE Razorpay is called; the
+            # winner's attempt is the attempt.
+            await session.rollback()
+            logger.info(
+                "Idempotency race lost on %s — the other worker owns this attempt",
+                idem_key,
+            )
+            return
+
+        try:
+            exec_result = await self._executor.execute_case_action(
+                case=case,
+                action_type=action.action,
+                target_rail=action.rail,
+                idempotency_key=idem_key,
+                nudge_message=nudge_message,
+                customer_email=customer_email,
+                customer_contact=customer_contact,
+            )
+            attempt.executed_at = datetime.now(UTC)
+            attempt.result = "success" if exec_result.get("success") else "failed"
+            attempt.result_details = exec_result
+            link_id = exec_result.get("payment_link_id")
+            if link_id:
+                attempt.external_ref = str(link_id)
+            if nudge_message:
+                attempt.nudge_sent = exec_result.get("nudge_sent", False)
+            channels = exec_result.get("channels") or []
+            attempt.channel = channels[0] if channels else "payment_link"
+
+            if attempt.result == "success" and action.action == "nudge_customer":
+                log_event(
+                    session, case, "escalated", actor=actor,
+                    level=case.escalation_level, channel=attempt.channel,
+                    next_action_at=(
+                        case.next_action_at.isoformat() if case.next_action_at else None
+                    ),
+                )
+            elif attempt.result == "success":
+                log_event(
+                    session, case, "contacted", actor=actor,
+                    action=action.action, channel=attempt.channel,
+                    external_ref=attempt.external_ref,
+                )
+        except Exception:
+            logger.exception("Execution failed for case %s", case.id)
+            attempt.result = "failed"
+            attempt.result_details = {"error": "Execution exception"}
+
+    async def process_risk_event(self, event: RiskEvent, session: AsyncSession) -> None:
+        """
+        Ingestion entry point for a merchant-pushed risk event.
+
+        Opens (or finds) the case with the per-type policy's budget and first
+        touch time, then — for types whose first action is immediate — runs
+        the first chase step right away. Types with a first_action delay are
+        left for the scheduler's chase_due_cases sweep to pick up when their
+        next_action_at arrives.
+        """
+        policy = policy_for(event.risk_type)
+        if policy is None:
+            logger.warning("No chase policy for risk type %s — skipping", event.risk_type)
+            return
+
+        occurred = (
+            event.occurred_at if event.occurred_at.tzinfo is not None
+            else event.occurred_at.replace(tzinfo=UTC)
+        )
+        first_touch = occurred + timedelta(hours=policy.first_action_hours)
+
+        case = await open_case(
+            session,
+            risk_type=event.risk_type,  # type: ignore[arg-type]
+            subject_ref=event.reference_id,
+            amount_at_risk=event.amount,
+            currency=event.currency,
+            # Same precedence as the payment rail (email → phone → merchant id),
+            # so one person hit by both a card decline and an overdue invoice is
+            # ONE customer with one contact budget and one opt-out.
+            customer_id=customer_key(
+                email=event.customer_email,
+                contact=event.customer_contact,
+                external_id=event.customer_id,
+            ),
+            batch_id=datetime.now(UTC).strftime("%Y-%m-%d"),
+            max_attempts=policy.max_attempts,
+            due_at=event.due_at,
+            next_action_at=first_touch,
+        )
+        await session.commit()
+
+        if policy.first_action_hours <= 0:
+            await self.chase_case(case, session, actor="chaser")
 
     async def _execute_and_record(
         self,
@@ -582,7 +1210,9 @@ class PaymentRecoveryOrchestrator:
     ) -> FailureContext:
         """Assemble FailureContext from payment record + DB lookups."""
         now = now or datetime.now(UTC)
-        customer_id = failure.customer_email or failure.customer_contact
+        customer_id = customer_key(
+            email=failure.customer_email, contact=failure.customer_contact
+        )
 
         retry_count, nudge_count = 0, 0
 
@@ -700,26 +1330,43 @@ class PaymentRecoveryOrchestrator:
         """
         The customer's rate-limit and consent row, or None if they have none.
 
-        with_for_update(): the contact limits are checked from a snapshot
-        taken in build_failure_context and bumped only after execution, so
-        two concurrent webhooks for one customer could both read 4/5 and both
-        send — the same TOCTOU shape as the idempotency race, which the UNIQUE
-        constraint closes. There is no constraint equivalent for a tally, so
-        the row lock is what closes it: the read takes the lock and the
-        transaction holds it until its commit, serialising per-customer
-        decisions end to end. Postgres honours it; SQLite ignores it (and is
-        single-writer anyway). The lock is held across the agent call — a
-        second webhook for the SAME customer waits, which is the correct
-        behaviour; a different customer never touches this row.
+        with_for_update(): the contact limits are read, then bumped only
+        after execution, so two concurrent webhooks for one customer could
+        both read 4/5 and both send — the same TOCTOU shape as the
+        idempotency race, which the UNIQUE constraint closes. There is no
+        constraint equivalent for a tally, so the row lock is what closes
+        it. Postgres honours it; SQLite ignores it (and is single-writer
+        anyway).
+
+        The lock is deliberately NOT held across the agent call: the
+        transaction commits before the LLM runs (step 5b) and this method
+        re-reads under the lock afterwards (step 7b), where the case and
+        the counts are re-validated together. The serialised span is
+        validation → execution → ledger bump, which is where the TOCTOU
+        lives; holding it across inference only serialised latency.
         """
-        if not customer_id:
-            return None
-        result = await session.execute(
-            select(RetryLedger)
-            .where(RetryLedger.customer_id == customer_id)
-            .with_for_update()
-        )
-        return result.scalar_one_or_none()
+        # Match the canonical key OR the raw value it came from. Migration
+        # 0006 rewrites persisted rows, but a row written by an older process
+        # mid-deploy — or by a caller still holding a legacy `case.customer_id`
+        # — must not read as "no ledger": that hands the customer a FRESH
+        # contact budget, which is the exact failure the canonical key exists
+        # to prevent. Canonical first, so a migrated row always wins over a
+        # legacy one that outlived it.
+        #
+        # scalars().first(), not scalar_one_or_none(): during that same window
+        # both rows can legitimately exist, and the strict form raised
+        # MultipleResultsFound on the money path rather than picking the right
+        # one.
+        for candidate in ledger_keys(customer_id):
+            result = await session.execute(
+                select(RetryLedger)
+                .where(RetryLedger.customer_id == candidate)
+                .with_for_update()
+            )
+            ledger = result.scalars().first()
+            if ledger is not None:
+                return ledger
+        return None
 
     async def _get_attempt_count(self, payment_id: str, session: AsyncSession) -> int:
         """
@@ -745,13 +1392,24 @@ class PaymentRecoveryOrchestrator:
         self, customer_id: str, action: RetryAction, session: AsyncSession
     ) -> None:
         """Update per-customer rate-limiting ledger."""
+        # Look up with the ORIGINAL value: _get_ledger tries the canonical key
+        # and then the raw one, and canonicalising here first would throw that
+        # raw fallback away — creating a SECOND row beside the legacy one. That
+        # is the split ledger this key exists to prevent, and it would have been
+        # invisible: two rows, each comfortably under its own limit.
+        canonical = canonical_key(customer_id)
+        if canonical is None:
+            return
         ledger = await self._get_ledger(customer_id, session)
 
         now = datetime.now(UTC)
         window = timedelta(hours=get_settings().rate_limit_window_hours)
 
         if ledger is None:
-            ledger = RetryLedger(customer_id=customer_id)
+            # New rows are always canonical. An existing legacy row keeps its
+            # own key — migration 0006 is what rewrites those, and racing it
+            # here could collide with the canonical row it is creating.
+            ledger = RetryLedger(customer_id=canonical)
             session.add(ledger)
 
         if action.action in ("retry_now", "retry_at", "switch_rail"):
@@ -813,3 +1471,9 @@ async def process_payment_failure(event: WebhookEvent, session: AsyncSession) ->
     """Convenience function called by the webhook router."""
     orchestrator = get_orchestrator()
     await orchestrator.process_payment_failure(event, session)
+
+
+async def process_risk_event(event: RiskEvent, session: AsyncSession) -> None:
+    """Convenience function called by the risk-event ingestion router."""
+    orchestrator = get_orchestrator()
+    await orchestrator.process_risk_event(event, session)

@@ -156,9 +156,27 @@ def main() -> int:
 
     by_state: dict[str, list[str]] = defaultdict(list)
     for case in cases:
-        failure = failures.get(case.subject_ref)
-        detail = explain(failure.failure_class if failure else None)
-        state = _view_state(case, attempts.get(case.id), detail.retryable)
+        # Derive the state exactly the way routes.py does, or the labels here
+        # drift from the page: risk cases get their risk-type explanation and
+        # per-type consent window anchored at opened_at, and only the payment
+        # rail ever consults payment_failures (a merchant-chosen subject_ref
+        # colliding with a real payment id must not drag that failure in).
+        if case.risk_type == "payment_failure":
+            failure = failures.get(case.subject_ref)
+            detail = explain(failure.failure_class if failure else None)
+            anchor = failure.failed_at if failure else None
+            window_hours = None
+        else:
+            from src.chasers.policy import policy_for
+
+            policy = policy_for(case.risk_type)
+            detail = explain(None, risk_type=case.risk_type)
+            anchor = case.opened_at
+            window_hours = policy.consent_window_hours if policy else None
+        state = _view_state(
+            case, attempts.get(case.id), detail.retryable,
+            failed_at=anchor, window_hours=window_hours,
+        )
         url = recovery_link.url_for(case.id)
         if url:
             by_state[state].append(url)

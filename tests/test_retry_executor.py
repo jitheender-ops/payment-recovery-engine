@@ -14,8 +14,13 @@ from typing import Any
 import requests
 
 from src.config import get_settings
-from src.executor.retry_executor import RetryExecutor, _TimeoutSession
-from src.models import PaymentFailure
+from src.executor.retry_executor import (
+    RetryExecutor,
+    _TimeoutSession,
+    sanitize_customer_contact,
+    sanitize_customer_email,
+)
+from src.models import PaymentFailure, RecoveryCase
 
 
 def _failure() -> PaymentFailure:
@@ -30,6 +35,284 @@ def _failure() -> PaymentFailure:
         customer_email="test@example.com",
         customer_contact="+919876543210",
     )
+
+
+def _case() -> RecoveryCase:
+    """An unsaved RecoveryCase — enough for execute_case_action, no DB."""
+    return RecoveryCase(
+        risk_type="invoice_overdue",
+        subject_ref="inv_san_1",
+        amount_at_risk=50000,
+        currency="INR",
+        state="open",
+        attempts_used=0,
+        max_attempts=4,
+        escalation_level=0,
+    )
+
+
+# ── Merchant-typed contact data must not be able to kill a chase ─────────
+
+
+def test_the_contact_sanitizers_keep_real_shapes_and_drop_junk() -> None:
+    assert sanitize_customer_email("a@b.co") == "a@b.co"
+    assert sanitize_customer_email(" a@b.co ") == "a@b.co"
+    assert sanitize_customer_email(None) is None
+    assert sanitize_customer_email("nope") is None
+    assert sanitize_customer_email("a@b") is None
+    assert sanitize_customer_email("a b@c.co") is None
+
+    assert sanitize_customer_contact("+919876543210") == "+919876543210"
+    assert sanitize_customer_contact("+91 98765-43210") == "+919876543210"
+    assert sanitize_customer_contact("(022) 4000 1234") == "02240001234"
+    assert sanitize_customer_contact(None) is None
+    assert sanitize_customer_contact("12345") is None
+    assert sanitize_customer_contact("call me maybe") is None
+
+
+async def test_case_link_survives_a_misshapen_email(monkeypatch: Any) -> None:
+    """A typo'd merchant email must not 400 the link call and burn the case's
+    attempt budget — the link mints without a prefilled customer."""
+    executor = RetryExecutor()
+    seen: dict[str, Any] = {}
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        seen["data"] = data
+        return {"id": "plink_san_1", "short_url": "https://rzp.io/i/san"}
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="retry_now",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_0",
+        customer_email="not-an-email",
+        customer_contact="12345",
+    )
+
+    assert result["success"] is True
+    assert result["payment_link_id"] == "plink_san_1"
+    assert seen["data"]["customer"] == {}
+
+
+async def test_case_nudge_skips_notify_for_dropped_contacts(
+    monkeypatch: Any,
+) -> None:
+    """If both contacts are junk the link still mints; notify is skipped
+    instead of firing at a link that carries no customer."""
+    executor = RetryExecutor()
+    notified: list[tuple[str, str]] = []
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "plink_san_2", "short_url": "https://rzp.io/i/san2"}
+
+    def fake_notify(link_id: str, channel: str) -> None:
+        notified.append((link_id, channel))
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+    monkeypatch.setattr(executor._client.payment_link, "notifyBy", fake_notify)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="nudge_customer",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_1",
+        nudge_message="Your invoice is past due.",
+        customer_email="bad",
+        customer_contact="also bad",
+    )
+
+    assert result["success"] is True
+    assert notified == []
+    assert result["channels"] == []
+
+
+async def test_case_nudge_still_notifies_valid_contacts(
+    monkeypatch: Any,
+) -> None:
+    executor = RetryExecutor()
+    notified: list[tuple[str, str]] = []
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "plink_san_3", "short_url": "https://rzp.io/i/san3"}
+
+    def fake_notify(link_id: str, channel: str) -> None:
+        notified.append((link_id, channel))
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+    monkeypatch.setattr(executor._client.payment_link, "notifyBy", fake_notify)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="nudge_customer",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_2",
+        nudge_message="Your invoice is past due.",
+        customer_email="accounts@acme.in",
+        customer_contact="+919876543210",
+    )
+
+    assert result["success"] is True
+    assert notified == [("plink_san_3", "sms"), ("plink_san_3", "email")]
+    assert result["channels"] == ["sms", "email"]
+
+
+# ── A case "retry" that nobody is told about is a dead chase ─────────────
+
+
+async def test_case_retry_delivers_the_link_by_default(monkeypatch: Any) -> None:
+    """Risk types have no instrument to re-present silently — a retry MINTS a
+    link, and a link the customer never hears about recovers nothing while
+    reporting success. Every chase action must therefore deliver it."""
+    executor = RetryExecutor()
+    notified: list[tuple[str, str]] = []
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "plink_deliver_1", "short_url": "https://rzp.io/i/d1"}
+
+    def fake_notify(link_id: str, channel: str) -> None:
+        notified.append((link_id, channel))
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+    monkeypatch.setattr(executor._client.payment_link, "notifyBy", fake_notify)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="retry_now",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_3",
+        nudge_message="Your invoice is past due.",
+        customer_email="accounts@acme.in",
+        customer_contact="+919876543210",
+    )
+
+    assert result["success"] is True
+    assert notified, "a chase retry that never notifies is a dead link"
+    assert result["nudge_sent"] is True
+
+
+async def test_case_retry_keeps_the_target_rail_when_delivering(
+    monkeypatch: Any,
+) -> None:
+    """A switch-to-UPI must stay a UPI-only link even though delivery now
+    routes every action through the nudge path."""
+    executor = RetryExecutor()
+    seen: dict[str, Any] = {}
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        seen["data"] = data
+        return {"id": "plink_deliver_2", "short_url": "https://rzp.io/i/d2"}
+
+    def fake_notify(link_id: str, channel: str) -> None:
+        return None
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+    monkeypatch.setattr(executor._client.payment_link, "notifyBy", fake_notify)
+
+    await executor.execute_case_action(
+        case=_case(),
+        action_type="switch_rail",
+        target_rail="upi",
+        idempotency_key="chase_invoice_overdue_inv_san_1_4",
+        nudge_message="Your invoice is past due.",
+        customer_email="accounts@acme.in",
+    )
+
+    assert seen["data"].get("upi_link") is True
+
+
+async def test_self_serve_retry_does_not_notify(monkeypatch: Any) -> None:
+    """The customer clicked pay themselves and is redirected to the link —
+    notifying them about their own click would be a nudge they never asked
+    for."""
+    executor = RetryExecutor()
+    notified: list[tuple[str, str]] = []
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "plink_self_1", "short_url": "https://rzp.io/i/s1"}
+
+    def fake_notify(link_id: str, channel: str) -> None:
+        notified.append((link_id, channel))
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+    monkeypatch.setattr(executor._client.payment_link, "notifyBy", fake_notify)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="retry_now",
+        target_rail=None,
+        idempotency_key="selfserve_inv_san_1_0",
+        customer_email="accounts@acme.in",
+        customer_contact="+919876543210",
+        notify_customer=False,
+    )
+
+    assert result["success"] is True
+    assert notified == []
+
+
+# ── UPI-only links must not be able to kill a chase ──────────────────────
+
+
+async def test_upi_only_link_falls_back_when_refused(monkeypatch: Any) -> None:
+    """Razorpay refuses upi_link in test mode (and on accounts without the
+    feature). The 400 is about the FLAG, not the payment — the chase must
+    carry on with a generic link and record the downgrade."""
+    import razorpay as _razorpay
+
+    executor = RetryExecutor()
+    seen: list[dict[str, Any]] = []
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        seen.append(data)
+        if data.get("upi_link"):
+            raise _razorpay.errors.BadRequestError(
+                "UPI Payment Links is not supported in Test Mode."
+            )
+        return {"id": "plink_fb_1", "short_url": "https://rzp.io/i/fb"}
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="switch_rail",
+        target_rail="upi",
+        idempotency_key="chase_invoice_overdue_inv_san_1_5",
+        nudge_message="Your invoice is past due.",
+        customer_email="accounts@acme.in",
+        notify_customer=False,
+    )
+
+    assert result["success"] is True
+    assert result["rail_fallback"] is True
+    assert len(seen) == 2
+    assert seen[0].get("upi_link") is True
+    assert "upi_link" not in seen[1]
+
+
+async def test_non_upi_bad_request_still_fails(monkeypatch: Any) -> None:
+    """The fallback is for the UPI flag only — any other 400 must surface,
+    or a genuinely broken request would silently mint the wrong link."""
+    import razorpay as _razorpay
+
+    executor = RetryExecutor()
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        raise _razorpay.errors.BadRequestError("amount must be at least 100")
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+
+    result = await executor.execute_case_action(
+        case=_case(),
+        action_type="retry_now",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_6",
+        notify_customer=False,
+    )
+
+    assert result["success"] is False
+    assert "amount must be at least 100" in str(result["error"])
 
 
 def test_timeout_session_injects_a_default_timeout(monkeypatch: Any) -> None:

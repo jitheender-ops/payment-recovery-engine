@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Payment Recovery Engine — Wireframes</title>
+<style>
+  /* ── Blueprint sheet ────────────────────────────────────────────────
+     Low-fidelity on purpose: grayscale frames, one annotation colour.
+     The only accent is blueprint blue, and it always means the same
+     thing: "this is where the architecture shows through the UI". */
+  :root {
+    --paper: #fbfbfa;
+    --sheet: #ffffff;
+    --ink: #1c1f23;
+    --ink-soft: #5c636b;
+    --line: #2a2e33;
+    --fill-1: #eceef0;   /* placeholder block */
+    --fill-2: #f5f6f7;   /* quiet block */
+    --fill-3: #dfe2e5;   /* emphasized placeholder */
+    --blue: #2456d6;     /* annotations, callouts, code refs */
+    --blue-soft: #eaeffe;
+    --ok: #3d8a5f;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 40px 24px 80px;
+  }
+  .sheet {
+    max-width: 1280px;
+    margin: 0 auto;
+    background: var(--sheet);
+    border: 2px solid var(--line);
+    padding: 40px 48px 56px;
+  }
+
+  /* ── Title block (drawing sheet header) ──────────────────────────── */
+  .titleblock {
+    border: 2px solid var(--line);
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    margin-bottom: 40px;
+  }
+  .titleblock > div { padding: 12px 18px; border-right: 1px solid var(--line); }
+  .titleblock > div:last-child { border-right: none; }
+  .tb-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .tb-value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .tb-value.small { font-size: 13px; font-weight: 500; }
+
+  h2.section {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink);
+    border-bottom: 2px solid var(--line);
+    padding-bottom: 8px;
+    margin: 48px 0 8px;
+  }
+  p.section-note { color: var(--ink-soft); max-width: 760px; margin: 10px 0 24px; }
+  p.section-note code, .anno code, .legend code, td code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--blue);
+    background: var(--blue-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  /* ── Flow map ────────────────────────────────────────────────────── */
+  .flow { overflow-x: auto; padding: 8px 0 4px; }
+  .flow svg { display: block; min-width: 1120px; }
+  .flow-box { fill: var(--fill-2); stroke: var(--line); stroke-width: 1.5; }
+  .flow-box.surface { fill: var(--sheet); stroke-width: 2; }
+  .flow-box.money { fill: var(--blue-soft); stroke: var(--blue); stroke-width: 1.5; }
+  .flow-label { font-family: var(--sans); font-size: 12px; font-weight: 600; fill: var(--ink); }
+  .flow-sub { font-family: var(--mono); font-size: 9.5px; fill: var(--ink-soft); }
+  .flow-sub.blue { fill: var(--blue); }
+  .flow-arrow { stroke: var(--line); stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+  .flow-arrow.blue { stroke: var(--blue); marker-end: url(#arrowBlue); }
+  .flow-edge { font-family: var(--mono); font-size: 9.5px; fill: var(--ink-soft); }
+
+  /* ── Frame grids ─────────────────────────────────────────────────── */
+  .frames {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 32px;
+    margin-top: 24px;
+  }
+  figure.frame { break-inside: avoid; }
+  .frame-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    border-bottom: 2px solid var(--line);
+    padding-bottom: 6px;
+    margin-bottom: 14px;
+  }
+  .frame-no {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--sheet);
+    background: var(--line);
+    padding: 2px 8px;
+  }
+  .frame-title { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
+  .frame-state {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--blue);
+  }
+
+  /* phone chassis */
+  .phone {
+    width: 310px;
+    margin: 0 auto;
+    border: 2px solid var(--line);
+    border-radius: 26px;
+    padding: 10px;
+    background: var(--sheet);
+  }
+  .screen {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--sheet);
+    min-height: 560px;
+    padding: 14px 14px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+  }
+  .statusbar {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--ink-soft);
+    padding: 0 4px 6px;
+    border-bottom: 1px dashed var(--fill-3);
+  }
+
+  /* wireframe building blocks */
+  .wf { border: 1.5px solid var(--line); background: var(--fill-2); padding: 8px 10px; position: relative; }
+  .wf.quiet { border-style: dashed; background: var(--sheet); }
+  .wf.solid { background: var(--fill-1); }
+  .wf.dark { background: var(--line); color: var(--sheet); border-color: var(--line); }
+  .wf.blue { border-color: var(--blue); background: var(--blue-soft); }
+  .wf-label { font-size: 11px; font-weight: 600; }
+  .wf-sub { font-size: 10px; color: var(--ink-soft); margin-top: 2px; }
+  .wf.dark .wf-sub { color: #c7ccd2; }
+  .bar { height: 7px; background: var(--fill-3); margin: 5px 0; }
+  .bar.w60 { width: 60%; } .bar.w80 { width: 80%; } .bar.w40 { width: 40%; }
+  .amount { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+  .amount-label { font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-soft); }
+  .btn {
+    display: block;
+    text-align: center;
+    border: 2px solid var(--line);
+    background: var(--line);
+    color: var(--sheet);
+    font-weight: 700;
+    font-size: 12.5px;
+    padding: 10px;
+  }
+  .btn.ghost { background: var(--sheet); color: var(--ink); border-style: solid; }
+  .btn.none { background: var(--fill-1); color: var(--ink-soft); border: 1.5px dashed var(--ink-soft); font-weight: 500; }
+  .linkish { font-size: 10.5px; color: var(--ink-soft); text-align: center; text-decoration: underline; }
+  .rail {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0;
+    border: 1.5px solid var(--line);
+    background: var(--sheet);
+  }
+  .rail div { padding: 7px 6px; font-size: 9.5px; text-align: center; border-right: 1px solid var(--line); color: var(--ink-soft); }
+  .rail div:last-child { border-right: none; }
+  .rail div.on { background: var(--fill-1); color: var(--ink); font-weight: 700; }
+  .rail div.money-here { background: var(--blue-soft); color: var(--blue); font-weight: 700; }
+  .divider { border-top: 1px dashed var(--fill-3); margin: 2px 0; }
+  .faq { border: 1.5px dashed var(--line); padding: 8px 10px; font-size: 10.5px; }
+  .faq b { font-size: 11px; }
+  .spinner {
+    width: 34px; height: 34px; margin: 6px auto;
+    border: 3px solid var(--fill-3); border-top-color: var(--line);
+    border-radius: 50%;
+  }
+  .receipt-row { display: flex; justify-content: space-between; font-size: 11px; padding: 5px 0; border-bottom: 1px solid var(--fill-1); }
+  .receipt-row span:last-child { font-family: var(--mono); font-size: 10.5px; }
+  .chip {
+    display: inline-block; font-family: var(--mono); font-size: 9px;
+    border: 1px solid var(--line); padding: 1px 6px; background: var(--fill-2);
+  }
+  .chip.blue { border-color: var(--blue); color: var(--blue); background: var(--blue-soft); }
+  .lang { position: absolute; top: 34px; right: 12px; }
+
+  /* callout markers inside frames */
+  .mark {
+    position: absolute;
+    width: 16px; height: 16px;
+    background: var(--blue);
+    color: var(--sheet);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    z-index: 2;
+  }
+
+  /* annotations under a frame */
+  .anno { margin-top: 14px; padding-left: 2px; }
+  .anno li {
+    list-style: none;
+    font-size: 11.5px;
+    color: var(--ink);
+    padding: 4px 0 4px 26px;
+    position: relative;
+    border-top: 1px dotted var(--fill-3);
+  }
+  .anno li:first-child { border-top: none; }
+  .anno li::before {
+    content: attr(data-n);
+    position: absolute; left: 0; top: 5px;
+    width: 16px; height: 16px;
+    background: var(--blue); color: var(--sheet);
+    font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+  }
+  .anno .why { color: var(--ink-soft); }
+
+  /* ── State table ─────────────────────────────────────────────────── */
+  table.state {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 16px;
+    font-size: 12.5px;
+  }
+  table.state th, table.state td {
+    border: 1px solid var(--line);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.state th {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    background: var(--fill-2);
+  }
+  table.state td:first-child { font-weight: 700; white-space: nowrap; }
+
+  /* ── Dashboard frames ────────────────────────────────────────────── */
+  .frames.desk { grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); }
+  .deskwin {
+    border: 2px solid var(--line);
+    background: var(--sheet);
+    min-height: 330px;
+  }
+  .deskbar {
+    display: flex; align-items: center; gap: 6px;
+    border-bottom: 2px solid var(--line);
+    background: var(--fill-2);
+    padding: 6px 10px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--line); background: var(--sheet); }
+  .deskbar .url {
+    flex: 1; margin-left: 8px;
+    font-family: var(--mono); font-size: 10px; color: var(--ink-soft);
+    border: 1px solid var(--fill-3); background: var(--sheet); padding: 2px 8px;
+  }
+  .deskbody { display: grid; grid-template-columns: 150px 1fr; min-height: 296px; }
+  .sidenav { border-right: 1.5px solid var(--line); background: var(--fill-2); padding: 10px 0; }
+  .sidenav div { padding: 6px 12px; font-size: 11px; color: var(--ink-soft); }
+  .sidenav div.on { background: var(--line); color: var(--sheet); font-weight: 600; }
+  .sidenav div.gate { margin-top: 18px; border-top: 1px dashed var(--fill-3); padding-top: 10px; font-family: var(--mono); font-size: 9.5px; }
+  .deskmain { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .tile { border: 1.5px solid var(--line); background: var(--fill-2); padding: 8px; }
+  .tile .n { font-size: 18px; font-weight: 700; }
+  .tile .l { font-family: var(--mono); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-soft); }
+  .funnel { display: flex; flex-direction: column; gap: 4px; }
+  .fstep { border: 1.5px solid var(--line); background: var(--fill-1); padding: 6px 10px; font-size: 11px; display: flex; justify-content: space-between; }
+  .fstep .v { font-family: var(--mono); font-size: 10.5px; }
+  .placeholder-chart {
+    flex: 1; min-height: 90px;
+    border: 1.5px dashed var(--line);
+    background:
+      repeating-linear-gradient(90deg, var(--fill-2) 0 24px, var(--fill-1) 24px 30px);
+    display: flex; align-items: flex-end; justify-content: center; gap: 10px;
+    padding: 10px;
+  }
+  .col { width: 26px; background: var(--fill-3); border: 1px solid var(--line); }
+  .trail { border-left: 2px solid var(--line); margin-left: 6px; padding-left: 14px; display: flex; flex-direction: column; gap: 7px; }
+  .trail .ev { position: relative; font-size: 11px; }
+  .trail .ev::before {
+    content: ""; position: absolute; left: -19px; top: 4px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--sheet); border: 2px solid var(--line);
+  }
+  .trail .ev.money::before { border-color: var(--blue); background: var(--blue-soft); }
+  .trail .ev .meta { font-family: var(--mono); font-size: 9px; color: var(--ink-soft); }
+
+  /* ── Legend ──────────────────────────────────────────────────────── */
+  .legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px 28px; margin-top: 16px; }
+  .legend div { font-size: 12px; display: flex; gap: 10px; align-items: flex-start; }
+  .swatch { flex: none; width: 26px; height: 16px; border: 1.5px solid var(--line); margin-top: 2px; }
+  .swatch.fill1 { background: var(--fill-1); }
+  .swatch.fill2 { background: var(--fill-2); }
+  .swatch.dash { border-style: dashed; background: var(--sheet); }
+  .swatch.dark { background: var(--line); }
+  .swatch.blue { border-color: var(--blue); background: var(--blue-soft); }
+
+  .footnote {
+    margin-top: 48px;
+    border-top: 2px solid var(--line);
+    padding-top: 12px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-soft);
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  @media (max-width: 720px) {
+    .sheet { padding: 20px 16px 40px; }
+    .titleblock { grid-template-columns: 1fr 1fr; }
+    .titleblock > div { border-bottom: 1px solid var(--line); }
+    .frames.desk { grid-template-columns: 1fr; }
+  }
+  @media print {
+    body { background: var(--sheet); padding: 0; }
+    .sheet { border: none; }
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <!-- ══ Title block ══════════════════════════════════════════════════ -->
+  <div class="titleblock">
+    <div>
+      <div class="tb-label">Project</div>
+      <div class="tb-value">Payment Failure Recovery Engine — customer recovery site &amp; ops console</div>
+    </div>
+    <div>
+      <div class="tb-label">Sheet</div>
+      <div class="tb-value small">WIREFRAME · LOW-FI</div>
+    </div>
+    <div>
+      <div class="tb-label">Surfaces</div>
+      <div class="tb-value small">9 mobile · 6 desktop</div>
+    </div>
+    <div>
+      <div class="tb-label">Fidelity</div>
+      <div class="tb-value small">Structure only</div>
+    </div>
+  </div>
+
+  <p class="section-note">
+    Every screen below is derived from the architecture, not invented: the customer page has exactly the
+    states <code>_view_state()</code> in <code>src/customer/routes.py</code> can produce, and the server — never the
+    browser — decides which one renders. Blue numbered markers tie each element to the column, function or
+    rule that drives it. Grayscale is deliberate; colour, type and imagery are later decisions.
+  </p>
+
+  <!-- ══ 0 · Flow map ═════════════════════════════════════════════════ -->
+  <h2 class="section">0 · The flow this site exists inside</h2>
+  <p class="section-note">
+    The customer arrives from an SMS the engine sent, lands on a signed link, and leaves in one of three ways:
+    paid, stopped, or still confirming. Everything upstream of the link is machinery they never see.
+  </p>
+  <div class="flow">
+    <svg width="1160" height="210" viewBox="0 0 1160 210">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="#2a2e33"/>
+        </marker>
+        <marker id="arrowBlue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="#2456d6"/>
+        </marker>
+      </defs>
+
+      <!-- upstream machinery -->
+      <rect class="flow-box" x="10" y="20" width="170" height="58" rx="3"/>
+      <text class="flow-label" x="22" y="42">Razorpay webhook</text>
+      <text class="flow-sub" x="22" y="58">payment.failed</text>
+      <text class="flow-sub blue" x="22" y="70">HMAC-verified · stored</text>
+
+      <rect class="flow-box" x="215" y="20" width="190" height="58" rx="3"/>
+      <text class="flow-label" x="227" y="42">Engine decides</text>
+      <text class="flow-sub" x="227" y="58">classify → agent → guardrail</text>
+      <text class="flow-sub blue" x="227" y="70">write-ahead attempt row</text>
+
+      <rect class="flow-box" x="440" y="20" width="170" height="58" rx="3"/>
+      <text class="flow-label" x="452" y="42">SMS sent</text>
+      <text class="flow-sub" x="452" y="58">nudge · signed link</text>
+      <text class="flow-sub blue" x="452" y="70">/recover/&lt;token&gt;</text>
+
+      <path class="flow-arrow" d="M180,49 L215,49"/>
+      <path class="flow-arrow" d="M405,49 L440,49"/>
+
+      <!-- the site -->
+      <rect class="flow-box surface" x="650" y="12" width="230" height="74" rx="3"/>
+      <text class="flow-label" x="662" y="34">Recovery page · F1/F2</text>
+      <text class="flow-sub" x="662" y="50">state = payable</text>
+      <text class="flow-sub blue" x="662" y="62">server reads recovery_cases</text>
+      <text class="flow-sub blue" x="662" y="74">token = the only credential</text>
+      <path class="flow-arrow" d="M610,49 L650,49"/>
+      <text class="flow-edge" x="612" y="42">tap</text>
+
+      <!-- pay -->
+      <rect class="flow-box money" x="650" y="118" width="230" height="74" rx="3"/>
+      <text class="flow-label" x="662" y="140">POST /pay → Razorpay</text>
+      <text class="flow-sub" x="662" y="156">guardrail subset · reuse link</text>
+      <text class="flow-sub blue" x="662" y="168">303 → hosted checkout</text>
+      <text class="flow-sub blue" x="662" y="180">description = nudge message</text>
+      <path class="flow-arrow" d="M765,86 L765,118"/>
+      <text class="flow-edge" x="772" y="106">Pay button</text>
+
+      <!-- outcomes -->
+      <rect class="flow-box surface" x="950" y="12" width="195" height="52" rx="3"/>
+      <text class="flow-label" x="962" y="32">Confirming · F3</text>
+      <text class="flow-sub blue" x="962" y="48">attempt.result = pending</text>
+      <path class="flow-arrow" d="M880,140 C 930,140 930,38 950,38"/>
+      <text class="flow-edge" x="898" y="100">paid → capture webhook</text>
+
+      <rect class="flow-box surface" x="950" y="80" width="195" height="52" rx="3"/>
+      <text class="flow-label" x="962" y="100">Receipt · F5</text>
+      <text class="flow-sub blue" x="962" y="116">attribute_capture() credited it</text>
+      <path class="flow-arrow" d="M1047,64 L1047,80"/>
+
+      <rect class="flow-box surface" x="950" y="148" width="195" height="52" rx="3"/>
+      <text class="flow-label" x="962" y="168">Stopped / Opted out · F6–F8</text>
+      <text class="flow-sub blue" x="962" y="184">stop_reason() · record_opt_out()</text>
+      <path class="flow-arrow blue" d="M765,86 C 700,120 640,174 660,174 L 660,174"/>
+      <path class="flow-arrow blue" d="M650,70 C 560,120 560,174 950,174"/>
+      <text class="flow-edge" x="600" y="196">opt-out link · window lapses · hard decline</text>
+    </svg>
+  </div>
+
+  <!-- ══ 1 · Customer page frames ═════════════════════════════════════ -->
+  <h2 class="section">1 · Customer recovery page — the seven states and two edges</h2>
+  <p class="section-note">
+    Mobile-first by construction: the reader arrived from an SMS, on a phone, mid-anxiety.
+    Order of elements follows the reader's order of anxiety — <em>is my money gone → what happened → what do I do</em>.
+    One masthead rule: the merchant's name is the trust anchor, so it sits above the amount, never in the footer.
+  </p>
+
+  <div class="frames">
+
+    <!-- F1 · payable (generic) -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F1</span>
+        <span class="frame-title">PAYABLE — GENERIC LINK</span>
+        <span class="frame-state">state="payable"</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>▲ ▮</span></div>
+        <span class="lang chip">EN | हिं</span>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <span class="mark" style="top:-8px; left:-8px">1</span>
+          <div class="amount-label">About your payment to Merchant</div>
+          <div class="amount">₹2,499</div>
+          <div class="wf-sub">No money has left your account.</div>
+        </div>
+        <div class="rail">
+          <div class="on">Your account</div><div>In transit</div><div>Merchant</div>
+        </div>
+        <div class="wf">
+          <span class="mark" style="top:-8px; right:-8px">2</span>
+          <div class="wf-label">What happened</div>
+          <div class="wf-sub">Your bank declined the payment</div>
+          <div class="bar w80"></div><div class="bar w60"></div>
+        </div>
+        <div class="btn">Pay ₹2,499 securely</div>
+        <div class="wf quiet" style="text-align:center">
+          <div class="wf-sub">Payments secured by Razorpay · your card details are never seen or stored by us</div>
+        </div>
+        <div class="faq">
+          <span class="mark" style="top:-8px; left:-8px">3</span>
+          <b>I was charged, but this page says failed</b>
+          <div class="bar w80"></div>
+        </div>
+        <div class="divider"></div>
+        <div class="linkish">This link works until Sat, 28 Aug, 11 AM ⁴</div>
+        <div class="btn ghost">Talk to us on WhatsApp</div>
+        <div class="linkish">Don't contact me about this payment ⁵</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Amount is the first thing they look for; the money line is the actual question.</span> <code>recovery_cases.amount_at_risk</code></li>
+        <li data-n="2"><span class="why">Plain-language reading of the failure class; retryable classes get the CTA below.</span> <code>explain(failure_class)</code></li>
+        <li data-n="3"><span class="why">The one FAQ that prevents a support ticket from a debit-alert scare.</span> static copy</li>
+        <li data-n="4"><span class="why">Honest deadline — the token's real expiry, not a fake countdown.</span> <code>verify_with_expiry(token)</code></li>
+        <li data-n="5"><span class="why">The stop button, on the page itself.</span> <code>POST /optout → record_opt_out()</code></li>
+      </ul>
+    </figure>
+
+    <!-- F2 · payable (UPI recommended) -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F2</span>
+        <span class="frame-title">PAYABLE — UPI RECOMMENDED</span>
+        <span class="frame-state">rail="upi" enforced</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <div class="amount-label">About your payment to Merchant</div>
+          <div class="amount">₹2,499</div>
+          <div class="wf-sub">No money has left your account.</div>
+        </div>
+        <div class="rail">
+          <div class="on">Your account</div><div>In transit</div><div>Merchant</div>
+        </div>
+        <div class="wf">
+          <div class="wf-label">The OTP step wasn't completed</div>
+          <div class="wf-sub">UPI skips the OTP entirely.</div>
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+        </div>
+        <div class="btn">Pay ₹2,499 by UPI</div>
+        <div class="btn ghost" style="margin-top:-4px">Use a different method</div>
+        <div class="wf quiet" style="text-align:center">
+          <div class="wf-sub">Payments secured by Razorpay</div>
+        </div>
+        <div class="divider"></div>
+        <div class="linkish">This link works until Sat, 28 Aug, 11 AM</div>
+        <div class="linkish">Don't contact me about this payment</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">For card drop-off classes the primary verb changes AND the minted link is UPI-only — the recommendation is enforced, not decorative.</span> <code>_recommended_rail()</code> → <code>upi_link=True</code></li>
+        <li data-n="2" style="display:none"></li>
+      </ul>
+    </figure>
+
+    <!-- F3 · confirming -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F3</span>
+        <span class="frame-title">CONFIRMING</span>
+        <span class="frame-state">pending &lt; 15 min</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:43</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <div class="amount-label">₹2,499 to Merchant</div>
+          <div class="wf-label" style="font-size:15px; margin-top:4px">Checking your payment…</div>
+        </div>
+        <div class="spinner"></div>
+        <div class="wf quiet" style="text-align:center">
+          <span class="mark" style="top:-8px; left:-8px">1</span>
+          <div class="wf-sub">This page will check again by itself in a few seconds.</div>
+        </div>
+        <div class="btn ghost">Check again</div>
+        <div class="divider"></div>
+        <div class="faq">
+          <b>I was charged, but this page says failed</b>
+          <div class="wf-sub">…temporary hold, released in 3–5 working days. You are never charged twice for this reference.</div>
+        </div>
+        <div class="btn none" style="margin-top:auto">Pay — hidden while confirming ²</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">One auto re-check (?r=1 stops the loop), then the honest "we'll message you" — never a spinner forever.</span> <code>CONFIRMING_WINDOW = 15 min</code></li>
+        <li data-n="2"><span class="why">The core rule: never offer a second payment while the first might be alive.</span> <code>attempt.result == "pending"</code></li>
+      </ul>
+    </figure>
+
+    <!-- F4 · unknown -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F4</span>
+        <span class="frame-title">STILL UNCONFIRMED</span>
+        <span class="frame-state">pending ≥ 15 min</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>10:02</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <div class="amount-label">₹2,499 to Merchant</div>
+          <div class="wf-label" style="font-size:15px; margin-top:4px">We don't know yet</div>
+        </div>
+        <div class="wf">
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+          <div class="wf-sub">We'll message you the moment it's confirmed. You don't need to do anything.</div>
+        </div>
+        <div class="btn ghost">Check again</div>
+        <div class="divider"></div>
+        <div class="btn ghost">Talk to us on WhatsApp</div>
+        <div class="linkish">quote reference order_cust_1</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Rule 3 of the page: say nothing we don't know. Genuinely unknown gets its own state, not an optimistic guess.</span> age ≥ <code>CONFIRMING_WINDOW</code></li>
+      </ul>
+    </figure>
+
+    <!-- F5 · recovered -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F5</span>
+        <span class="frame-title">RECOVERED — RECEIPT</span>
+        <span class="frame-state">state="recovered"</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>10:04</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <div class="wf-label" style="font-size:15px">Payment received ✓</div>
+          <div class="amount">₹2,499</div>
+        </div>
+        <div class="wf">
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+          <div class="wf-label">Receipt</div>
+          <div class="receipt-row"><span>Amount paid</span><span>₹2,499</span></div>
+          <div class="receipt-row"><span>Payment reference</span><span>pay_SUCCESS99</span></div>
+          <div class="receipt-row"><span>Received on</span><span>27 Aug 2026, 10:04</span></div>
+        </div>
+        <div class="wf quiet" style="text-align:center">
+          <div class="wf-sub">The reference above is the UTR your bank statement will carry.</div>
+        </div>
+        <div class="btn none" style="margin-top:auto">No payment button — ever again ²</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">A confirmation that names nothing is not a receipt: amount, reference, when.</span> <code>recovered_ref · recovered_at</code></li>
+        <li data-n="2"><span class="why">State is read from the case row, which only the capture webhook moves.</span> <code>attribute_capture()</code></li>
+      </ul>
+    </figure>
+
+    <!-- F6 · stopped -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F6</span>
+        <span class="frame-title">STOPPED</span>
+        <span class="frame-state">exhausted · expired · window lapsed</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>10:04</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <div class="wf-label" style="font-size:15px">Still with you</div>
+          <div class="wf-sub">No money has left your account.</div>
+        </div>
+        <div class="wf">
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+          <div class="wf-label">We've stopped chasing this payment</div>
+          <div class="bar w80"></div><div class="bar w60"></div>
+        </div>
+        <div class="wf quiet">
+          <div class="wf-sub">If you still want to pay, reply to our message or reach us below — we just won't nudge you again.</div>
+        </div>
+        <div class="btn ghost">Talk to us on WhatsApp</div>
+        <div class="btn none" style="margin-top:auto">No self-serve button ²</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Budget spent, case expired, or the consent window simply lapsed — the page says so instead of offering a button that would only error.</span> <code>stop_reason()</code></li>
+        <li data-n="2"><span class="why">Minting past the window is acting without authority, so /pay refuses too.</span> <code>check_consent_window()</code></li>
+      </ul>
+    </figure>
+
+    <!-- F7 · not retryable -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F7</span>
+        <span class="frame-title">NOT RETRYABLE</span>
+        <span class="frame-state">fraud_block · hard_decline · expired card</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>10:04</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:14px 10px">
+          <div class="amount-label">About your payment to Merchant</div>
+          <div class="amount">₹2,499</div>
+          <div class="wf-sub">No money has left your account.</div>
+        </div>
+        <div class="wf">
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+          <div class="wf-label">Your bank blocked this payment as a security precaution</div>
+          <div class="wf-sub">Only your bank can clear this. Call the number on the back of your card before trying again.</div>
+        </div>
+        <div class="btn ghost">Talk to us on WhatsApp</div>
+        <div class="btn none" style="margin-top:auto">No retry offered — it would fail again ²</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">The action changes with the class: a fraud block gets the bank's phone number, not a pay button.</span> <code>explain().retryable == False</code></li>
+        <li data-n="2"><span class="why">Same rule in the guardrail: hard declines never reach the executor.</span> <code>check_hard_decline_blocklist()</code></li>
+      </ul>
+    </figure>
+
+    <!-- F8 · opted out -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F8</span>
+        <span class="frame-title">OPTED OUT</span>
+        <span class="frame-state">state="opted_out"</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>10:04</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:16px 10px">
+          <div class="wf-label" style="font-size:15px">We've stopped contacting you</div>
+          <div class="wf-sub">No money has left your account.</div>
+        </div>
+        <div class="wf quiet">
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+          <div class="wf-sub">If you change your mind, reply to any message we sent and we'll pick this up again.</div>
+        </div>
+        <div class="btn none" style="margin-top:auto">Nothing else on this page — by design</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Pressing stop and then being offered payment again is the exact complaint the button exists to prevent — so the page re-renders as this, immediately.</span> <code>record_opt_out()</code> closes every open case</li>
+      </ul>
+    </figure>
+
+    <!-- F9 · expired / forged token -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">F9</span>
+        <span class="frame-title">EXPIRED · FORGED · UNKNOWN</span>
+        <span class="frame-state">404 — one response for all three</span>
+      </div>
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>10:04</span><span>▲ ▮</span></div>
+        <div class="wf quiet" style="margin-top:8px">
+          <div class="wf-label">MERCHANT NAME</div>
+          <div class="wf-sub">Payment recovery</div>
+        </div>
+        <div class="wf solid" style="text-align:center; padding:16px 10px; margin-top:30px">
+          <div class="wf-label" style="font-size:15px">This link has expired</div>
+          <div class="wf-sub">For your security, recovery links only work for a short time.</div>
+        </div>
+        <div class="wf quiet">
+          <span class="mark" style="top:-8px; right:-8px">1</span>
+          <div class="wf-sub">Still need to pay? Reply to the message we sent you, or contact support.</div>
+        </div>
+        <div class="btn ghost">Talk to us on WhatsApp</div>
+      </div></div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Expired, forged and unknown return the SAME page and status — distinguishing them would be an oracle for probing which case ids exist.</span> <code>verify()</code> returns one value for every failure</li>
+      </ul>
+    </figure>
+
+  </div>
+
+  <!-- ══ 2 · State logic ══════════════════════════════════════════════ -->
+  <h2 class="section">2 · Who decides what renders</h2>
+  <p class="section-note">
+    The browser decides nothing. One function reads the database on every request and picks exactly one row of this
+    table — the ordering is the logic, checked top to bottom, first match wins.
+  </p>
+  <table class="state">
+    <tr><th>Order</th><th>State</th><th>Server decides when…</th><th>Page shows</th></tr>
+    <tr><td>1</td><td>recovered</td><td><code>case.state = recovered</code> or <code>amount_recovered ≥ amount_at_risk</code></td><td>Receipt — F5</td></tr>
+    <tr><td>2</td><td>opted_out</td><td><code>case.state = opted_out</code></td><td>Stopped contacting — F8</td></tr>
+    <tr><td>3</td><td>confirming</td><td>latest attempt <code>result = pending</code>, younger than 15 min</td><td>Checking… — F3</td></tr>
+    <tr><td>4</td><td>unknown</td><td>latest attempt <code>result = pending</code>, 15 min or older</td><td>We don't know yet — F4</td></tr>
+    <tr><td>5</td><td>stopped</td><td>case <code>exhausted / abandoned / expired</code>, or consent window lapsed</td><td>Still with you — F6</td></tr>
+    <tr><td>6</td><td>not_retryable</td><td>failure class says retrying is dishonest (<code>explain().retryable = False</code>)</td><td>Call your bank — F7</td></tr>
+    <tr><td>7</td><td>payable</td><td>everything above is false</td><td>Pay button — F1 / F2</td></tr>
+  </table>
+
+  <!-- ══ 3 · Ops console ══════════════════════════════════════════════ -->
+  <h2 class="section">3 · Ops console — the internal surface</h2>
+  <p class="section-note">
+    Streamlit, password-gated, fail-closed: an unset password is a blank console, not an open one.
+    Six views, all reading live data — an empty chart says "nothing yet", a fabricated one would say "here is your business".
+  </p>
+
+  <div class="frames desk">
+
+    <!-- D1 · Overview -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">D1</span>
+        <span class="frame-title">OVERVIEW</span>
+        <span class="frame-state">batch_summary()</span>
+      </div>
+      <div class="deskwin">
+        <div class="deskbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">ops.internal / overview</span></div>
+        <div class="deskbody">
+          <div class="sidenav">
+            <div class="on">Overview</div><div>Recovery funnel</div><div>Bank breakdown</div><div>Case audit</div><div>Operations</div><div>Eval results</div>
+            <div class="gate">🔒 password-gated<br>fail-closed</div>
+          </div>
+          <div class="deskmain">
+            <div class="tiles">
+              <div class="tile"><div class="n">₹4.2L</div><div class="l">At risk</div></div>
+              <div class="tile"><div class="n">₹1.9L</div><div class="l">Recovered</div></div>
+              <div class="tile"><div class="n">₹1.1L</div><div class="l">Attributed ¹</div></div>
+              <div class="tile"><div class="n">212</div><div class="l">Cases</div></div>
+            </div>
+            <div class="wf quiet"><div class="wf-label">Scheduler alive — last tick 34s ago · did {…}</div></div>
+            <div class="placeholder-chart">
+              <div class="col" style="height:40%"></div><div class="col" style="height:65%"></div><div class="col" style="height:52%"></div><div class="col" style="height:80%"></div><div class="col" style="height:70%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Two recovery numbers on purpose: total includes customers who would have paid anyway; only attributed is quoted as the engine's result.</span> <code>attributed_paise ≠ recovered_paise</code></li>
+      </ul>
+    </figure>
+
+    <!-- D2 · Funnel -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">D2</span>
+        <span class="frame-title">RECOVERY FUNNEL</span>
+        <span class="frame-state">measured stages</span>
+      </div>
+      <div class="deskwin">
+        <div class="deskbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">ops.internal / funnel</span></div>
+        <div class="deskbody">
+          <div class="sidenav">
+            <div>Overview</div><div class="on">Recovery funnel</div><div>Bank breakdown</div><div>Case audit</div><div>Operations</div><div>Eval results</div>
+          </div>
+          <div class="deskmain">
+            <div class="funnel">
+              <div class="fstep"><span>Failures seen</span><span class="v">212</span></div>
+              <div class="fstep" style="width:88%"><span>Chased (case opened, action taken)</span><span class="v">164</span></div>
+              <div class="fstep" style="width:70%"><span>Customer reached</span><span class="v">131</span></div>
+              <div class="fstep" style="width:46%"><span>Recovered</span><span class="v">86</span></div>
+              <div class="fstep" style="width:30%; border-color:var(--blue); background:var(--blue-soft)"><span>Recovered because of us ¹</span><span class="v">49</span></div>
+            </div>
+            <div class="wf quiet"><div class="wf-sub">Drop-off between each stage, with the stopping rule that caused it (budget · blackout · opt-out · window).</div></div>
+          </div>
+        </div>
+      </div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">The bottom stage is the only one that goes in a headline; the rest keeps it honest.</span> <code>recovered_via_attempt_id IS NOT NULL</code></li>
+      </ul>
+    </figure>
+
+    <!-- D3 · Bank breakdown -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">D3</span>
+        <span class="frame-title">BANK BREAKDOWN</span>
+        <span class="frame-state">failure_class × bank</span>
+      </div>
+      <div class="deskwin">
+        <div class="deskbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">ops.internal / banks</span></div>
+        <div class="deskbody">
+          <div class="sidenav">
+            <div>Overview</div><div>Recovery funnel</div><div class="on">Bank breakdown</div><div>Case audit</div><div>Operations</div><div>Eval results</div>
+          </div>
+          <div class="deskmain">
+            <div class="placeholder-chart" style="min-height:130px">
+              <div class="col" style="height:70%"></div><div class="col" style="height:45%"></div><div class="col" style="height:85%"></div><div class="col" style="height:30%"></div><div class="col" style="height:60%"></div><div class="col" style="height:50%"></div>
+            </div>
+            <div class="wf"><div class="wf-label">HDFC · 3ds_dropoff — 34 cases · 71% recovered after UPI switch ¹</div></div>
+            <div class="wf quiet"><div class="wf-sub">Which rail wins per bank per failure class — the feedback the agent's heuristics are judged against.</div></div>
+          </div>
+        </div>
+      </div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">Rows are the classifier's output, not raw gateway codes.</span> <code>payment_failures.failure_class</code></li>
+      </ul>
+    </figure>
+
+    <!-- D4 · Case audit -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">D4</span>
+        <span class="frame-title">CASE AUDIT</span>
+        <span class="frame-state">case_events trail</span>
+      </div>
+      <div class="deskwin">
+        <div class="deskbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">ops.internal / cases</span></div>
+        <div class="deskbody">
+          <div class="sidenav">
+            <div>Overview</div><div>Recovery funnel</div><div>Bank breakdown</div><div class="on">Case audit</div><div>Operations</div><div>Eval results</div>
+          </div>
+          <div class="deskmain">
+            <div class="wf solid"><div class="wf-label">Case picker ▾ &nbsp; a1b2c3d4 · open · cust@… · ₹2,499 at risk</div></div>
+            <div class="trail">
+              <div class="ev">opened <div class="meta">system · risk=payment_failure · budget 3</div></div>
+              <div class="ev">contacted <div class="meta">xgboost · retry_now · payment_link</div></div>
+              <div class="ev">escalated <div class="meta">llm · nudge_customer · quiet until +48h</div></div>
+              <div class="ev">promise_made <div class="meta">customer · pays by Fri</div></div>
+              <div class="ev money">attributed ₹2,499 <div class="meta">capture pay_X99 · attempt 2</div></div>
+              <div class="ev money">closed · recovered <div class="meta">captured 249900 paise</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">"Why did this customer get contacted four times" must be answerable from one screen — this is the dispute table.</span> append-only <code>case_events</code></li>
+      </ul>
+    </figure>
+
+    <!-- D5 · Operations -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">D5</span>
+        <span class="frame-title">OPERATIONS</span>
+        <span class="frame-state">scheduler heartbeat</span>
+      </div>
+      <div class="deskwin">
+        <div class="deskbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">ops.internal / operations</span></div>
+        <div class="deskbody">
+          <div class="sidenav">
+            <div>Overview</div><div>Recovery funnel</div><div>Bank breakdown</div><div>Case audit</div><div class="on">Operations</div><div>Eval results</div>
+          </div>
+          <div class="deskmain">
+            <div class="wf blue"><div class="wf-label">Scheduler alive — last tick 34s ago</div><div class="wf-sub">fired 2 · reconciled 0 · cancelled 1 · promises 0 · due-unchased 0 ¹</div></div>
+            <div class="wf"><div class="wf-label">What fires next</div><div class="wf-sub">retry_at queue, soonest first</div></div>
+            <div class="wf"><div class="wf-label">What the guardrail stopped</div><div class="wf-sub">every veto with its reason — a rejection spent a slot but contacted nobody</div></div>
+            <div class="wf quiet"><div class="wf-label">Unprocessed webhooks · in-flight attempts</div></div>
+          </div>
+        </div>
+      </div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">A tick that swallows an exception looks like a scheduler that died days ago — the heartbeat row is what tells them apart, and due-but-unchased cases surface here.</span> <code>scheduler_heartbeat</code> · <code>report_due_cases()</code></li>
+      </ul>
+    </figure>
+
+    <!-- D6 · Eval results -->
+    <figure class="frame">
+      <div class="frame-head">
+        <span class="frame-no">D6</span>
+        <span class="frame-title">EVAL RESULTS</span>
+        <span class="frame-state">policy comparison</span>
+      </div>
+      <div class="deskwin">
+        <div class="deskbar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">ops.internal / eval</span></div>
+        <div class="deskbody">
+          <div class="sidenav">
+            <div>Overview</div><div>Recovery funnel</div><div>Bank breakdown</div><div>Case audit</div><div>Operations</div><div class="on">Eval results</div>
+          </div>
+          <div class="deskmain">
+            <div class="wf solid">
+              <div class="wf-label">Policy · recovered · contacts · cost</div>
+              <div class="bar w80"></div><div class="bar w60"></div><div class="bar w80"></div>
+            </div>
+            <div class="wf quiet"><div class="wf-sub">LLM policy vs XGBoost baseline vs no-retry control, over simulated bank responses — the harness in <code>eval/</code>, rendered.</div></div>
+            <div class="placeholder-chart" style="min-height:80px">
+              <div class="col" style="height:75%"></div><div class="col" style="height:55%"></div><div class="col" style="height:12%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="anno">
+        <li data-n="1"><span class="why">The control column is the point: recovery rates that can't be separated from "would have paid anyway" are advertising, not measurement.</span></li>
+      </ul>
+    </figure>
+
+  </div>
+
+  <!-- ══ Legend ═══════════════════════════════════════════════════════ -->
+  <h2 class="section">Legend</h2>
+  <div class="legend">
+    <div><span class="swatch fill1"></span> Content block — real copy lives here</div>
+    <div><span class="swatch fill2"></span> Supporting block</div>
+    <div><span class="swatch dash"></span> Quiet / trust copy — no border weight wanted</div>
+    <div><span class="swatch dark"></span> Primary action (the one verb on the page)</div>
+    <div><span class="swatch blue"></span> Architecture showing through — money path or audit surface</div>
+    <div><span class="mark" style="position:static; flex:none"></span> Numbered callout — annotated under its frame</div>
+  </div>
+
+  <div class="footnote">
+    <span>WIREFRAME · LOW-FI · structure derived from src/customer/routes.py · src/cases.py · dashboard/views/</span>
+    <span>Sheet 1 of 1 · not for visual sign-off</span>
+  </div>
+
+</div>
+</body>
+</html>

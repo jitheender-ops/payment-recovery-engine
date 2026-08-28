@@ -3,6 +3,7 @@ SQLAlchemy ORM models for the payment recovery engine.
 
 Tables:
     - webhook_events:    Append-only event store (fully replayable)
+    - risk_events:       Append-only store for merchant-pushed risk events
     - payment_failures:  Enriched failure records with classification
     - recovery_cases:    One row per unit of revenue at risk, any source
     - retry_attempts:    Every retry attempt with idempotency key and outcome
@@ -72,6 +73,69 @@ class WebhookEvent(Base):
 
     __table_args__ = (
         Index("ix_webhook_events_type_received", "event_type", "received_at"),
+    )
+
+
+# ── Risk Event Store (merchant-pushed) ──────────────────────────────────────
+
+
+class RiskEvent(Base):
+    """
+    Append-only store for revenue-at-risk events the merchant pushes to us.
+
+    A card decline announces itself through Razorpay's webhook; an abandoned
+    cart, a halted subscription, an overdue invoice and a failed mandate debit
+    only exist in the merchant's own systems, so the merchant POSTs them to
+    /risks (HMAC-signed). This table is the durable record of what arrived,
+    mirroring webhook_events: committed before the background task runs, so a
+    crash between the 200 and the processing loses nothing, and the
+    reconcile_risk_events sweep re-runs anything whose task died.
+
+    The denormalised columns (reference_id, customer_*, amount) exist so the
+    chaser can read them back without parsing the payload: the pipeline needs
+    the customer's email/contact to mint a link days after the event arrived,
+    and the payload is the merchant's free-form shape, not ours.
+    """
+
+    __tablename__ = "risk_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # The dedup key: merchant-supplied, or derived from
+    # (risk_type, reference_id, occurred_at) when absent. UNIQUE so a
+    # re-delivered event is a clean 200, not a second case.
+    event_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    risk_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    reference_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)  # paise
+    currency: Mapped[str] = mapped_column(String(10), default="INR")
+    customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_contact: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # When the money was due — an invoice's due date, a subscription's charge
+    # date. Drives RecoveryCase.due_at, which the receivables ladder ages on.
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Merchant free-form context (cart contents, invoice number, mandate name,
+    # plan). Reduced to bounded printable data before it reaches an LLM prompt
+    # — see src/agent/prompts.py, UNTRUSTED INPUT.
+    meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # The raw payload as received, kept for replay and dispute.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    processed: Mapped[bool] = mapped_column(Boolean, default=False)
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Same re-arm discipline as webhook_events: a transient failure re-arms the
+    # event until the cap; only a deterministically-broken payload rests.
+    processing_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_risk_event_id"),
+        Index("ix_risk_events_type_received", "risk_type", "received_at"),
+        Index("ix_risk_events_reference", "risk_type", "reference_id"),
     )
 
 

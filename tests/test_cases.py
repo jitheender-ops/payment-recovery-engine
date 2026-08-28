@@ -416,8 +416,13 @@ async def test_opt_out_closes_open_cases(
         assert refreshed is not None
         assert refreshed.state == "opted_out"
 
+        # The ledger is keyed by cases.customer_key() — "email:<lowercased>",
+        # not the raw address. One canonical key per human is what makes the
+        # opt-out reach every case they have; see customer_key() for why.
         ledger = await session.execute(
-            select(RetryLedger).where(RetryLedger.customer_id == "test@example.com")
+            select(RetryLedger).where(
+                RetryLedger.customer_id == "email:test@example.com"
+            )
         )
         row = ledger.scalar_one()
         assert row.consent_status == "opted_out"
@@ -434,9 +439,44 @@ async def test_opt_out_for_unknown_customer_creates_the_ledger_row(
         assert closed == 0
 
         ledger = await session.execute(
-            select(RetryLedger).where(RetryLedger.customer_id == "stranger@example.com")
+            select(RetryLedger).where(
+                RetryLedger.customer_id == "email:stranger@example.com"
+            )
         )
         assert ledger.scalar_one().consent_status == "opted_out"
+
+
+async def test_concurrent_opt_outs_do_not_raise(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    A double-tap on the stop button from a customer with no ledger row yet:
+    both requests see no row, both try to create one, and the UNIQUE
+    constraint on customer_id fires for the loser. That used to surface as a
+    500 on the one page where someone is asking to be left alone. The loser
+    must roll back, take the winner's row, and finish the opt-out.
+    """
+    import asyncio
+
+    async def opt_out_once() -> None:
+        async with db_sessionmaker() as session:
+            await record_opt_out(session, "doubletap@example.com")
+            await session.commit()
+
+    await asyncio.gather(opt_out_once(), opt_out_once())
+
+    async with db_sessionmaker() as reader:
+        ledgers = list(
+            (
+                await reader.execute(
+                    select(RetryLedger).where(
+                        RetryLedger.customer_id == "email:doubletap@example.com"
+                    )
+                )
+            ).scalars().all()
+        )
+    assert len(ledgers) == 1, "the race created two ledger rows"
+    assert ledgers[0].consent_status == "opted_out"
 
 
 # ── Batch reporting ──────────────────────────────────────────────────────

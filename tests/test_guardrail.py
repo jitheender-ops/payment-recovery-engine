@@ -172,3 +172,56 @@ def test_switch_rail_without_rail_is_rejected_but_others_are_not() -> None:
         {"action": "switch_rail", "reason": "no rail given"}
     )
     assert bad[0] is False
+
+
+# ── Self-serve subset ────────────────────────────────────────────────────
+
+
+def _self_serve_action() -> RetryAction:
+    return RetryAction(
+        action="retry_now", reason="Customer-initiated from the recovery page"
+    )
+
+
+def test_self_serve_passes_for_a_fresh_retryable_failure() -> None:
+    context = _make_context()
+    result = gate.validate_self_serve(_self_serve_action(), context, "selfserve_k1", 1)
+    assert result.passed is True
+    assert result.rules_checked == 5
+
+
+def test_self_serve_rejects_past_the_consent_window() -> None:
+    """
+    The token's TTL runs from ISSUANCE, so a link minted near the window's end
+    outlives it. The customer pressing pay on that link is still US minting a
+    payment object past our authority to act — the window rule applies here.
+    """
+    window_hours = 72
+    failed = now - timedelta(hours=window_hours + 1)
+    context = _make_context(failed_at=failed, current_time=now)
+    result = gate.validate_self_serve(_self_serve_action(), context, "selfserve_k2", 1)
+    assert result.passed is False
+    assert any("consent" in r.lower() for r in result.rejection_reasons)
+
+
+def test_self_serve_rejects_a_hard_decline_class() -> None:
+    context = _make_context(failure_class="fraud_block")
+    result = gate.validate_self_serve(_self_serve_action(), context, "selfserve_k3", 1)
+    assert result.passed is False
+    assert any("blocklist" in r.lower() for r in result.rejection_reasons)
+
+
+def test_self_serve_rejects_a_spent_attempt_budget() -> None:
+    context = _make_context()
+    result = gate.validate_self_serve(_self_serve_action(), context, "selfserve_k4", 3)
+    assert result.passed is False
+
+
+def test_self_serve_ignores_the_outreach_rules() -> None:
+    """
+    Blackout and contact limits bound OUR chasing, not a customer choosing to
+    pay: 3 AM and a maxed-out 24h tally must not block a self-serve payment.
+    """
+    context = _make_context(hour_of_day=2, retry_count_24h=99, nudge_count_24h=99)
+    result = gate.validate_self_serve(_self_serve_action(), context, "selfserve_k5", 1)
+    assert result.passed is True

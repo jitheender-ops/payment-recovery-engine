@@ -3,7 +3,7 @@
 [![CI](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-211%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-308%20passing-brightgreen)
 
 > AI-powered system that decides **whether**, **when**, and **on which rail** to retry a failed payment — with deterministic guardrails ensuring no LLM ever directly authorizes money movement.
 
@@ -109,21 +109,26 @@ No number in this README was written by hand; every one comes from
 
 ```
 Layer 1: Ingestion          → Signature verify → Idempotency → Event store
+                              (Razorpay webhooks AND merchant-pushed /risks)
 Layer 2: Deterministic      → Error code → Failure taxonomy (NO LLM)
 Layer 3: Policy Agent       → LLM/XGBoost → Constrained JSON action
 Layer 4: Guardrail Gate     → Schema + Business rules → BEFORE execution
 Layer 5: Recovery Messaging → Customer nudge (scoped LLM generation)
 Layer 6: Scheduler          → Fires deferred retries, reconciles dropped events
-                              and stale write-ahead attempts, expires promises
+                              and stale write-ahead attempts, expires promises,
+                              chases due non-payment cases
 ```
 
 ```mermaid
 flowchart TD
     A["Razorpay Webhook<br>payment.failed"] --> B["Layer 1: Ingestion<br>HMAC verify → Dedup → Store"]
+    A2["Merchant risk event<br>POST /risks<br>cart · subscription · invoice · mandate"] --> B2["Layer 1: Risk ingestion<br>HMAC verify → Dedup → Store"]
     B --> C["Layer 2: Classifier<br>Error code → Taxonomy"]
+    B2 --> C2["Open recovery case<br>per-type chase policy<br>(src/chasers/policy.py)"]
     C --> D{"Hard Decline?"}
     D -->|Yes| E["Abandon<br>(no LLM call)"]
     D -->|No| F["Layer 3: Policy Agent<br>LLM / XGBoost"]
+    C2 -->|first touch due| F
     F --> G["Layer 4: Guardrail Gate<br>8 deterministic rules"]
     G -->|Rejected| H["Log + Abandon"]
     G -->|Approved| I["Execute Retry<br>Razorpay Payment Links API"]
@@ -131,9 +136,22 @@ flowchart TD
     G -->|retry_at| K["Park as 'scheduled'<br>no API call"]
     K --> L["Layer 6: Scheduler<br>poll every 60s"]
     L -->|due| M["Re-run guardrail<br>at fire time"]
+    L -->|chase due| C2
     M -->|still valid| I
     M -->|consent gone / blackout| N["Cancel + audit"]
 ```
+
+**The four chasers extend the same pipeline to money that never reached a
+gateway.** A card decline announces itself; an abandoned cart, a halted
+subscription, an overdue invoice and a failed mandate debit only exist in the
+merchant's own systems. The merchant POSTs them to `POST /risks`
+(HMAC-signed with `RISK_WEBHOOK_SECRET`, deduped into `risk_events`, processed
+in the background), and the engine opens a recovery case and chases it through
+the exact same agent → guardrail → payment-link machinery. Per-type chase
+bounds live in `src/chasers/policy.py` — attempt budgets, consent windows
+(48h for a cold cart, 30 days for a receivable), first-touch delays and the
+recommended rail. `payment_failure` is deliberately NOT a chaser type: it
+stays webhook-driven, and the chase sweep never touches it.
 
 **`retry_at` is the branch worth reading twice.** The executor maps `retry_at`
 onto the same `_create_payment_link` call as `retry_now`, so before Layer 6
@@ -299,6 +317,19 @@ that point. To watch one fire without waiting, drop the interval:
 SCHEDULER_INTERVAL_SECONDS=10 ./run.sh
 ```
 
+**The four chasers** run the same loop for money that never reached a gateway —
+abandoned carts, halted subscriptions, overdue invoices, failed mandate debits.
+They arrive as merchant-pushed risk events instead of webhooks:
+
+```bash
+python scripts/run_risk_batch.py --count 24
+```
+
+Phase 1 posts HMAC-signed events to `/risks`; subscriptions and invoices are
+chased at once, carts and mandates defer their first touch per policy and are
+picked up by the scheduler's chase sweep. Phase 2 captures on the chase links
+and prints the per-type recovery table.
+
 **Where to look afterwards:** the dashboard's Overview shows the recovery ledger
 band — brass is money a link *we* sent brought back, hatched is the customer
 paying anyway, and the remainder is still open. `case_events` is the audit
@@ -417,21 +448,29 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 
 # Simulate webhooks against the running API
 .venv/bin/python scripts/simulate_webhooks.py --count 20
+
+# Drive the four chasers (cart, subscription, invoice, mandate) with
+# synthetic merchant risk traffic → /risks, then capture on the chase links
+.venv/bin/python scripts/run_risk_batch.py --count 24
 ```
 
 ## 📁 Project Structure
 
 ```
 ├── src/
-│   ├── ingestion/        # Layer 1: Webhook endpoint + signature + dedup
+│   ├── ingestion/        # Layer 1: Webhook endpoint + signature + dedup,
+│   │                     #   plus risk_router.py — merchant-pushed /risks
 │   ├── classifier/       # Layer 2: Error code → failure taxonomy
 │   ├── agent/            # Layer 3: LLM policy agent + XGBoost baseline
 │   ├── guardrail/        # Layer 4: Schema + business rules + blackout clamp
 │   ├── messaging/        # Layer 5: Customer nudge generation
 │   ├── executor/         # Retry execution via Razorpay API + rail selection
+│   ├── chasers/          # Per-risk-type chase policy for the four
+│   │                     #   non-payment risk types (budget, window, rail)
 │   ├── cases.py          # Recovery cases, promises to pay, audit trail
-│   ├── scheduler.py      # Layer 6: four sweeps — fire, reconcile events,
-│   │                     #   resolve stale write-aheads, expire promises
+│   ├── scheduler.py      # Layer 6: eight sweeps — fire, reconcile events +
+│   │                     #   risk events, resolve stale write-aheads, expire
+│   │                     #   promises, chase due cases, cancel dead links
 │   ├── orchestrator.py   # Ties the layers together
 │   └── main.py           # FastAPI app
 ├── eval/                 # Standalone eval harness
@@ -441,7 +480,7 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   └── runner.py         # Runs all policies, produces results table
 ├── dashboard/            # Streamlit ops console (6 views under views/)
 ├── tests/                # Pytest suite — real schema over throwaway SQLite
-├── scripts/              # simulate_webhooks, train_xgboost, check_llm, ...
+├── scripts/              # simulate_webhooks, run_risk_batch, train_xgboost, ...
 ├── alembic/versions/     # Schema migrations (create_all is not an upgrade path)
 ├── models/               # Trained XGBoost artefact (gitignored; run.sh builds it)
 ├── .github/workflows/    # CI: ruff + mypy strict + pytest on 3.11 & 3.13,
@@ -468,6 +507,8 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 | 9 | Consent withdrawn during a deferred wait | Re-validated at fire time; the scheduled retry is cancelled and audited |
 | 10 | Two webhooks race the same idempotency key | UNIQUE constraint decides before the API call; loser skips cleanly |
 | 11 | Process dies mid-execution, leaving a write-ahead row `pending` forever | `reconcile_stale_attempts()` resolves it to failed-outcome-unknown after a threshold — fail-closed (slot stays spent), but visible and audited instead of "in flight" forever |
+| 12 | Orphaned Payment Link after a mid-call crash (link exists on Razorpay, `external_ref` never recorded) | Attribution still works through the notes breadcrumb; a late payment on a terminal case lands as an `overpayment` audit event for manual refund instead of a double credit |
+| 13 | Merchant risk event lost between the `/risks` 200 and processing | Committed to `risk_events` before the 200; failures re-arm to the shared cap and `reconcile_risk_events()` re-runs them — idempotent case open and chase keys make a replay safe |
 
 ## 🔧 Tech Stack
 
@@ -481,17 +522,18 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-211 tests, 86% statement coverage over `src/`. The money paths are where the
+342 tests, 80% statement coverage over `src/`. The money paths are where the
 coverage went:
 
 | Module | Coverage | Why it is covered |
 |---|---|---|
 | `cases.py` | 97% | Attribution, stopping rules, promises |
+| `chasers/policy.py` | 100% | Per-risk chase bounds — the four chasers' contract |
 | `ingestion/idempotency.py` | 82% | The double-charge guard, including the constraint race |
-| `ingestion/router.py` | 80% | Webhook entry point + capture attribution |
+| `ingestion/router.py` | 82% | Webhook entry point + capture attribution |
 | `agent/xgboost_baseline.py` | 83% | Includes "the model actually loads" |
-| `orchestrator.py` | 76% | Write-ahead ordering, guardrail rejection |
-| `scheduler.py` | 69% | Deferred fire, re-validation, event reconciliation |
+| `orchestrator.py` | 82% | Write-ahead ordering, guardrail rejection, chase pipeline |
+| `scheduler.py` | 74% | Deferred fire, re-validation, event + risk reconciliation, chase sweep |
 
 `dashboard/` is 0% — the pages are Streamlit scripts whose bodies execute on
 import. `dashboard/auth.py` is the exception, split out precisely so the password
@@ -504,6 +546,21 @@ it had decided. The current wave, all CI-verified:
 
 | Change | Why it mattered |
 |---|---|
+| Chase sweep is bounded by the tick budget | The chase sweep had no time budget, unlike the fire sweep it shares the tick with: up to 200 agent decisions + Razorpay calls per tick could run one tick far past the interval on a slow day, and the per-type loop let the first type in the dict eat the whole batch while invoices starved. It now shares the tick's deadline with the fire sweep, fetches all four types in ONE oldest-first query (longest-waiting customer served first), and the due-case report filters in SQL instead of Python so a chaser backlog cannot push payment-failure rows out of the heartbeat |
+| Risk-case pages ignore colliding payment ids | The recovery page looked up a `PaymentFailure` by `subject_ref` for EVERY case — but for risk cases that reference is merchant-chosen, and one colliding with a real payment id would have rendered the payment rail's story for a cart. The lookup now runs only for the payment rail |
+| Four chasers for non-payment revenue | Abandoned carts, halted subscriptions, overdue invoices and failed mandate debits never reach a gateway, so nothing announced them and nothing chased them. Merchants now POST them to `/risks` (HMAC, deduped, fail-closed on an empty secret), and the engine chases the opened cases through the same agent → guardrail → payment-link pipeline with per-type budgets, consent windows and rails. The recovery page tells the truth per type — a cart that never paid is never told its "payment failed" — and self-serve pay mints a case-driven link with the same write-ahead discipline |
+| Self-serve pay honours the consent window | The token's TTL runs from ISSUANCE, so a link minted near the window's end outlived it — and the self-serve guardrail subset skipped the window rule, so `/pay` minted links past the engine's authority to act. The window rule now runs self-serve too, and the page stops offering payment once the window lapses (nothing else ever expires an open case) |
+| Mid-decision stops are re-validated | Releasing the ledger lock for the LLM call removed an accidental guarantee: an opt-out (or a capture) landing mid-decision used to block on the lock until the pipeline committed; it could then be overridden by the decision. The pipeline now re-reads the case and the ledger when the lock is re-taken and stops before the guardrail if either moved |
+| A double-tapped opt-out no longer 500s | Two concurrent opt-outs for a customer with no ledger row both tried to create one; the UNIQUE constraint fired and the loser surfaced as a 500 on the one page where someone is asking to be left alone. The loser now rolls back and finishes on the winner's row |
+| Lost webhooks are recoverable — both types | A failed background task marked its event `processed=True`, hiding it from the reconciler forever; and the reconciler only re-ran `payment.failed`. A dropped capture was money that arrived and was never attributed, on a case that kept chasing a customer who already paid. Failures now re-arm up to 3 attempts, and captures reconcile too |
+| Overpayments surface instead of double-crediting | A second capture on a closed case (two live links paid inside the cancel-sweep window) credited the case twice, inflating recovered revenue. It now logs an `overpayment` audit event for manual refund and credits nothing |
+| Rate limits stopped trusting a forgeable header | The recovery page read the LEFTMOST `X-Forwarded-For` entry — the one the client supplies — so rotating one header value per request bypassed every per-IP limit. The header is now read only with `BEHIND_TRUSTED_PROXY` set, and only the rightmost (proxy-added) entry is used; direct deployments key on the socket peer |
+| Self-serve pay runs a real guardrail | `/pay` wrote `guardrail_passed=True` without consulting a single rule — an audit claim for a validation that never happened. It now runs the applicable subset (schema, hard-decline blocklist, attempt budget, idempotency) and counts the attempt against the customer's rolling ledger |
+| Recovery links expire in a day, not 72h | The token is a bearer credential that sits in SMS logs and browser history; it used to live for the whole consent window. Default TTL is now 24h (`RECOVERY_LINK_TTL_HOURS`), capped at the consent window regardless — every nudge mints a fresh link, so nothing needs the long life |
+| Gateway free text is sanitized pre-LLM | Error descriptions/reasons are third-party data riding into the prompt; they are now reduced to bounded printable text (control chars stripped, 200-char cap) and the system prompt marks them as untrusted data |
+| Nudges actually get delivered | The personalized LLM message was stored on the attempt row and sent nowhere — the customer got Razorpay's stock template. It now rides as the Payment Link's checkout description |
+| The ledger lock no longer spans the LLM call | The per-customer FOR UPDATE lock was held across inference — up to a minute — serialising same-customer webhooks on one slow call while holding a connection. Released before the agent, re-taken with fresh counts before the guardrail |
+| Unchased due cases surface | Cases whose wait elapsed with no chaser wired for their risk type (the non-webhook types the case layer models) sat open silently; the tick now counts them into the heartbeat and logs them |
 | Superseded links get cancelled | Every retry minted a NEW Payment Link while the old ones stayed live on Razorpay's side — paying an old link after a newer one settled was a real double payment the case credited twice. A scheduler sweep now cancels the links of terminal cases (already-paid links refuse the cancel and resolve as inert) |
 | `switch_rail` became real | The target rail was recorded in the ledger and nowhere else — a "switch to UPI" executed as a generic link payable by card. UPI-target links now set `upi_link: true` (UPI-only); other rails stay generic and say so in `notes.target_rail` |
 | Dedicated PII-mask secret | `mask_customer_id` keyed its HMAC with the webhook secret — shared with the Razorpay dashboard, so one leak unmasked every customer. `PII_MASK_SECRET` now takes precedence (empty falls back for existing deployments) |

@@ -9,7 +9,7 @@ No freeform output is ever accepted.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -62,7 +62,19 @@ class FailureContext(BaseModel):
     """
     Structured input to the policy agent — all the information needed to
     decide on a recovery action. Assembled by the orchestrator.
+
+    Despite the name this now carries ANY revenue-at-risk case, not only a
+    failed payment: `risk_type` says which, and the payment-specific fields
+    (method, bank, card_*) are simply empty for the non-payment types. The
+    agent's action space is unchanged — a "retry" for an overdue invoice is a
+    payment link, not a re-presented charge — so one context shape serves all
+    five risk types.
     """
+
+    # Which revenue leak this is. Defaults to the original rail so every
+    # pre-existing caller (and every stored test fixture) behaves exactly as
+    # before. The four non-payment values come from src/cases.py RiskType.
+    risk_type: str = "payment_failure"
 
     # Failure details
     payment_id: str
@@ -94,6 +106,18 @@ class FailureContext(BaseModel):
     current_time: datetime
     hour_of_day: int = Field(ge=0, le=23)
     day_of_week: int = Field(ge=0, le=6)  # 0 = Monday
+
+    # Consent window override. None means "use the global
+    # consent_window_hours"; a chaser-driven risk type sets its own (a cold
+    # cart is stale in two days, a receivable is chaseable for a month). The
+    # guardrail reads this through the context so the window the agent was
+    # told about and the window the gate enforces cannot drift.
+    consent_window_hours: int | None = None
+
+    # Merchant-supplied context for non-payment risk types (cart contents,
+    # invoice number, mandate name, plan). Already reduced to bounded
+    # printable data before it reaches a prompt — see prompts.sanitize_meta.
+    risk_meta: dict[str, Any] | None = None
 
     # Metadata
     is_retryable: bool = True

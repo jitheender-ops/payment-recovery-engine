@@ -108,6 +108,12 @@ class XGBoostBaseline:
         if model_path and Path(model_path).exists():
             try:
                 import joblib
+                # ponytail: joblib.load is pickle, so this executes whatever
+                # the file says. Accepted because the path is operator-set
+                # (XGBOOST_MODEL_PATH) and the file ships inside the image —
+                # anyone who can write there already has the process. If a
+                # model ever arrives from outside the build (a registry, a
+                # bucket, a user upload), pin a checksum before this line.
                 self._model = joblib.load(model_path)
                 logger.info("XGBoost model loaded from %s", model_path)
             except Exception:
@@ -137,7 +143,12 @@ class XGBoostBaseline:
         Returns:
             RetryAction from the fixed action space.
         """
-        if self._model is not None:
+        # The trained model only ever saw payment-failure classes. A chaser-
+        # driven risk type (abandoned_checkout, invoice_overdue, …) is outside
+        # its training distribution — its one-hot is all zeros — so those go
+        # to the rule heuristic, which has explicit branches for them, even
+        # when a real model is loaded.
+        if self._model is not None and context.failure_class in FAILURE_CLASSES:
             return self._predict_ml(context, self._model)
         return self._predict_heuristic(context)
 
@@ -175,6 +186,50 @@ class XGBoostBaseline:
     def _predict_heuristic(context: FailureContext) -> RetryAction:
         """Rule-based fallback when no trained model is available."""
         from datetime import timedelta
+
+        # Chaser-driven risk types are not FailureClass members — they carry
+        # our own class names (src/chasers/policy.py). Branch on them before
+        # the enum lookup, or they fall into the generic retry_at default,
+        # which is wrong for all four: a cold cart wants one nudge, not a
+        # re-presented charge fifteen minutes later.
+        if context.failure_class == "abandoned_checkout":
+            if context.previous_retry_outcomes:
+                return RetryAction(
+                    action="abandon",
+                    reason="Rule-based: cart already chased once — a second chase is spam",
+                    confidence=0.8,
+                )
+            return RetryAction(
+                action="nudge_customer",
+                reason="Rule-based: abandoned cart — one gentle reminder with a payment link",
+                confidence=0.7,
+            )
+        if context.failure_class == "subscription_charge_failed":
+            return RetryAction(
+                action="switch_rail",
+                rail="upi" if context.method != "upi" else "card",
+                reason="Rule-based: renewal failed — renewals usually die on card OTPs",
+                confidence=0.6,
+            )
+        if context.failure_class == "invoice_overdue":
+            return RetryAction(
+                action="nudge_customer",
+                reason="Rule-based: overdue invoice — remind the contact, keep the ladder slow",
+                confidence=0.7,
+            )
+        if context.failure_class == "mandate_debit_failed":
+            if context.previous_retry_outcomes:
+                return RetryAction(
+                    action="nudge_customer",
+                    reason="Rule-based: mandate retry already failed — tell the customer",
+                    confidence=0.6,
+                )
+            return RetryAction(
+                action="retry_at",
+                retry_at=context.current_time + timedelta(hours=24),
+                reason="Rule-based: failed mandate debit — present again next day",
+                confidence=0.65,
+            )
 
         try:
             fc = FailureClass(context.failure_class)

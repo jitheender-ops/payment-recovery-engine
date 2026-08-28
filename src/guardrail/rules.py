@@ -69,7 +69,7 @@ class GuardrailRules:
 
     def check_amount_ceiling(self, amount_paise: int) -> tuple[bool, str | None]:
         """No retry for amounts above the ceiling without explicit consent."""
-        ceiling = self._settings.amount_ceiling_inr
+        ceiling = self._settings.amount_ceiling_paise
         if amount_paise > ceiling:
             return False, (
                 f"Amount ceiling exceeded: ₹{amount_paise / 100:,.2f} > "
@@ -78,23 +78,75 @@ class GuardrailRules:
         return True, None
 
     def check_consent_window(
-        self, failed_at: datetime, current_time: datetime
+        self,
+        failed_at: datetime,
+        current_time: datetime,
+        window_hours: int | None = None,
     ) -> tuple[bool, str | None]:
-        """No retry after the consent window has expired."""
-        window_hours = self._settings.consent_window_hours
-        deadline = failed_at + timedelta(hours=window_hours)
+        """
+        No retry after the consent window has expired.
+
+        `window_hours` overrides the global setting for chaser-driven risk
+        types, whose windows are per-type (a cold cart is stale in two days,
+        a receivable is chaseable for a month — see src/chasers/policy.py).
+        None keeps the global consent_window_hours, which is every
+        pre-existing caller's behaviour.
+        """
+        hours = window_hours or self._settings.consent_window_hours
+        deadline = failed_at + timedelta(hours=hours)
 
         # Ensure timezone-aware comparison
         if current_time.tzinfo is None:
             current_time = current_time.replace(tzinfo=UTC)
         if failed_at.tzinfo is None:
             failed_at = failed_at.replace(tzinfo=UTC)
-            deadline = failed_at + timedelta(hours=window_hours)
+            deadline = failed_at + timedelta(hours=hours)
 
         if current_time > deadline:
             hours_elapsed = (current_time - failed_at).total_seconds() / 3600
             return False, (
-                f"Consent window expired: {hours_elapsed:.1f}h > {window_hours}h"
+                f"Consent window expired: {hours_elapsed:.1f}h > {hours}h"
+            )
+        return True, None
+
+    def check_retry_at_within_window(
+        self,
+        retry_at: datetime | None,
+        failed_at: datetime,
+        window_hours: int | None = None,
+    ) -> tuple[bool, str | None]:
+        """
+        A deferred retry must land inside the window we are still allowed to act in.
+
+        `retry_at` comes straight from the agent and had no upper bound at all.
+        A far-future value parked the attempt as `scheduled` forever: the fire
+        sweep only picks up rows whose `scheduled_at <= now`, and the stale
+        sweep only looks at `pending` rows, so nothing ever touched it again —
+        and because the orchestrator sets `case.next_action_at` to the same
+        instant, the CASE sat `open` for good. Never chased, never expired,
+        never counted; one bad decision and a case leaks out of the ledger.
+
+        Rejecting rather than silently retiming is deliberate and matches every
+        other rule here: the clamp we already apply (out of the blackout) only
+        moves a time the agent could still have meant, while a retry past the
+        consent deadline is a decision we have no authority to carry out. The
+        fire-time re-validation would refuse it anyway — this refuses it now,
+        while the rejection is still visible in the audit trail.
+        """
+        if retry_at is None:
+            return True, None
+
+        hours = window_hours or self._settings.consent_window_hours
+        if failed_at.tzinfo is None:
+            failed_at = failed_at.replace(tzinfo=UTC)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+
+        deadline = failed_at + timedelta(hours=hours)
+        if retry_at > deadline:
+            return False, (
+                f"Scheduled retry falls outside the consent window: "
+                f"{retry_at.isoformat()} > {deadline.isoformat()} ({hours}h)"
             )
         return True, None
 

@@ -67,8 +67,23 @@ services:
         value: INFO
       # One worker on the free plan. Each worker runs its own scheduler loop;
       # they are safe together (both sweeps claim rows with a conditional
-      # UPDATE) but on a 512MB instance the memory matters more.
+      # UPDATE) but on a 512MB instance the memory matters more. The recovery
+      # page's rate-limit buckets also live per worker, so N workers quietly
+      # multiply every per-IP limit N times.
       - key: WEB_CONCURRENCY
+        value: "1"
+      # Render terminates TLS at its own proxy, which appends the real client
+      # to X-Forwarded-For. The rate limits read the RIGHTMOST (proxy-added)
+      # entry only, and only when this is set — without it they would key on
+      # the socket peer, which behind Render's LB is the proxy itself, i.e.
+      # one single "client" for the whole internet.
+      - key: BEHIND_TRUSTED_PROXY
+        value: "true"
+      # Render's LB is a single hop, so the client is the rightmost
+      # X-Forwarded-For entry. Raise this to 2 if you put a CDN in front of
+      # Render — otherwise the rightmost entry becomes a constant internal
+      # address and every visitor shares one rate-limit bucket.
+      - key: TRUSTED_PROXY_HOPS
         value: "1"
       - key: SCHEDULER_ENABLED
         value: "true"
@@ -86,6 +101,11 @@ services:
       - key: RAZORPAY_KEY_SECRET
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      # Keys the HMAC on POST /risks (merchant-pushed risk events for the four
+      # chasers). Shared with the merchant's systems, so it is set by hand,
+      # never generated. Empty = /risks rejects everything.
+      - key: RISK_WEBHOOK_SECRET
         sync: false
       - key: OPENAI_API_KEY
         sync: false

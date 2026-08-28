@@ -49,6 +49,25 @@ _TEMPLATES: dict[str, str] = {
         "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} payment timed out. "
         "We're retrying automatically."
     ),
+    # Non-payment risk types (src/chasers/policy.py). No payment was attempted
+    # for three of these, so the wording never says "payment failed" — that
+    # would be a lie on the one line the customer reads first.
+    "abandoned_checkout": (
+        "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} order is still "
+        "waiting. Complete it here when you're ready. {{ next_step }}"
+    ),
+    "subscription_charge_failed": (
+        "Hi{{ ' ' + name if name else '' }}, we couldn't renew your subscription "
+        "of ₹{{ amount }}. {{ next_step }}"
+    ),
+    "invoice_overdue": (
+        "Hi{{ ' ' + name if name else '' }}, invoice for ₹{{ amount }} is past "
+        "due. {{ next_step }}"
+    ),
+    "mandate_debit_failed": (
+        "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} autopay didn't go "
+        "through. {{ next_step }}"
+    ),
 }
 
 _FALLBACK_TEMPLATE = (

@@ -36,8 +36,11 @@ services:
       DATABASE_URL_SYNC: postgresql://recovery:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/payment_recovery
       # Each uvicorn worker runs its own scheduler loop. Safe — both sweeps
       # claim their rows with a conditional UPDATE before acting — but it is N
-      # times the polling for no gain. Raise this for HTTP throughput only.
-      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      # times the polling for no gain. The recovery page's per-IP rate-limit
+      # buckets are ALSO per worker, so N workers quietly multiply every
+      # limit N times. Default 1 keeps both honest; raise for HTTP throughput
+      # only, and only behind a proxy you have set BEHIND_TRUSTED_PROXY for.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
     # No source mount: the image is what runs. ENTRYPOINT applies migrations
     # then starts uvicorn without --reload.
     command: ["api"]

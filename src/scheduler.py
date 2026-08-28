@@ -1,13 +1,18 @@
 """
 Background worker — the thing that makes deferred decisions actually happen.
 
-Five sweeps, one tick:
+Eight sweeps, one tick:
 
     fire_due_retries()            an agent said "retry in 4 hours"; four hours have passed
     reconcile_events()            a webhook was stored but its background task never ran
+    reconcile_risk_events()       a merchant risk event was stored but its task never ran
     reconcile_stale_attempts()    a write-ahead attempt was committed but its outcome never landed
     cancel_links_for_closed_cases()  links of finished cases die with them
+    cancel_superseded_links()        an open case keeps only its newest link
     expire_promises()             a promise-to-pay came due with no money (src/cases.py)
+    chase_due_cases()             a chaser-driven case whose wait elapsed (cart, subscription,
+                                  invoice, mandate — the risk types with no inbound webhook)
+    report_due_cases()            payment-failure cases whose wait elapsed with nothing to do
 
 Why this exists at all: `retry_at` was an advertised action that never took
 effect. The executor maps it onto the same `_create_payment_link` as
@@ -29,20 +34,24 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.actions import RetryAction
-from src.cases import expire_promises, log_event
+from src.cases import due_cases, expire_promises, log_event
+from src.chasers.policy import RISK_POLICIES
 from src.config import get_settings
 from src.database import async_session_factory
+from src.ingestion.router import EVENT_RECONCILE_MAX_ATTEMPTS, attribute_captured_payload
 from src.models import (
     PaymentFailure,
     RecoveryCase,
     RetryAttempt,
+    RiskEvent,
     SchedulerHeartbeat,
     WebhookEvent,
 )
@@ -50,6 +59,7 @@ from src.orchestrator import (
     PaymentRecoveryOrchestrator,
     get_orchestrator,
     process_payment_failure,
+    process_risk_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +69,8 @@ logger = logging.getLogger(__name__)
 # must not permanently skip a real payment failure; a payload that raises on
 # every tick must also not eat the whole sweep batch forever. Three is the
 # compromise: enough to survive a bad minute, few enough to starve nothing.
-_EVENT_RECONCILE_MAX_ATTEMPTS = 3
+# Defined in src/ingestion/router.py because the first-pass background task
+# re-arms under the same cap — one number, one meaning.
 
 # Fraction of one tick interval fire_due_retries may spend before yielding
 # back to the loop. Each fire can hold a Razorpay call for up to the executor
@@ -68,6 +79,18 @@ _EVENT_RECONCILE_MAX_ATTEMPTS = 3
 # The budget caps the overrun; whatever does not fit waits for the next tick
 # (the rows stay "scheduled" and the indexed query re-finds them).
 _FIRE_TIME_BUDGET_FRACTION = 0.8
+
+
+def _aware(ts: datetime) -> datetime:
+    """
+    Force a timestamp to UTC-aware before it meets datetime.now(UTC).
+
+    Postgres hands back aware values; the SQLite test harness hands back naive
+    wall clocks. The chase path compares a case's next_action_at against the
+    tick's clock on every sweep, so it gets the same coercion every other
+    boundary in this codebase applies instead of a TypeError in tests.
+    """
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
 
 
 async def fire_due_retries(session: AsyncSession, *, now: datetime | None = None) -> int:
@@ -156,11 +179,10 @@ async def _fire_one(
 ) -> bool:
     """Re-validate one claimed attempt and execute it. True if Razorpay was called."""
     if attempt.payment_failure_id is None:
-        # Nothing but the payment rail schedules retries today. A non-payment
-        # case reaching here means a future risk type started using retry_at
-        # without a fire path — refuse rather than guess.
-        await _mark(session, attempt, "skipped", "no payment_failure to retry")
-        return False
+        # No payment behind this attempt — it belongs to a chaser-driven case
+        # (cart, subscription, invoice, mandate) whose agent parked a retry_at.
+        # Fire it through the case path instead.
+        return await _fire_case_attempt(orchestrator, attempt, session, now=now)
 
     failure = await session.get(PaymentFailure, attempt.payment_failure_id)
     if failure is None:  # pragma: no cover — FK-less orphan
@@ -256,6 +278,117 @@ async def _mark(
     session.add(attempt)
 
 
+async def _fire_case_attempt(
+    orchestrator: PaymentRecoveryOrchestrator,
+    attempt: RetryAttempt,
+    session: AsyncSession,
+    *,
+    now: datetime,
+) -> bool:
+    """
+    Fire a scheduled attempt belonging to a chaser-driven case (no payment
+    behind it). Same fire-time discipline as the payment rail: re-validate the
+    case and consent against the clock at fire time, re-run the guardrail,
+    then execute. The wait the agent asked for is over; what can have changed
+    in the meantime is whether the case is still open and consent still holds.
+    """
+    from src.chasers.policy import policy_for
+
+    case = (
+        await session.get(RecoveryCase, attempt.recovery_case_id)
+        if attempt.recovery_case_id
+        else None
+    )
+    if case is None:
+        await _mark(session, attempt, "skipped", "no recovery case")
+        await session.commit()
+        return False
+
+    policy = policy_for(case.risk_type)
+    if policy is None:
+        await _mark(session, attempt, "skipped", f"no chase policy for {case.risk_type}")
+        await session.commit()
+        return False
+
+    # Re-validate against the clock at fire time — the same two facts that can
+    # genuinely change while a retry waits (case still open, consent still
+    # held), and deliberately not the budget/defer rules for the same reasons
+    # as the payment path above.
+    ledger = await orchestrator._get_ledger(case.customer_id, session)
+    stop: str | None = None
+    if case.state != "open":
+        stop = f"case is {case.state}: {case.close_reason or 'no reason recorded'}"
+    elif ledger is not None and ledger.consent_status == "opted_out":
+        stop = "customer opted out of contact"
+    if stop is not None:
+        await _mark(session, attempt, "cancelled", stop)
+        log_event(session, case, "stopped", reason=stop, at="fire_time", actor="scheduler")
+        await session.commit()
+        logger.info("Scheduled case retry cancelled: %s — %s", attempt.idempotency_key, stop)
+        return False
+
+    event = await orchestrator._latest_risk_event(case, session)
+    meta = event.meta if event is not None else None
+    context = await orchestrator._build_case_context(case, policy, session, now=now, meta=meta)
+
+    action = RetryAction(
+        action="switch_rail" if attempt.target_rail else "retry_now",
+        rail=attempt.target_rail,  # type: ignore[arg-type]
+        reason=attempt.agent_reasoning or "scheduled case retry",
+        confidence=attempt.agent_confidence,
+    )
+    guardrail = orchestrator._guardrail.validate(
+        action, context, attempt.idempotency_key, attempt.attempt_number - 1
+    )
+    if not guardrail.passed:
+        reason = "; ".join(guardrail.rejection_reasons)
+        await _mark(session, attempt, "rejected", reason)
+        log_event(session, case, "stopped", reason=reason, at="fire_time", actor="scheduler")
+        await session.commit()
+        logger.info("Scheduled case retry rejected at fire time: %s — %s", attempt.id, reason)
+        return False
+
+    # The row is already committed as "pending" by the claim in
+    # fire_due_retries, which is the write-ahead this path needs.
+    await orchestrator._execute_case_and_record(
+        attempt=attempt,
+        case=case,
+        policy=policy,
+        action=action,
+        idem_key=attempt.idempotency_key,
+        actor="scheduler",
+        session=session,
+        customer_email=event.customer_email if event is not None else None,
+        customer_contact=event.customer_contact if event is not None else None,
+    )
+
+    # The ladder's next rung: same floor as chase_case so the due-case sweep
+    # does not re-chase immediately, and a spent budget closes the case.
+    if case.state == "open":
+        if case.attempts_used >= case.max_attempts:
+            from src.cases import close_case
+
+            close_case(
+                case, "exhausted",
+                f"attempt budget spent ({case.attempts_used}/{case.max_attempts})",
+            )
+            log_event(
+                session, case, "closed", actor="scheduler",
+                state="exhausted", reason=case.close_reason,
+            )
+        else:
+            next_at = case.next_action_at
+            if next_at is None or _aware(next_at) <= now:
+                case.next_action_at = now + timedelta(hours=policy.re_chase_hours)
+
+    await session.commit()
+    logger.info(
+        "Scheduled case retry fired: case=%s key=%s result=%s",
+        case.id, attempt.idempotency_key, attempt.result,
+    )
+    return True
+
+
 async def reconcile_events(session: AsyncSession, *, now: datetime | None = None) -> int:
     """
     Re-run webhook events whose background task never finished. Returns how many.
@@ -267,6 +400,12 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
     we already said 200. Without this sweep every such payment silently gets no
     recovery attempt at all, and nothing in the system reports a gap.
 
+    Both money-bearing event types are covered. payment.failed is obvious;
+    payment.captured matters MORE: a dropped capture is money that arrived and
+    was never attributed, on a case that keeps chasing a customer who already
+    paid. The first-pass handler re-arms its failures under the same cap, so
+    an event lands here only if that task died before it could even try.
+
     The age threshold is what keeps this from racing the in-flight task that is
     still legitimately running.
 
@@ -274,7 +413,7 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
     row (processed=True) and gave up on the first exception — a database blip
     permanently skipped a real payment failure. Now a failing event counts one
     processing_attempt and is RE-ARMED (processed=False) until it has failed
-    _EVENT_RECONCILE_MAX_ATTEMPTS times; only then does it rest with the error
+    EVENT_RECONCILE_MAX_ATTEMPTS times; only then does it rest with the error
     recorded. A deterministically-broken payload still stops eating the batch.
     """
     now = now or datetime.now(UTC)
@@ -285,7 +424,7 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
         select(WebhookEvent)
         .where(
             WebhookEvent.processed.is_(False),
-            WebhookEvent.event_type == "payment.failed",
+            WebhookEvent.event_type.in_(["payment.failed", "payment.captured"]),
             WebhookEvent.received_at <= cutoff,
         )
         .order_by(WebhookEvent.received_at)
@@ -312,7 +451,10 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
         await session.commit()
 
         try:
-            await process_payment_failure(event, session)
+            if event.event_type == "payment.failed":
+                await process_payment_failure(event, session)
+            else:
+                await attribute_captured_payload(session, event.payload)
             await session.commit()
             recovered += 1
             logger.info("Reconciled dropped event: %s", event.razorpay_event_id)
@@ -320,7 +462,7 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
             logger.exception("Reconcile failed for %s", event.razorpay_event_id)
             await session.rollback()
             attempts = (event.processing_attempts or 0) + 1
-            if attempts < _EVENT_RECONCILE_MAX_ATTEMPTS:
+            if attempts < EVENT_RECONCILE_MAX_ATTEMPTS:
                 # Re-arm: a transient failure gets another try on a later tick.
                 await session.execute(
                     update(WebhookEvent)
@@ -335,7 +477,7 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
                     "Reconcile failed for %s (attempt %d/%d) — re-armed for retry",
                     event.razorpay_event_id,
                     attempts,
-                    _EVENT_RECONCILE_MAX_ATTEMPTS,
+                    EVENT_RECONCILE_MAX_ATTEMPTS,
                 )
             else:
                 # Give up with the error recorded — visible in the Operations
@@ -525,26 +667,306 @@ async def cancel_links_for_closed_cases(
         .limit(limit)
     )
 
+    cancelled = await _cancel_links(
+        session, orchestrator, result.scalars().all(), now=now, why="closed case"
+    )
+    if cancelled:
+        logger.info("Cancelled %d payment link(s) on closed cases", cancelled)
+    return cancelled
+
+
+async def _cancel_links(
+    session: AsyncSession,
+    orchestrator: PaymentRecoveryOrchestrator,
+    attempts: Sequence[RetryAttempt],
+    *,
+    now: datetime,
+    why: str,
+) -> int:
+    """Cancel each attempt's live link and stamp it, skipping ones already dead."""
     cancelled = 0
-    for attempt in result.scalars().all():
+    for attempt in attempts:
         details = dict(attempt.result_details) if isinstance(attempt.result_details, dict) else {}
         if details.get("link_cancelled_at") is not None:
             continue
         link_id = attempt.external_ref
-        if link_id is None:  # pragma: no cover — filtered by the query above
+        if link_id is None:  # pragma: no cover — filtered by the callers' queries
             continue
         ok = await orchestrator._executor.cancel_payment_link(link_id)
         if not ok:
+            # The call itself failed (network). Leave it unstamped; the next
+            # tick retries. Stamping on failure would abandon a live link.
             continue
         details["link_cancelled_at"] = now.isoformat()
+        details["link_cancelled_because"] = why
         attempt.result_details = details
         session.add(attempt)
         cancelled += 1
 
     if cancelled:
         await session.commit()
-        logger.info("Cancelled %d payment link(s) on closed cases", cancelled)
     return cancelled
+
+
+async def cancel_superseded_links(
+    session: AsyncSession,
+    orchestrator: PaymentRecoveryOrchestrator,
+    *,
+    now: datetime | None = None,
+    limit: int | None = None,
+) -> int:
+    """
+    Kill the older links of an OPEN case, leaving only the newest one payable.
+
+    cancel_links_for_closed_cases only fires once a case reaches a terminal
+    state, and executor.cancel_payment_link's own docstring already promised
+    the other half — "when a case closes (OR AN ATTEMPT IS SUPERSEDED), the
+    links it spawned must die with it" — which had no implementation and no
+    caller. So while a case was open, every retry and every nudge minted a
+    fresh link for the full amount and every earlier one stayed live on
+    Razorpay's side.
+
+    That is a real double charge, not a theoretical one: a customer with two
+    of our SMS messages in their inbox has two payable links for the same
+    money, and nothing downstream merges them. attribute_capture catches the
+    second only AFTER it settles, as an `overpayment` event that needs a
+    manual refund — the customer's money has already left.
+
+    Only the newest link-bearing attempt survives, because that is the one the
+    latest message points at and the one the recovery page reuses. Ties on
+    created_at keep BOTH alive: cancelling the wrong one of a pair we cannot
+    order is worse than briefly leaving two up, and the next tick re-reads.
+    """
+    now = now or datetime.now(UTC)
+    limit = limit or get_settings().scheduler_batch_size
+
+    # The newest link-bearing attempt per open case — the one to spare.
+    newest = (
+        select(
+            RetryAttempt.recovery_case_id.label("case_id"),
+            func.max(RetryAttempt.created_at).label("newest_at"),
+        )
+        .join(RecoveryCase, RecoveryCase.id == RetryAttempt.recovery_case_id)
+        .where(
+            RetryAttempt.external_ref.is_not(None),
+            RecoveryCase.state == "open",
+        )
+        .group_by(RetryAttempt.recovery_case_id)
+        .subquery()
+    )
+
+    result = await session.execute(
+        select(RetryAttempt)
+        .join(newest, newest.c.case_id == RetryAttempt.recovery_case_id)
+        .where(
+            RetryAttempt.external_ref.is_not(None),
+            RetryAttempt.created_at < newest.c.newest_at,
+            RetryAttempt.result.notin_(["cancelled"]),
+        )
+        .order_by(RetryAttempt.created_at)
+        .limit(limit)
+    )
+
+    cancelled = await _cancel_links(
+        session, orchestrator, result.scalars().all(), now=now, why="superseded"
+    )
+    if cancelled:
+        logger.info(
+            "Cancelled %d superseded payment link(s) on open cases", cancelled
+        )
+    return cancelled
+
+
+async def chase_due_cases(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    deadline: float | None = None,
+) -> int:
+    """
+    Chase every chaser-driven case whose wait has elapsed. Returns how many
+    cases were chased.
+
+    This is the sweep the non-payment risk types live on: an abandoned cart,
+    a halted subscription, an overdue invoice and a failed mandate debit have
+    NO inbound webhook, so their cases carry a next_action_at and something
+    has to go looking. Each due case runs through the full chase pipeline
+    (orchestrator.chase_case): stopping rule → agent → guardrail → write-ahead
+    execution → ladder advance. The pipeline itself decides whether the case
+    is contacted, deferred or closed.
+
+    All four types come back in ONE oldest-first query rather than one query
+    per type: under a backlog the longest-waiting case is served first
+    whatever its type, instead of the first type in the dict eating the whole
+    tick while invoices starve.
+
+    The time budget is the same property fire_due_retries already has, and for
+    the same reason: each chase can spend an agent decision and a Razorpay
+    call, so an unbounded sweep on a slow-Razorpay day runs the tick into the
+    next one and the backlog compounds exactly when chasing matters most.
+    `deadline` is the tick's shared monotonic deadline (tick() passes it, so
+    the fire sweep's spend counts against the same budget); standalone callers
+    get a fresh budget of one interval fraction.
+
+    Concurrency is handled the same way as the webhook path, not with row
+    locks: two workers chasing the same case build the same deterministic
+    idempotency key, and the UNIQUE constraint on retry_attempts hands the
+    attempt to exactly one of them. chase_case also refuses to act while an
+    earlier attempt is still pending, so a slow Razorpay day cannot stack
+    contacts on one case.
+
+    payment_failure cases are excluded: that rail is webhook-driven — the
+    event is its trigger — and sweeping it would run the pipeline a second
+    time on every payment failure ever recorded.
+    """
+    now = now or datetime.now(UTC)
+    orchestrator = get_orchestrator()
+
+    if deadline is None:
+        deadline = time.monotonic() + (
+            get_settings().scheduler_interval_seconds * _FIRE_TIME_BUDGET_FRACTION
+        )
+
+    due = await due_cases(
+        session, now=now,
+        risk_types=tuple(RISK_POLICIES),
+        # The old per-type loop admitted batch_size cases of EACH type; keep
+        # the same total ceiling now that one query fetches them all. The time
+        # budget, not this limit, is what bounds the tick's work.
+        limit=get_settings().scheduler_batch_size * len(RISK_POLICIES),
+    )
+
+    chased = 0
+    for idx, case in enumerate(due):
+        if time.monotonic() > deadline:
+            logger.info(
+                "Chase sweep hit its time budget with %d case(s) still due — "
+                "deferring them to the next tick",
+                len(due) - idx,
+            )
+            break
+        try:
+            await orchestrator.chase_case(case, session, actor="chaser", now=now)
+            chased += 1
+        except Exception:
+            # One broken case must not starve the rest of the batch. The
+            # case keeps its next_action_at, so the next tick retries it —
+            # the same re-arm philosophy the event reconcilers use.
+            logger.exception("Chase failed for case %s — will retry", case.id)
+            await session.rollback()
+    return chased
+
+
+async def reconcile_risk_events(
+    session: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """
+    Re-run merchant risk events whose background task never finished. Returns
+    how many recovered.
+
+    The risk router commits before returning 200 and processes in a background
+    task — restart, crash or deploy in that window and the task is gone while
+    the event sits stored with processed=False. The merchant will not
+    re-deliver (we already said 200), so the database is the only retry
+    mechanism there is. Same re-arm discipline as reconcile_events: a
+    transient failure counts one processing_attempt and is re-armed until the
+    shared cap; only a deterministically-broken payload rests.
+    """
+    now = now or datetime.now(UTC)
+    settings = get_settings()
+    cutoff = now - timedelta(seconds=settings.event_reconcile_after_seconds)
+
+    stale = await session.execute(
+        select(RiskEvent)
+        .where(
+            RiskEvent.processed.is_(False),
+            RiskEvent.received_at <= cutoff,
+        )
+        .order_by(RiskEvent.received_at)
+        .limit(settings.scheduler_batch_size)
+    )
+
+    recovered = 0
+    for event in stale.scalars().all():
+        # Claim it: whoever flips processed owns the event. With more than one
+        # worker, two schedulers can select the same stale event in the same
+        # second; the idempotency key makes duplicate processing safe, but it
+        # is still wasted work.
+        claimed = await session.execute(
+            update(RiskEvent)
+            .where(RiskEvent.id == event.id, RiskEvent.processed.is_(False))
+            .values(processed=True)
+        )
+        if claimed.rowcount != 1:  # type: ignore[attr-defined]
+            continue
+        await session.commit()
+
+        try:
+            await process_risk_event(event, session)
+            await session.commit()
+            recovered += 1
+            logger.info("Reconciled dropped risk event: %s", event.event_id)
+        except Exception:
+            logger.exception("Reconcile failed for risk event %s", event.event_id)
+            await session.rollback()
+            attempts = (event.processing_attempts or 0) + 1
+            if attempts < EVENT_RECONCILE_MAX_ATTEMPTS:
+                await session.execute(
+                    update(RiskEvent)
+                    .where(RiskEvent.id == event.id)
+                    .values(
+                        processed=False,
+                        processing_attempts=attempts,
+                        processing_error=f"Reconcile attempt {attempts} failed; re-armed",
+                    )
+                )
+                logger.warning(
+                    "Reconcile failed for risk event %s (attempt %d/%d) — re-armed",
+                    event.event_id, attempts, EVENT_RECONCILE_MAX_ATTEMPTS,
+                )
+            else:
+                await session.execute(
+                    update(RiskEvent)
+                    .where(RiskEvent.id == event.id)
+                    .values(
+                        processed=True,
+                        processing_attempts=attempts,
+                        processing_error="Reconciliation failed after retry cap",
+                    )
+                )
+                logger.error(
+                    "Reconcile permanently failed for risk event %s after %d attempts",
+                    event.event_id, attempts,
+                )
+            await session.commit()
+    return recovered
+
+
+async def report_due_cases(session: AsyncSession, *, now: datetime | None = None) -> int:
+    """
+    Surface payment-failure cases whose wait has elapsed. Returns how many.
+
+    The chaser-driven risk types are handled by chase_due_cases above; what
+    this sweep still reports is the payment rail — webhook-driven cases whose
+    next_action_at (set by the escalation backoff) has passed. Those wait for
+    their next webhook rather than for a sweep, and this count keeps that
+    waiting VISIBLE in the heartbeat instead of silently accumulating.
+    """
+    # Filter in SQL, not Python: a mixed-type fetch with a LIMIT could fill
+    # the whole window with chaser cases (their sweep yielded on the time
+    # budget, leaving them due) and push every payment-failure row out of
+    # sight — the heartbeat would then under-report exactly the backlog it
+    # exists to surface.
+    due = await due_cases(
+        session, now=now, risk_type="payment_failure",
+        limit=get_settings().scheduler_batch_size,
+    )
+    if due:
+        logger.info(
+            "Payment-failure cases waiting on their next webhook: %d",
+            len(due),
+        )
+    return len(due)
 
 
 async def _stamp_heartbeat(session: AsyncSession, counts: dict[str, int], now: datetime) -> None:
@@ -585,14 +1007,33 @@ async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[st
     """One full pass. Returns what each sweep did, for logs and for tests."""
     now = now or datetime.now(UTC)
     orchestrator = get_orchestrator()
+    # One shared deadline for the tick's expensive sweeps: the fire sweep
+    # budgets itself from its own start, and the chase sweep spends whatever
+    # is left of the same fraction. Without the shared view, back-to-back
+    # sweeps could each take a full budget and run the tick long past the
+    # interval — heartbeats go stale and deferred work fires late.
+    tick_deadline = time.monotonic() + (
+        get_settings().scheduler_interval_seconds * _FIRE_TIME_BUDGET_FRACTION
+    )
     counts = {
         "retries_fired": await fire_due_retries(session, now=now),
         "events_reconciled": await reconcile_events(session, now=now),
+        "risk_events_reconciled": await reconcile_risk_events(session, now=now),
         "attempts_reconciled": await reconcile_stale_attempts(session, now=now),
         "links_cancelled": await cancel_links_for_closed_cases(
             session, orchestrator, now=now
         ),
+        # The other half: an OPEN case's older links, superseded by the newest
+        # one. Without this every retry left a live, fully payable link behind
+        # and a customer with two of our messages could pay both.
+        "superseded_links_cancelled": await cancel_superseded_links(
+            session, orchestrator, now=now
+        ),
         "promises_expired": await expire_promises(session, now=now),
+        # Chase BEFORE report: the report only counts what the chase left
+        # behind (payment-failure cases waiting on their next webhook).
+        "cases_chased": await chase_due_cases(session, now=now, deadline=tick_deadline),
+        "due_cases_reported": await report_due_cases(session, now=now),
     }
     await _stamp_heartbeat(session, counts, now)
     await session.commit()
