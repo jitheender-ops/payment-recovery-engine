@@ -14,9 +14,36 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from src.config import get_settings, reveal
+
+
+def client_ip(request: Request) -> str:
+    """
+    The client IP rate limits and lockouts key on.
+
+    Behind a trusted proxy the RIGHTMOST X-Forwarded-For entry is the one the
+    egress proxy added — the only hop a client cannot forge. The LEFTMOST is
+    whatever the client sent, so trusting it lets an attacker rotate one header
+    value per request and walk around every limit. Each trusted hop APPENDS the
+    peer it saw, so the client sits `trusted_proxy_hops` entries from the
+    right; assuming exactly one hop is wrong the moment a CDN goes in front of
+    the platform LB. With no trusted proxy — or fewer entries than trusted
+    hops, meaning the header was not written by the chain we expect — the
+    header is attacker-controlled and ignored: the socket peer is the truth.
+    """
+    settings = get_settings()
+    if settings.behind_trusted_proxy:
+        hops = max(1, settings.trusted_proxy_hops)
+        entries = [
+            part.strip()
+            for part in request.headers.get("x-forwarded-for", "").split(",")
+            if part.strip()
+        ]
+        if len(entries) >= hops:
+            return entries[-hops]
+    return request.client.host if request.client else "unknown"
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:

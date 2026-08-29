@@ -1,227 +1,76 @@
-# Design System Master File
+# Recovery Console — Design System (v2, "Ledger on paper")
 
-> **LOGIC:** When building a specific page, first check `design-system/pages/[page-name].md`.
-> If that file exists, its rules **override** this Master file.
-> If not, strictly follow the rules below.
+Replaced 2026-08-28. v1 (dark slate + gold/purple, GSAP reveals) is the
+anti-reference: the merchant found it generic, heavy and templated. v2 is the
+committed world; do not polish v1 back in.
 
----
+## Thesis
 
-**Project:** Recovery Console
-**Generated:** 2026-08-25 20:01:12
-**Category:** Financial Dashboard
-**Design Dials:** Variance 4/10 (Balanced / Modern) | Motion 3/10 (Subtle) | Density 8/10 (Dense / Dashboard)
+The merchant's own ledger, printed on paper. Recovery is bookkeeping brought
+home — calm, exact, enforced — not a glowing dashboard. Every surface reads as
+a well-kept financial document: warm paper, near-black ink, one deep green that
+only ever means recovered money.
 
----
+## Color (restrained: neutrals + one accent)
 
-## Global Rules
+| Token | Value | Role |
+|---|---|---|
+| `--paper` | `#FAFAF7` | page ground (warm white, never pure `#FFF`) |
+| `--card` | `#FFFFFF` | cards, table wells |
+| `--well` | `#F4F4EF` | recessed sections, hover tints |
+| `--ink` | `#15181C` | primary text (≈15:1 on paper) |
+| `--ink-2` | `#4A5057` | secondary text (≈8:1) |
+| `--ink-3` | `#6B7076` | faint text, labels (≥4.5:1 — floor, don't go lighter) |
+| `--line` | `#E8E7E2` | hairline rules |
+| `--line-2` | `#DBDAD3` | input/chip borders |
+| `--green` | `#0E7A4D` | THE accent: recovered money, primary actions, live state |
+| `--green-deep` | `#0B5E3C` | green hover, green text on paper |
+| `--red` | `#B3261E` | at-risk money, errors — never decoration |
 
-### Color Palette
+Green is semantic: it means "money came back" or "go". Never use it as generic
+decoration; never introduce a second accent.
 
-| Role | Hex | CSS Variable |
-|------|-----|--------------|
-| Primary | `#F59E0B` | `--color-primary` |
-| On Primary | `#0F172A` | `--color-on-primary` |
-| Secondary | `#FBBF24` | `--color-secondary` |
-| Accent/CTA | `#8B5CF6` | `--color-accent` |
-| Background | `#0F172A` | `--color-background` |
-| Foreground | `#F8FAFC` | `--color-foreground` |
-| Muted | `#272F42` | `--color-muted` |
-| Border | `#334155` | `--color-border` |
-| Destructive | `#EF4444` | `--color-destructive` |
-| Ring | `#F59E0B` | `--color-ring` |
+## Type
 
-**Color Notes:** Gold trust + purple tech
+- **Schibsted Grotesk** — display + UI. Weights 400–800; display uses 800 with
+  `-0.038em` tracking; section headings 700 `-0.032em`; controls 500/600.
+- **Spline Sans Mono** — every number, reference, label and code block, always
+  with `tabular-nums`. Mono is for data and measurement, never for prose.
+- Display max `4.1rem` (CTA `3.4rem`, login `4.75rem`); body 16px/1.65 at
+  ≤68ch measure; more space above a heading than below it.
 
-### Typography
+## Components
 
-- **Heading Font:** Fira Code
-- **Body Font:** Fira Sans
-- **Mood:** dashboard, data, analytics, code, technical, precise
-- **Google Fonts:** [Fira Code + Fira Sans](https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap)
+- **Buttons**: pill radius; primary = green fill/white text; ghost = hairline
+  border. Focus ring: 2px green, 2–3px offset.
+- **KPI cards**: white card, hairline border, soft offset shadow; mono label
+  uppercase `.68rem` tracking `.1em`; value mono `1.85rem`; foot note faint.
+  Recovered value green, at-risk red.
+- **Ledger rows** (landing): 52px icon well + name/blurb + right-aligned mono
+  bound chips; hairline dividers; hover → `--well`.
+- **Tables**: mono uppercase `.66rem` headers in `--ink-3`; right-aligned
+  tabular numerals; money green/red by sign of meaning; hover row tint.
+- **Code**: dark block (`#161A1E`) on the light page — the one dark surface,
+  reserved for the thing you paste.
 
-**CSS Import:**
-```css
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
-```
+## Motion (native only — no animation library)
 
-### Spacing Variables
+- Hero: staged entrance (`data-stage` 1→5), rise + blur-out, `.95s`
+  `cubic-bezier(.16,1,.3,1)`, 100–140ms stagger. The page's authored moment.
+- Scroll: sections reveal once (fade + 22px rise), sibling stagger via `--d`.
+- Signature: money figures count up once on first view (`data-count`).
+- `prefers-reduced-motion`: everything renders final-state, instantly.
+- GSAP/CDN is gone on purpose: the choreography is ~50 lines of vanilla JS +
+  CSS keyframes and must stay that way unless a real need appears.
 
-*Density: 8/10 — Dense / Dashboard*
+## Non-negotiables
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--space-xs` | `2px` / `0.125rem` | Tight gaps |
-| `--space-sm` | `4px` / `0.25rem` | Icon gaps, inline spacing |
-| `--space-md` | `8px` / `0.5rem` | Standard padding |
-| `--space-lg` | `12px` / `0.75rem` | Section padding |
-| `--space-xl` | `16px` / `1rem` | Large gaps |
-| `--space-2xl` | `24px` / `1.5rem` | Section margins |
-| `--space-3xl` | `32px` / `2rem` | Hero padding |
-
-### Shadow Depths
-
-| Level | Value | Usage |
-|-------|-------|-------|
-| `--shadow-sm` | `0 1px 2px rgba(0,0,0,0.05)` | Subtle lift |
-| `--shadow-md` | `0 4px 6px rgba(0,0,0,0.1)` | Cards, buttons |
-| `--shadow-lg` | `0 10px 15px rgba(0,0,0,0.1)` | Modals, dropdowns |
-| `--shadow-xl` | `0 20px 25px rgba(0,0,0,0.15)` | Hero images, featured cards |
-
----
-
-## Component Specs
-
-### Buttons
-
-```css
-/* Primary Button */
-.btn-primary {
-  background: #8B5CF6;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-
-/* Secondary Button */
-.btn-secondary {
-  background: transparent;
-  color: #F59E0B;
-  border: 2px solid #F59E0B;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-```
-
-### Cards
-
-```css
-.card {
-  background: #0F172A;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: var(--shadow-md);
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.card:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
-}
-```
-
-### Inputs
-
-```css
-.input {
-  padding: 12px 16px;
-  border: 1px solid #E2E8F0;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: border-color 200ms ease;
-}
-
-.input:focus {
-  border-color: #F59E0B;
-  outline: none;
-  box-shadow: 0 0 0 3px #F59E0B20;
-}
-```
-
-### Modals
-
-```css
-.modal-overlay {
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-}
-
-.modal {
-  background: white;
-  border-radius: 16px;
-  padding: 32px;
-  box-shadow: var(--shadow-xl);
-  max-width: 500px;
-  width: 90%;
-}
-```
-
----
-
-## Style Guidelines
-
-**Style:** Modern Dark (Cinema Mobile)
-
-**Keywords:** dark mode, cinematic, ambient light, glassmorphism, deep black, indigo, glow, blur, atmospheric, reanimated, haptic, premium, layered, frosted glass, linear gradient
-
-**Best For:** Developer tools, pro productivity apps, fintech/trading dashboards, media/streaming platforms, AI tool interfaces, high-end gaming companion apps
-
-**Key Effects:** Expo.out Bezier(0.16,1,0.3,1) easing; spring modals (damping:20 stiffness:90); haptic-linked press (Impact Light/Medium); animated ambient light blobs (Reanimated translateX/Y slow oscillation); BlurView glassmorphism headers/nav (intensity 20); scale press 0.97 → 1.0; avoid pure #000000 (OLED smear)
-
-### Page Pattern
-
-**Pattern Name:** Real-Time / Operations Landing
-
-- **Conversion Strategy:** For ops/security/iot products. Demo or sandbox link. Trust signals.
-- **CTA Placement:** Primary CTA in nav + After metrics
-- **Section Order:** 1. Hero (product + live preview or status), 2. Key metrics/indicators, 3. How it works, 4. CTA (Start trial / Contact)
-
----
-
-## Motion
-
-**Scroll Reveal** (Subtle) — Trigger: scroll (viewport enter) | Duration: 300-400ms | Easing: `power1.out`
-
-```js
-gsap.from(el, { opacity: 0, y: 12, duration: 0.35, ease: 'power1.out', scrollTrigger: { trigger: el, start: 'top 90%', toggleActions: 'play none none reverse' } });
-```
-
-**Framework notes:** Requires the ScrollTrigger plugin registered once via gsap.registerPlugin(ScrollTrigger)
-
-- ✅ Keep the y offset small (8-16px) so it reads as a fade, not a slide
-- ❌ Don't reveal below-the-fold content needed for SEO/crawlers as invisible-by-default without a no-JS fallback
-- ⚡ toggleActions 'play none none reverse' avoids re-triggering on every scroll direction change
-
----
-
-## Anti-Patterns (Do NOT Use)
-
-- ❌ Light mode default
-- ❌ Slow rendering
-
-### Additional Forbidden Patterns
-
-- ❌ **Emojis as icons** — Use SVG icons (Heroicons, Lucide, Simple Icons)
-- ❌ **Missing cursor:pointer** — All clickable elements must have cursor:pointer
-- ❌ **Layout-shifting hovers** — Avoid scale transforms that shift layout
-- ❌ **Low contrast text** — Maintain 4.5:1 minimum contrast ratio
-- ❌ **Instant state changes** — Always use transitions (150-300ms)
-- ❌ **Invisible focus states** — Focus states must be visible for a11y
-
----
-
-## Pre-Delivery Checklist
-
-Before delivering any UI code, verify:
-
-- [ ] No emojis used as icons (use SVG instead)
-- [ ] All icons from consistent icon set (Heroicons/Lucide)
-- [ ] `cursor-pointer` on all clickable elements
-- [ ] Hover states with smooth transitions (150-300ms)
-- [ ] Light mode: text contrast 4.5:1 minimum
-- [ ] Focus states visible for keyboard navigation
-- [ ] `prefers-reduced-motion` respected
-- [ ] Responsive: 375px, 768px, 1024px, 1440px
-- [ ] No content hidden behind fixed navbars
-- [ ] No horizontal scroll on mobile
+- Contrast ≥4.5:1 for all text (AA); `--ink-3` is the lightest allowed gray.
+- No eyebrows/kickers above headings; no icon-card grids as page structure;
+  chasers render as ledger rows, not cards.
+- Every state styled: hover, focus, error, empty ("ledger is empty"), DB-down
+  ("can't reach the database") — never a fake number.
+- Public landing shows product facts and sample figures clearly labeled
+  "Sample data"; live numbers live only behind the gated console.
+- Browser surfaces belong to the design: selection tint, green caret, themed
+  scrollbar, focus-visible, tabular numerals, 3px underline offset.

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,24 +23,26 @@ async def is_duplicate_event(session: AsyncSession, event_id: str) -> bool:
 
     Attempts to insert the event_id into the processed_events table.
     If the insert succeeds, the event is new. If it fails due to the
-    unique constraint, the event is a duplicate.
+    unique constraint, it is a duplicate — the constraint is the check,
+    so no pre-SELECT is needed.
 
     Args:
         session: Async SQLAlchemy session.
-        event_id: The Razorpay event ID to check.
+        event_id: The Razorpay event to check.
 
     Returns:
         True if the event has already been processed (duplicate).
         False if this is a new event (successfully inserted).
     """
-    # Fast path: check if it already exists
-    existing = await session.execute(
-        select(ProcessedEvent.id).where(
-            ProcessedEvent.razorpay_event_id == event_id
-        )
-    )
-    if existing.scalar_one_or_none() is not None:
-        logger.info("Duplicate event detected (fast path): %s", event_id)
+    try:
+        new_record = ProcessedEvent(razorpay_event_id=event_id)
+        session.add(new_record)
+        await session.flush()
+        logger.debug("New event recorded: %s", event_id)
+        return False
+    except IntegrityError:
+        await session.rollback()
+        logger.info("Duplicate event detected: %s", event_id)
         return True
 
     # Try to insert — handles race conditions via unique constraint

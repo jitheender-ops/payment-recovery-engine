@@ -1,0 +1,686 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Recovery Engine · Failed payments are not the end of the sale{% endblock %}
+
+{% block head %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&display=swap">
+<style>
+  /* ── Web replica (hero) ─────────────────────────────────────────────────
+     A clickable mock of a merchant's own site, "Tatva" — a fictional grocery
+     shop — so a visitor can walk the customer journey (sign in, checkout, a
+     card decline, silent recovery, pay again) and flip to the internal
+     reasoning (guardrail, timeline, funnel) behind it. Deliberately its own
+     skin: it is a screenshot of somebody else's product, not ours. Vanilla
+     JS, no React/build step — the whole thing is a few hundred lines and
+     this is a hero widget on a marketing page, not an app. */
+  .replica{
+    --r-accent:#ec3013; --r-accent-soft:#fff2ef; --r-ink:#201e1d; --r-mute:#6b6866;
+    --r-bg:#f3f2f2; --r-surface:#fff; --r-line:#dedbda;
+    font-family:"Archivo",-apple-system,BlinkMacSystemFont,sans-serif;
+    border-radius:var(--r);border:1px solid var(--line);background:var(--r-surface);
+    box-shadow:var(--shadow-lg);overflow:hidden;color:var(--r-ink);
+  }
+  .replica-chrome{display:flex;align-items:center;gap:.5rem;padding:.65rem .9rem;
+    background:var(--r-bg);border-bottom:1px solid var(--r-line)}
+  .replica-dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .replica-url{margin-left:.4rem;font-family:var(--mono);font-size:.72rem;color:var(--r-mute);
+    background:var(--r-surface);border:1px solid var(--r-line);border-radius:999px;
+    padding:.25rem .7rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .replica-tag{margin-left:auto;font-family:var(--mono);font-size:.62rem;font-weight:600;
+    letter-spacing:.1em;color:var(--r-mute);white-space:nowrap}
+
+  .replica-steps{display:flex;gap:0;overflow-x:auto;padding:.6rem .7rem 0;scrollbar-width:none}
+  .replica-steps::-webkit-scrollbar{display:none}
+  .replica-step{flex:none;font-family:var(--mono);font-size:.68rem;font-weight:600;
+    color:var(--r-mute);background:none;border:none;cursor:pointer;padding:.4rem .6rem;
+    border-bottom:2px solid transparent;white-space:nowrap;transition:color .15s ease}
+  .replica-step:hover{color:var(--r-ink)}
+  .replica-step[aria-current="true"]{color:var(--r-accent);border-color:var(--r-accent)}
+
+  .replica-mode{display:flex;justify-content:flex-end;padding:.5rem .9rem 0}
+  .replica-mode button{font-family:var(--mono);font-size:.68rem;font-weight:600;color:var(--r-accent);
+    background:var(--r-accent-soft);border:1px solid transparent;border-radius:999px;
+    padding:.3rem .7rem;cursor:pointer}
+  .replica-mode button:hover{border-color:var(--r-accent)}
+
+  .replica-body{padding:1.1rem 1.1rem 1.3rem;min-height:19rem;max-height:27rem;overflow-y:auto;
+    display:flex;flex-direction:column}
+  .replica-body h4{margin:0 0 .3rem;font-size:1.05rem;font-weight:800;letter-spacing:-.01em}
+  .replica-body .rq{color:var(--r-mute);font-size:.82rem;margin:0 0 1rem}
+  .replica-body .rmono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  .r-field{width:100%;padding:.7rem .8rem;border:1px solid var(--r-line);border-radius:8px;
+    font-family:inherit;font-size:.92rem;background:var(--r-surface);color:var(--r-ink)}
+  .r-field:focus{outline:none;border-color:var(--r-accent)}
+  .r-btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;width:100%;
+    font-family:"Archivo",sans-serif;font-weight:600;font-size:.9rem;padding:.75rem 1rem;
+    border-radius:8px;border:1px solid var(--r-line);background:var(--r-accent);color:#fff;
+    cursor:pointer;transition:opacity .15s ease}
+  .r-btn:disabled{opacity:.45;cursor:not-allowed}
+  .r-btn.r-btn-ghost{background:var(--r-surface);color:var(--r-ink)}
+  .r-divider{display:flex;align-items:center;gap:.6rem;margin:.9rem 0;color:var(--r-mute);font-size:.74rem}
+  .r-divider::before,.r-divider::after{content:"";flex:1;height:1px;background:var(--r-line)}
+
+  .r-otp-row{display:flex;gap:.4rem;margin:.2rem 0 1rem;position:relative}
+  .r-otp-cell{width:2.3rem;height:2.6rem;border:1.5px solid var(--r-line);border-radius:8px;
+    display:flex;align-items:center;justify-content:center;font-family:var(--mono);
+    font-size:1.05rem;font-weight:600}
+  .r-otp-cell.filled{border-color:var(--r-accent)}
+  .r-otp-input{position:absolute;inset:0;opacity:0;width:100%;height:100%;border:0}
+  .r-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:.4rem;max-width:12.5rem}
+  .r-key{padding:.6rem 0;border-radius:8px;border:1px solid var(--r-line);background:var(--r-surface);
+    font-family:var(--mono);font-size:.95rem;cursor:pointer;color:var(--r-ink)}
+  .r-key:hover{border-color:var(--r-accent)}
+  .r-key:empty{border-color:transparent;cursor:default}
+
+  .r-items{border-top:1px solid var(--r-line);margin-top:.2rem}
+  .r-items .ri{display:flex;justify-content:space-between;gap:.6rem;padding:.5rem 0;
+    border-bottom:1px solid var(--r-line);font-size:.82rem}
+  .r-items .ri .name{flex:1;min-width:0}
+  .r-items .ri .qty{color:var(--r-mute);font-family:var(--mono);font-size:.72rem}
+  .r-items .ri .price{font-family:var(--mono)}
+  .r-total{display:flex;justify-content:space-between;padding:.7rem 0 .9rem;font-weight:700}
+  .r-total .rmono{font-size:1.1rem}
+
+  .r-strip{display:flex;align-items:center;gap:.6rem;padding:.6rem .8rem;border-radius:8px;
+    margin-top:.9rem;font-size:.8rem}
+  .r-strip .rdot{width:7px;height:7px;border-radius:50%;flex:none}
+  .r-strip .rt{flex:1;min-width:0}
+  .r-strip .rt b{display:block;font-size:.82rem}
+  .r-strip .rt span{color:inherit;opacity:.75;font-size:.72rem}
+
+  .r-reassure{list-style:none;margin:1rem 0 0;padding:0;display:flex;flex-direction:column;gap:.5rem}
+  .r-reassure li{display:flex;gap:.6rem;font-size:.78rem;color:var(--r-mute)}
+  .r-reassure .rn{font-family:var(--mono);color:var(--r-accent);flex:none}
+
+  .r-receipt{border-top:1px solid var(--r-line);margin-top:.8rem}
+  .r-receipt .rr{display:flex;justify-content:space-between;padding:.5rem 0;
+    border-bottom:1px solid var(--r-line);font-size:.8rem}
+  .r-receipt .rr dt{color:var(--r-mute)}
+  .r-receipt .rr dd{margin:0;font-family:var(--mono)}
+
+  .r-toggle{display:flex;align-items:center;justify-content:space-between;padding:.55rem 0;
+    border-bottom:1px solid var(--r-line);font-size:.85rem}
+  .r-switch{width:34px;height:20px;border-radius:999px;background:var(--r-line);position:relative;
+    border:none;cursor:pointer;flex:none}
+  .r-switch.on{background:var(--r-accent)}
+  .r-switch i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;
+    transition:transform .15s ease}
+  .r-switch.on i{transform:translateX(14px)}
+
+  .r-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin-bottom:.9rem}
+  .r-kpi .l{font-family:var(--mono);font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--r-mute)}
+  .r-kpi .v{font-family:var(--mono);font-weight:600;font-size:.95rem;margin-top:.15rem}
+
+  .r-timeline{list-style:none;margin:0;padding:0;border-left:2px solid var(--r-line);
+    display:flex;flex-direction:column;gap:.7rem;padding-left:.9rem}
+  .r-timeline li{position:relative;font-size:.78rem}
+  .r-timeline li::before{content:"";position:absolute;left:-1.15rem;top:.25rem;width:8px;height:8px;
+    border-radius:50%;background:var(--tl,var(--r-ink))}
+  .r-timeline b{display:block;font-size:.8rem}
+  .r-timeline .rd{color:var(--r-mute);margin-top:.1rem}
+  .r-timeline .rmeta{color:var(--r-mute);font-family:var(--mono);font-size:.66rem;margin-top:.15rem}
+
+  .r-rules{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.4rem}
+  .r-rules li{display:flex;justify-content:space-between;font-size:.78rem;gap:.6rem}
+  .r-rules .rv{font-family:var(--mono);color:var(--r-accent);font-size:.72rem;flex:none}
+
+  .r-funnel{display:flex;flex-direction:column;gap:.7rem}
+  .r-fstage .fl{display:flex;justify-content:space-between;font-size:.76rem;margin-bottom:.3rem}
+  .r-fstage .fl .v{font-family:var(--mono);color:var(--r-mute)}
+  .r-fbar{height:8px;border-radius:999px;background:var(--r-bg);overflow:hidden}
+  .r-fbar i{display:block;height:100%;border-radius:999px}
+
+  .r-sweeps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.35rem;
+    font-family:var(--mono);font-size:.72rem}
+  .r-sweeps li{display:flex;justify-content:space-between;gap:.6rem;color:var(--r-mute)}
+  .r-sweeps li b{color:var(--r-ink);font-weight:600}
+
+  .r-back{align-self:flex-start;background:none;border:none;color:var(--r-mute);
+    font-family:var(--mono);font-size:.72rem;cursor:pointer;margin-bottom:.7rem;padding:0}
+  .r-back:hover{color:var(--r-ink)}
+
+  @media (prefers-reduced-motion:reduce){ .replica *{transition:none!important} }
+</style>
+{% endblock %}
+
+{% block body %}
+<nav class="nav">
+  <div class="nav-in">
+    <a class="brand" href="/console">
+      <span class="brand-mark">₹</span>
+      <span class="brand-name">{{ merchant_name or "Recovery Engine" }}</span>
+    </a>
+    <div class="nav-links">
+      <a class="nav-link hide-sm" href="#chasers">The leak</a>
+      <a class="nav-link hide-sm" href="#how">How it works</a>
+      <a class="nav-link hide-sm" href="#integrate">Integrate</a>
+      <a class="btn btn-primary btn-sm" href="/console/live">{{ icon("lock", 14) }} Open console</a>
+    </div>
+  </div>
+</nav>
+
+<header class="section" style="padding-top:clamp(3rem,7vh,5rem)">
+  <div class="wrap" style="display:grid;grid-template-columns:1.05fr .95fr;gap:clamp(2rem,5vw,4.5rem);align-items:center">
+    <div>
+      <h1 class="display" data-stage>Failed payments are not the end of the sale.</h1>
+      <p class="lede" style="margin-top:1.4rem" data-stage="2">
+        One engine chases declined charges, cold carts, stalled subscriptions,
+        overdue invoices and bounced mandates — on the rail most likely to
+        clear, inside bounds a regulator could read.
+      </p>
+      <div style="display:flex;gap:.8rem;margin-top:2rem;flex-wrap:wrap" data-stage="3">
+        <a class="btn btn-primary" href="/console/live">Open the live ledger {{ icon("arrow", 16) }}</a>
+        <a class="btn btn-ghost" href="#how">How it works</a>
+      </div>
+    </div>
+
+    <div class="replica" data-stage="4" id="replica" data-merchant="Tatva" data-silent="true" data-recovery-seconds="4">
+      <div class="replica-chrome">
+        <span class="replica-dot" style="background:#ff5f57"></span>
+        <span class="replica-dot" style="background:#febc2e"></span>
+        <span class="replica-dot" style="background:#28c840"></span>
+        <span class="replica-url mono" id="replicaUrl">tatva.in/sign-in</span>
+        <span class="replica-tag">WEB REPLICA</span>
+      </div>
+      <div class="replica-steps" id="replicaSteps" role="tablist" aria-label="Customer journey"></div>
+      <div class="replica-mode" id="replicaMode"></div>
+      <div class="replica-body" id="replicaBody"></div>
+    </div>
+  </div>
+</header>
+
+<section class="section" id="chasers" style="padding-top:clamp(3rem,7vh,5rem)">
+  <div class="wrap">
+    <div class="measure" data-reveal>
+      <h2 class="h2">Money leaks in five quiet places.</h2>
+      <p class="lede" style="margin-top:1.1rem">
+        A declined card announces itself. The other four never do — so you tell
+        the engine about them, and it takes it from there. These bounds are not
+        marketing; they are what the engine enforces on every chase.
+      </p>
+    </div>
+
+    <div class="ledger" style="margin-top:2.6rem">
+      {% for c in chasers %}
+      <div class="ledger-row" data-reveal style="--d:{{ loop.index0 * 0.06 }}s">
+        <span class="ledger-icon">{{ icon(c.icon, 20) }}</span>
+        <div>
+          <h3>{{ c.label }}</h3>
+          <p class="blurb">{{ c.blurb }}</p>
+        </div>
+        <div class="bounds">
+          <span class="chip">{{ c.max_attempts }} touches</span>
+          <span class="chip">{{ c.window }}</span>
+          <span class="chip chip-green">{{ c.rail }}</span>
+          <span class="chip">{{ c.source }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="section" id="how" style="background:var(--well);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <div class="measure" data-reveal>
+      <h2 class="h2">A model in the middle, rules on both ends.</h2>
+      <p class="lede" style="margin-top:1.1rem">
+        Everything before the model is a lookup; everything after it is a rule.
+        It can be wrong — nothing reaches a payment link until the guardrail
+        agrees.
+      </p>
+    </div>
+
+    <div class="steps" style="margin-top:3rem">
+      <div class="step" data-reveal>
+        <h3>Receive</h3>
+        <p>Failed charges arrive by webhook; everything else by one signed
+        <span class="mono">POST /risks</span>. Signature-checked, deduplicated,
+        classified before anything runs.</p>
+      </div>
+      <div class="step" data-reveal style="--d:.08s">
+        <h3>Decide</h3>
+        <p>A constrained agent picks one of five fixed actions — retry, defer,
+        switch rail, nudge, abandon — and the reasoning is stored on every
+        attempt.</p>
+      </div>
+      <div class="step" data-reveal style="--d:.16s">
+        <h3>Gate</h3>
+        <p>Consent window, attempt budget, quiet-hours blackout and idempotency
+        are re-checked the moment a chase fires. Rules, not prompts.</p>
+      </div>
+      <div class="step" data-reveal style="--d:.24s">
+        <h3>Recover</h3>
+        <p>A signed, expiring link goes out on the rail most likely to clear.
+        A capture through that link is the only thing counted as recovered.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="measure" data-reveal>
+      <h2 class="h2">What it refuses to do.</h2>
+      <p class="lede" style="margin-top:1.1rem">
+        The chase is bounded by construction, not by promise. Each of these is
+        a rule the engine cannot talk its way around.
+      </p>
+    </div>
+    <dl class="refusals" style="margin-top:2.6rem">
+      <div data-reveal><dt><span class="no">✕</span> Never chases past the consent window</dt>
+        <dd>Every case has a deadline. Past it the engine closes the case as expired instead of reaching out.</dd></div>
+      <div data-reveal style="--d:.06s"><dt><span class="no">✕</span> Never messages 23:00–07:00 IST</dt>
+        <dd>Attempts inside the blackout are deferred to morning; the attempt budget is not burned.</dd></div>
+      <div data-reveal style="--d:.12s"><dt><span class="no">✕</span> Never claims a payment it didn't cause</dt>
+        <dd>Customers who paid on their own are counted, but never attributed to the engine.</dd></div>
+      <div data-reveal style="--d:.18s"><dt><span class="no">✕</span> Never re-mints a live link</dt>
+        <dd>One link per attempt, reused while it lives — a customer never holds two ways to pay the same rupee.</dd></div>
+      <div data-reveal style="--d:.24s"><dt><span class="no">✕</span> Never loses an event</dt>
+        <dd>Every event is committed before it is processed, and a reconciler re-runs what a crash left behind.</dd></div>
+      <div data-reveal style="--d:.3s"><dt><span class="no">✕</span> Never texts without an exit</dt>
+        <dd>One opt-out closes every open case for that customer and stops all future outreach.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="section" id="integrate" style="background:var(--well);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap" style="display:grid;grid-template-columns:.9fr 1.1fr;gap:clamp(2rem,5vw,4rem);align-items:center">
+    <div data-reveal>
+      <h2 class="h2">Feed it in one POST.</h2>
+      <p class="lede" style="margin-top:1.1rem">
+        Failed card charges arrive through your Razorpay webhook automatically.
+        For everything else, push a risk event: sign the raw body with your
+        shared secret and the engine opens the case, picks the rail and starts
+        the chase.
+      </p>
+      <div style="display:flex;flex-direction:column;gap:.6rem;margin-top:1.6rem;color:var(--ink-2);font-size:.92rem">
+        <div style="display:flex;gap:.6rem"><span style="color:var(--green-deep)">{{ icon("check", 16) }}</span> HMAC-signed, deduplicated, fail-closed on an unset secret</div>
+        <div style="display:flex;gap:.6rem"><span style="color:var(--green-deep)">{{ icon("check", 16) }}</span> Re-deliveries are safe — the same event is a clean 200</div>
+        <div style="display:flex;gap:.6rem"><span style="color:var(--green-deep)">{{ icon("check", 16) }}</span> Processed in the background; a crash loses nothing</div>
+      </div>
+    </div>
+    <div data-reveal style="--d:.08s">
+      <pre class="code"><span class="c"># Push an abandoned checkout</span>
+<span class="k">POST</span> /risks
+X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
+
+{
+  <span class="k">"risk_type"</span>:        <span class="s">"checkout_abandonment"</span>,
+  <span class="k">"reference_id"</span>:     <span class="s">"cart_123"</span>,
+  <span class="k">"amount_paise"</span>:     <span class="g">249900</span>,
+  <span class="k">"currency"</span>:         <span class="s">"INR"</span>,
+  <span class="k">"customer_email"</span>:   <span class="s">"a@b.in"</span>,
+  <span class="k">"customer_contact"</span>: <span class="s">"+919812345678"</span>,
+  <span class="k">"meta"</span>: { <span class="k">"cart_items"</span>: <span class="s">"2 books"</span> }
+}</pre>
+      <p class="faint" style="font-size:.78rem;margin-top:.7rem">
+        Also accepted: <span class="mono">subscription_failure</span>,
+        <span class="mono">invoice_overdue</span>, <span class="mono">mandate_failure</span>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap" style="text-align:center">
+    <h2 class="display" style="font-size:clamp(2.2rem,4.6vw,3.4rem)" data-reveal>See what it has<br>already recovered.</h2>
+    <p class="lede" style="margin:1.3rem auto 0;max-width:48ch;--d:.08s" data-reveal>
+      Your money at risk, the amount brought back, and how each chaser is
+      performing — live, aggregate, and gated by your console password.
+    </p>
+    <div style="margin-top:2.2rem;--d:.14s" data-reveal>
+      <a class="btn btn-primary" href="/console/live">Open the live ledger {{ icon("arrow", 16) }}</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap" style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+    <span>{{ merchant_name or "Recovery Engine" }} · payment failure recovery</span>
+    <span class="mono" style="font-size:.74rem">deterministic · constrained · audited</span>
+  </div>
+</footer>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  @media (max-width:980px){
+    header.section > .wrap{grid-template-columns:1fr!important}
+    #integrate .wrap{grid-template-columns:1fr!important}
+  }
+</style>
+
+{# Web replica: a clickable mock of a merchant's storefront ("Tatva") walking
+   a visitor through sign-in, a card decline, silent recovery and payment,
+   plus a toggle to the internal reasoning behind it. All client-side,
+   fictional data — see the "WEB REPLICA" tag and design-system rationale in
+   the comment at the top of {% block head %} above. #}
+<script>
+(function () {
+  var root = document.getElementById('replica');
+  if (!root) return;
+
+  var MERCHANT = root.dataset.merchant || 'Tatva';
+  var SILENT = root.dataset.silent !== 'false';
+  var RECOVERY_SECS = Number(root.dataset.recoverySeconds || 4);
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var urlEl = document.getElementById('replicaUrl');
+  var stepsEl = document.getElementById('replicaSteps');
+  var modeEl = document.getElementById('replicaMode');
+  var bodyEl = document.getElementById('replicaBody');
+
+  var URLS = {
+    landing: 'tatva.in/sign-in', otp: 'tatva.in/sign-in/verify', basket: 'tatva.in/basket',
+    recovering: 'tatva.in/orders/TV-4471', paylink: 'tatva.in/recover/9fK2xQ',
+    paid: 'tatva.in/orders/TV-4471/paid', settings: 'tatva.in/account',
+    case: 'ops.tatva.in/cases/TV-4471', funnel: 'ops.tatva.in/funnel', ops: 'ops.tatva.in/health'
+  };
+  var CUSTOMER_STEPS = [
+    ['landing', 'Sign in'], ['otp', 'OTP'], ['basket', 'Basket'],
+    ['recovering', 'Recovering'], ['paylink', 'Pay again'], ['paid', 'Paid'], ['settings', 'Account']
+  ];
+  var OPS_STEPS = [['case', 'Case detail'], ['funnel', 'Recovery funnel'], ['ops', 'Ops health']];
+
+  var ITEMS = [
+    { name: 'Basmati rice, aged', qty: '5 KG × 1', price: '₹780' },
+    { name: 'Cold-pressed groundnut oil', qty: '1 L × 2', price: '₹640' },
+    { name: 'Toor dal, unpolished', qty: '2 KG × 1', price: '₹410' },
+    { name: 'Filter coffee blend', qty: '500 G × 1', price: '₹520' },
+    { name: 'Delivery + handling', qty: 'Today 7–9pm', price: '₹130' }
+  ];
+  var TIMELINE = [
+    { t: 'Case opened', d: 'payment.failed · GATEWAY_ERROR → bank_downtime · retryable', at: '20:41:02', who: 'SYSTEM' },
+    { t: 'Action decided — switch_rail', d: 'Card rail unhealthy for HDFC in the last 15m; UPI clearing normally.', at: '20:41:04', who: 'AGENT', accent: true },
+    { t: 'Guardrail passed', d: '7 rules checked · budget 1/3 · consent window 71h left · outside blackout', at: '20:41:04', who: 'GUARDRAIL' },
+    { t: 'Payment link minted', d: 'plink_QxR8… · UPI-only · idempotency retry_pay_TV4471_1', at: '20:41:05', who: 'EXECUTOR' },
+    { t: 'Customer notified', d: 'SMS delivered · status strip shown · no failure language (silent mode)', at: '20:41:06', who: 'MESSAGING' },
+    { t: 'Capture attributed', d: '₹2,480 matched on link_id → attempt #2. Case closed recovered.', at: '20:52:06', who: 'SYSTEM', accent: true }
+  ];
+  var GUARDRAIL = [
+    ['Action schema', 'PASS'], ['Hard-decline blocklist', 'PASS'], ['Consent window (72h)', 'PASS · 71h'],
+    ['Attempt budget', 'PASS · 1/3'], ['Idempotency key', 'PASS'], ['IST blackout 23:00–07:00', 'PASS · 20:41'],
+    ['Amount ceiling ₹50,000', 'PASS · ₹2,480']
+  ];
+  var FUNNEL = [
+    ['Revenue at risk', '₹61.2L · 4,318', 100], ['Judged retryable', '₹47.9L · 3,204', 78],
+    ['Action executed', '₹41.6L · 2,871', 68], ['Customer reached', '₹38.0L · 2,644', 62],
+    ['Recovered by us', '₹18.4L · 1,290', 30]
+  ];
+  var SWEEPS = [
+    ['fire_due_retries', 'Parked retries whose time came', '12'],
+    ['reconcile_events', 'Webhook tasks that never finished', '0'],
+    ['reconcile_risk_events', 'Merchant events re-run', '1'],
+    ['reconcile_stale_attempts', 'Pending >15m resolved fail-closed', '0'],
+    ['cancel_links_for_closed', 'Links killed on terminal cases', '7'],
+    ['chase_due_cases', 'The four chasers, oldest first', '54'],
+    ['report_due_cases', 'Cases still waiting on a webhook', '308']
+  ];
+
+  var S = {
+    screen: 'landing', mode: 'customer',
+    phone: '', otp: '', signedVia: 'OTP',
+    pay: 'none', method: 'card',
+    channels: { SMS: true, WhatsApp: false, Email: true }, lang: 'English'
+  };
+  var timers = [];
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+  function later(fn, ms) { timers.push(setTimeout(fn, reduceMotion ? 0 : ms)); }
+  function go(screen) { return function () { S.screen = screen; render(); }; }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  function checkout() {
+    S.pay = 'processing';
+    render();
+    later(function () { S.screen = 'recovering'; S.pay = 'recovering'; render(); }, 1200);
+    later(function () { S.pay = 'ready'; render(); }, 1200 + RECOVERY_SECS * 1000);
+  }
+  function payNow() { S.pay = 'paid'; S.screen = 'paid'; render(); }
+
+  function otpDigits() { return S.phone.replace(/\D/g, '').slice(0, 10); }
+  function phoneDisplay() {
+    var d = otpDigits();
+    return d.length === 10 ? d.slice(0, 5) + ' ' + d.slice(5) : '98765 43210';
+  }
+
+  function screenLanding() {
+    var digits = otpDigits();
+    return '' +
+      '<h4>Sign in to ' + esc(MERCHANT) + '</h4>' +
+      '<p class="rq">Your basket is saved. Sign in to check out.</p>' +
+      '<input class="r-field" id="rPhone" type="tel" inputmode="numeric" placeholder="Mobile number" ' +
+      'aria-label="Mobile number" value="' + esc(S.phone) + '" maxlength="11">' +
+      '<button class="r-btn" style="margin-top:.6rem" data-action="sendOtp" ' + (digits.length < 10 ? 'disabled' : '') + '>Send OTP</button>' +
+      '<div class="r-divider">or</div>' +
+      '<button class="r-btn r-btn-ghost" data-action="googleIn">Continue with Google</button>';
+  }
+
+  function screenOtp() {
+    var cells = '';
+    for (var i = 0; i < 6; i++) {
+      cells += '<div class="r-otp-cell' + (S.otp[i] ? ' filled' : '') + '">' + esc(S.otp[i] || '') + '</div>';
+    }
+    var pad = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'];
+    var keys = pad.map(function (k) {
+      return k === '' ? '<span class="r-key"></span>' : '<button type="button" class="r-key" data-key="' + esc(k) + '">' + esc(k) + '</button>';
+    }).join('');
+    return '' +
+      '<h4>Enter the code</h4>' +
+      '<p class="rq">Sent by SMS to ' + esc(phoneDisplay()) + '</p>' +
+      '<div class="r-otp-row">' + cells +
+      '<input class="r-otp-input" id="rOtpInput" inputmode="numeric" maxlength="6" ' +
+      'aria-label="6-digit verification code" value="' + esc(S.otp) + '"></div>' +
+      '<div class="r-keypad">' + keys + '</div>' +
+      '<p class="rq" style="margin-top:.9rem">Resend code in 0:24</p>';
+  }
+
+  function screenBasket() {
+    var rows = ITEMS.map(function (it) {
+      return '<div class="ri"><span class="name">' + esc(it.name) + '<br><span class="qty">' + esc(it.qty) + '</span></span>' +
+        '<span class="price rmono">' + esc(it.price) + '</span></div>';
+    }).join('');
+    var processing = S.pay === 'processing';
+    return '' +
+      '<h4>Your basket</h4>' +
+      '<div class="r-items">' + rows + '</div>' +
+      '<div class="r-total"><span>Total</span><span class="rmono">₹2,480</span></div>' +
+      '<button class="r-btn" data-action="checkout" ' + (processing ? 'disabled' : '') + '>' +
+      (processing ? 'Contacting your bank…' : 'Pay ₹2,480') + '</button>';
+  }
+
+  function screenRecovering() {
+    var ready = S.pay === 'ready' || S.pay === 'paid';
+    var headline = SILENT ? 'Hang tight — we’re sorting your payment.' : 'Your bank didn’t take the card.';
+    var body = SILENT
+      ? 'Nothing was charged and your basket is held. We’ll have a way to pay ready in a moment.'
+      : 'HDFC’s card network dropped mid-charge, so no money left your account. We’re setting up a UPI request instead.';
+    var reassure = [
+      'No money left your account. Nothing to reverse.',
+      'Your 7–9pm slot is held while we sort this.',
+      'Only one payment request can ever be live — you cannot be charged twice.'
+    ];
+    var strip = ready
+      ? '<div class="r-strip" style="background:var(--r-accent-soft)"><span class="rdot" style="background:var(--r-accent)"></span>' +
+        '<span class="rt"><b>A faster way to pay is ready</b><span>₹2,480 by UPI · expires in 46 min</span></span>' +
+        '<button class="r-btn" style="width:auto;padding:.5rem .8rem;font-size:.78rem" data-action="viewPaylink">Pay now</button></div>'
+      : '<div class="r-strip" style="background:var(--r-bg)"><span class="rdot" style="background:var(--r-ink);' +
+        (reduceMotion ? '' : 'animation:rPulse 1.3s ease-in-out infinite') + '"></span>' +
+        '<span class="rt"><b>Working on it</b><span>Order #TV-4471 held · nothing charged</span></span></div>';
+    return '' +
+      '<h4>' + headline + '</h4>' +
+      '<p class="rq">' + body + '</p>' +
+      '<ul class="r-reassure">' + reassure.map(function (r, i) {
+        return '<li><span class="rn">0' + (i + 1) + '</span><span>' + esc(r) + '</span></li>';
+      }).join('') + '</ul>' +
+      strip +
+      '<style>@keyframes rPulse{0%,100%{opacity:.25}50%{opacity:1}}</style>';
+  }
+
+  function screenPaylink() {
+    if (S.pay !== 'ready' && S.pay !== 'paid') {
+      return '<h4>Not ready yet</h4><p class="rq">We’re still confirming with your bank. Try Basket → Pay first, or check back in a moment.</p>';
+    }
+    if (S.pay === 'paid') {
+      return '<h4>Already paid</h4><p class="rq">This link is settled — see the Paid tab for the receipt.</p>';
+    }
+    return '' +
+      '<h4>Pay by UPI</h4>' +
+      '<p class="rq">One tap, no card needed. Expires in 46 minutes.</p>' +
+      '<div class="r-total"><span>Amount</span><span class="rmono">₹2,480</span></div>' +
+      '<button class="r-btn" data-action="payNow">Pay now</button>';
+  }
+
+  function screenPaid() {
+    if (S.pay !== 'paid') {
+      return '<h4>Nothing paid yet</h4><p class="rq">Walk through Basket → Pay again to see the receipt here.</p>';
+    }
+    var receipt = [
+      ['Paid via', 'UPI · gpay@okhdfcbank'], ['Payment ID', 'pay_QxS1mD44'],
+      ['Attempt', '2 of 3 · switch_rail'], ['Time to money', '11m 04s from failure']
+    ];
+    return '' +
+      '<h4>Payment cleared</h4>' +
+      '<p class="rq">₹2,480 · delivery tonight, 7–9pm</p>' +
+      '<dl class="r-receipt">' + receipt.map(function (r) {
+        return '<div class="rr"><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>';
+      }).join('') + '</dl>';
+  }
+
+  function screenSettings() {
+    var rows = Object.keys(S.channels).map(function (k) {
+      var notes = { SMS: 'Payment links and receipts', WhatsApp: 'Not shipped yet — coming', Email: 'Receipts and invoices' };
+      var disabled = k === 'WhatsApp';
+      return '<div class="r-toggle"><span>' + k + '<br><span class="rq" style="margin:0">' + notes[k] + '</span></span>' +
+        '<button type="button" class="r-switch' + (S.channels[k] ? ' on' : '') + '" ' +
+        (disabled ? 'disabled style="opacity:.4;cursor:not-allowed"' : 'data-action="toggleChannel" data-key="' + k + '"') +
+        '><i></i></button></div>';
+    }).join('');
+    var langs = ['English', 'हिन्दी'].map(function (l) {
+      return '<button type="button" class="r-key" style="width:auto;padding:.5rem 1rem' +
+        (S.lang === l ? ';border-color:var(--r-accent);color:var(--r-accent)' : '') +
+        '" data-action="setLang" data-key="' + esc(l) + '">' + esc(l) + '</button>';
+    }).join('');
+    return '' +
+      '<h4>Account</h4>' +
+      '<p class="rq">How ' + esc(MERCHANT) + ' can reach you</p>' +
+      rows +
+      '<p class="rq" style="margin-top:.9rem">Language</p>' +
+      '<div style="display:flex;gap:.5rem">' + langs + '</div>';
+  }
+
+  function screenCase() {
+    var kpis = [['State', 'Recovered'], ['At risk', '₹2,480'], ['Attempts', '2 of 3'], ['Time to money', '11m 04s']];
+    return '' +
+      '<h4>Case TV-4471</h4>' +
+      '<div class="r-kpis">' + kpis.map(function (k) {
+        return '<div class="r-kpi"><div class="l">' + esc(k[0]) + '</div><div class="v">' + esc(k[1]) + '</div></div>';
+      }).join('') + '</div>' +
+      '<p class="rq" style="margin-bottom:.4rem">What the agent did, in order</p>' +
+      '<ul class="r-timeline">' + TIMELINE.map(function (e) {
+        return '<li style="--tl:' + (e.accent ? 'var(--r-accent)' : 'var(--r-ink)') + '"><b>' + esc(e.t) + '</b>' +
+          '<div class="rd">' + esc(e.d) + '</div><div class="rmeta">' + e.at + ' · ' + e.who + '</div></li>';
+      }).join('') + '</ul>' +
+      '<p class="rq" style="margin:1rem 0 .3rem">Guardrail checks</p>' +
+      '<ul class="r-rules">' + GUARDRAIL.map(function (r) {
+        return '<li><span>' + esc(r[0]) + '</span><span class="rv">' + esc(r[1]) + '</span></li>';
+      }).join('') + '</ul>';
+  }
+
+  function screenFunnel() {
+    return '' +
+      '<h4>Recovery funnel · 30d</h4>' +
+      '<div class="r-funnel">' + FUNNEL.map(function (f) {
+        return '<div class="r-fstage"><div class="fl"><span>' + esc(f[0]) + '</span><span class="v">' + esc(f[1]) + '</span></div>' +
+          '<div class="r-fbar"><i style="width:' + f[2] + '%;background:' + (f[0].indexOf('Recovered') === 0 ? 'var(--r-accent)' : 'var(--r-ink)') + '"></i></div></div>';
+      }).join('') + '</div>';
+  }
+
+  function screenOps() {
+    var kpis = [['Agent p95', '1.9s'], ['LLM fallbacks', '3'], ['Rejects', '41'], ['Overpayments', '0']];
+    return '' +
+      '<h4>Ops health</h4>' +
+      '<div class="r-kpis">' + kpis.map(function (k) {
+        return '<div class="r-kpi"><div class="l">' + esc(k[0]) + '</div><div class="v">' + esc(k[1]) + '</div></div>';
+      }).join('') + '</div>' +
+      '<p class="rq" style="margin-bottom:.4rem">Background sweeps, this run</p>' +
+      '<ul class="r-sweeps">' + SWEEPS.map(function (s) {
+        return '<li><b>' + esc(s[0]) + '</b><span>' + esc(s[1]) + ' · ' + esc(s[2]) + '</span></li>';
+      }).join('') + '</ul>';
+  }
+
+  var SCREENS = {
+    landing: screenLanding, otp: screenOtp, basket: screenBasket, recovering: screenRecovering,
+    paylink: screenPaylink, paid: screenPaid, settings: screenSettings,
+    case: screenCase, funnel: screenFunnel, ops: screenOps
+  };
+
+  function render() {
+    urlEl.textContent = URLS[S.screen] || 'tatva.in';
+
+    var steps = S.mode === 'ops' ? OPS_STEPS : CUSTOMER_STEPS;
+    stepsEl.innerHTML = steps.map(function (s) {
+      return '<button type="button" class="replica-step" role="tab" aria-current="' + (S.screen === s[0]) + '" data-go="' + s[0] + '">' + s[1] + '</button>';
+    }).join('');
+
+    modeEl.innerHTML = S.mode === 'customer'
+      ? '<button type="button" data-action="toOps">See the agent’s reasoning →</button>'
+      : '<button type="button" data-action="toCustomer">← Back to the customer view</button>';
+
+    var fn = SCREENS[S.screen] || screenLanding;
+    bodyEl.innerHTML = fn();
+  }
+
+  root.addEventListener('click', function (e) {
+    var go = e.target.closest('[data-go]');
+    if (go) { S.screen = go.dataset.go; render(); return; }
+    var action = e.target.closest('[data-action]');
+    if (action) {
+      var a = action.dataset.action, key = action.dataset.key;
+      if (a === 'sendOtp') { S.screen = 'otp'; S.otp = ''; }
+      else if (a === 'googleIn') { S.screen = 'basket'; S.signedVia = 'Google'; S.phone = '9876543210'; }
+      else if (a === 'checkout') { checkout(); return; }
+      else if (a === 'viewPaylink') { S.screen = 'paylink'; }
+      else if (a === 'payNow') { payNow(); return; }
+      else if (a === 'toggleChannel') { S.channels[key] = !S.channels[key]; }
+      else if (a === 'setLang') { S.lang = key; }
+      else if (a === 'toOps') { S.mode = 'ops'; S.screen = 'case'; }
+      else if (a === 'toCustomer') { S.mode = 'customer'; S.screen = 'landing'; clearTimers(); S.pay = 'none'; }
+      render();
+      return;
+    }
+    var key = e.target.closest('[data-key]');
+    if (key) {
+      var d = key.dataset.key;
+      if (d === '⌫') S.otp = S.otp.slice(0, -1);
+      else if (/^\d$/.test(d)) S.otp = (S.otp + d).slice(0, 6);
+      render();
+      if (S.otp.length === 6) later(function () { S.screen = 'basket'; S.otp = ''; render(); }, 350);
+    }
+  });
+
+  root.addEventListener('input', function (e) {
+    if (e.target.id === 'rPhone') {
+      S.phone = e.target.value.replace(/[^\d ]/g, '').slice(0, 11);
+      var digits = otpDigits();
+      var btn = root.querySelector('[data-action="sendOtp"]');
+      if (btn) btn.disabled = digits.length < 10;
+    } else if (e.target.id === 'rOtpInput') {
+      S.otp = e.target.value.replace(/\D/g, '').slice(0, 6);
+      render();
+      // render() replaces the input node (innerHTML), which drops focus —
+      // restore it so continued typing keeps landing on the field.
+      var fresh = document.getElementById('rOtpInput');
+      if (fresh) { fresh.focus(); var n = fresh.value.length; fresh.setSelectionRange(n, n); }
+      if (S.otp.length === 6) later(function () { S.screen = 'basket'; S.otp = ''; render(); }, 350);
+    }
+  });
+
+  render();
+})();
+</script>
+{% endblock %}

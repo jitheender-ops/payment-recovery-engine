@@ -102,7 +102,6 @@ class Settings(BaseSettings):
 
     # ── Application ──────────────────────────────────────────────────────
     app_env: Literal["development", "staging", "production"] = "development"
-    app_port: int = 8000
     log_level: str = "INFO"
 
     # ── Guardrail Thresholds ─────────────────────────────────────────────
@@ -223,9 +222,6 @@ class Settings(BaseSettings):
     # attempt slot either way (fail-closed); this sweep is what makes the ledger
     # say so instead of leaving them "in flight" forever.
     attempt_stale_after_seconds: int = 900
-
-    # ── Dashboard ────────────────────────────────────────────────────────
-    streamlit_port: int = 8501
 
     @field_validator("database_url", mode="after")
     @classmethod

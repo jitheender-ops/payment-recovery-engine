@@ -46,10 +46,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import recovery_link
 from src.agent.actions import PaymentRail
+from src.auth import client_ip
 from src.config import get_settings
 from src.customer.explain import explain
 from src.customer.i18n import Translator, pick
 from src.database import get_session
+from src.formatting import ist as _ist
+from src.formatting import money as _money
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt
 
 logger = logging.getLogger(__name__)
@@ -102,11 +105,6 @@ _TIMELINE_KEY_BY_RISK = {
 }
 
 
-def _ist(dt: datetime) -> datetime:
-    """The page speaks IST — the timezone the blackout and the bank run on."""
-    return dt.astimezone(ZoneInfo("Asia/Kolkata"))
-
-
 def _format_expiry(expires_at: datetime, lang: str) -> str:
     """'Sat, 28 Aug, 11 AM' in IST — honest urgency, not a fake countdown."""
     local = _ist(expires_at)
@@ -128,39 +126,9 @@ _PAY_LIMIT = 6            # payment starts per window per IP — link creation i
 _RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
 
 
-def _client_ip(request: Request) -> str:
-    # The client IP the rate limits key on. Behind a trusted proxy the
-    # RIGHTMOST X-Forwarded-For entry is the one the egress proxy added —
-    # the only hop a client cannot forge. The LEFTMOST is whatever the
-    # client sent, so trusting it lets an attacker rotate one header value
-    # per request and walk around every limit on this page. With no trusted
-    # proxy the header is attacker-controlled end to end and is ignored:
-    # the socket peer is the truth there.
-    settings = get_settings()
-    if settings.behind_trusted_proxy:
-        # Each trusted hop APPENDS the peer it saw, so the client sits
-        # `trusted_proxy_hops` entries from the right. Assuming exactly one hop
-        # is wrong the moment a CDN goes in front of the platform LB: the
-        # rightmost entry is then a constant internal address, every visitor
-        # lands in one bucket, and the rate limit stops being a defence and
-        # becomes a denial of service for everybody.
-        hops = max(1, settings.trusted_proxy_hops)
-        entries = [
-            part.strip()
-            for part in request.headers.get("x-forwarded-for", "").split(",")
-            if part.strip()
-        ]
-        # Fewer entries than trusted hops means the header was not written by
-        # the chain we expect — reading it anyway would key on an entry the
-        # client supplied. The socket peer is the honest answer there.
-        if len(entries) >= hops:
-            return entries[-hops]
-    return request.client.host if request.client else "unknown"
-
-
 def _check_rate_limit(request: Request, *, kind: str, limit: int) -> None:
     """Raise 429 once an IP exhausts its window budget for this kind of call."""
-    key = f"{kind}:{_client_ip(request)}"
+    key = f"{kind}:{client_ip(request)}"
     now_mono = time.monotonic()
     bucket = _RATE_LIMIT_BUCKETS.setdefault(key, deque())
     while bucket and now_mono - bucket[0] > _RATE_LIMIT_WINDOW_SECONDS:
@@ -179,22 +147,6 @@ def _check_rate_limit(request: Request, *, kind: str, limit: int) -> None:
         ]
         for stale_key in stale:
             del _RATE_LIMIT_BUCKETS[stale_key]
-
-
-def _money(paise: int) -> str:
-    """Rupees, grouped the Indian way: 12,34,567 not 1,234,567."""
-    whole = abs(int(paise)) // 100
-    s = str(whole)
-    if len(s) > 3:
-        head, tail = s[:-3], s[-3:]
-        parts: list[str] = []
-        while len(head) > 2:
-            parts.insert(0, head[-2:])
-            head = head[:-2]
-        if head:
-            parts.insert(0, head)
-        s = ",".join(parts) + "," + tail
-    return f"₹{s}"
 
 
 async def _load(

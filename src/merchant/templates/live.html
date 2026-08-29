@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Live ledger · Recovery Console{% endblock %}
+
+{% block body %}
+<nav class="nav">
+  <div class="nav-in">
+    <a class="brand" href="/console">
+      <span class="brand-mark">₹</span>
+      <span class="brand-name">{{ merchant_name or "Recovery Engine" }}</span>
+    </a>
+    <div class="nav-links">
+      <a class="nav-link hide-sm" href="/console">Overview</a>
+      <span class="chip" id="db-chip"><span class="dot {% if not db_ok %}off{% endif %}"></span>{{ "Connected" if db_ok else "Database unreachable" }}</span>
+      <form method="post" action="/console/logout" style="display:contents">
+        <button class="btn btn-ghost btn-sm" type="submit">{{ icon("logout", 14) }} Sign out</button>
+      </form>
+    </div>
+  </div>
+</nav>
+
+<main class="section" style="padding-top:clamp(2.5rem,6vh,4rem)">
+  <div class="wrap">
+    <div style="display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap" data-stage>
+      <h1 class="h2" style="font-size:clamp(1.9rem,3.4vw,2.6rem)">Live ledger</h1>
+      <span class="faint mono" style="font-size:.78rem" id="ist-now">Asia/Kolkata</span>
+    </div>
+
+    {% if not db_ok %}
+      <div class="card" style="margin-top:2rem;padding:2.5rem;text-align:center" data-stage="2">
+        <p style="font-weight:600;font-size:1.05rem">Can't reach the database.</p>
+        <p class="faint" style="margin-top:.4rem">The console shows nothing rather than something wrong. Check the database and reload.</p>
+      </div>
+    {% elif not data.has_data %}
+      <div class="card" style="margin-top:2rem;padding:2.5rem;max-width:60ch" data-stage="2">
+        <p style="font-weight:600;font-size:1.05rem">The ledger is empty.</p>
+        <p class="faint" style="margin-top:.5rem">Failed card charges open cases automatically through the Razorpay webhook. For the rest, push a
+        <span class="mono" style="font-size:.8rem">POST /risks</span> — see the
+        <a href="/console#integrate">integration guide</a>.</p>
+      </div>
+    {% else %}
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-top:2rem" id="kpi-grid" data-stage="2">
+        <div class="kpi">
+          <span class="kpi-label">Recovered</span>
+          <span class="kpi-value green" data-count="{{ data.recovered | replace('₹','') | replace(',','') }}">{{ data.recovered }}</span>
+          <span class="kpi-foot">{{ data.recovered_cases }} of {{ data.cases }} cases closed paid</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">At risk</span>
+          <span class="kpi-value red" data-count="{{ data.at_risk | replace('₹','') | replace(',','') }}">{{ data.at_risk }}</span>
+          <span class="kpi-foot">{{ data.cases - data.recovered_cases }} cases still open</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">Recovery rate</span>
+          <span class="kpi-value" data-count="{{ data.recovery_rate }}" data-format="pct">{{ data.recovery_rate }}%</span>
+          <span class="kpi-foot">₹{{ data.attributed | replace('₹','') }} recovered through chases</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">In flight</span>
+          <span class="kpi-value" data-count="{{ data.pending + data.scheduled }}" data-format="int">{{ data.pending + data.scheduled }}</span>
+          <span class="kpi-foot">{{ data.pending }} pending · {{ data.scheduled }} scheduled</span>
+        </div>
+      </div>
+
+      <section style="margin-top:3rem" data-reveal>
+        <h2 style="font-size:1.15rem;letter-spacing:-.02em">By chaser</h2>
+        <div class="card" style="margin-top:1rem">
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Chaser</th>
+                  <th class="num">Cases</th>
+                  <th class="num">Recovered</th>
+                  <th class="num">Rate</th>
+                  <th class="num">At risk</th>
+                  <th class="num">Brought back</th>
+                  <th class="num">Attributed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for c in data.chasers %}
+                <tr>
+                  <td><span class="cell-icon">{{ icon(c.icon, 16) }} {{ c.label }}</span></td>
+                  <td class="num">{{ c.cases }}</td>
+                  <td class="num">{{ c.recovered }}</td>
+                  <td class="num">{{ c.rate }}%</td>
+                  <td class="num{% if c.at_risk != '₹0' %} red{% endif %}">{{ c.at_risk }}</td>
+                  <td class="num{% if c.recovered_amt != '₹0' %} green{% endif %}">{{ c.recovered_amt }}</td>
+                  <td class="num">{{ c.attributed }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section style="margin-top:3rem" data-reveal>
+        <h2 style="font-size:1.15rem;letter-spacing:-.02em">Recent recoveries</h2>
+        <div class="card" style="margin-top:1rem">
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr><th>When</th><th>Chaser</th><th>Reference</th><th class="num">Amount</th></tr>
+              </thead>
+              <tbody>
+                {% for r in data.recent %}
+                <tr>
+                  <td class="mono" style="font-size:.8rem;color:var(--ink-2);white-space:nowrap">{{ r.when }}</td>
+                  <td><span class="cell-icon">{{ icon(r.icon, 16) }} {{ r.label }}</span></td>
+                  <td class="mono" style="font-size:.8rem;color:var(--ink-3)">{{ r.subject_ref }}</td>
+                  <td class="num green">{{ r.amount }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p class="faint" style="font-size:.78rem;margin-top:.7rem">
+          Aggregates and your own references only — the console never shows customer emails, phones or ids.
+        </p>
+      </section>
+    {% endif %}
+  </div>
+</main>
+
+<footer>
+  <div class="wrap" style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+    <span>{{ merchant_name or "Recovery Engine" }} · live ledger</span>
+    <a href="/console">Overview</a>
+  </div>
+</footer>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  @media (max-width:960px){ #kpi-grid{grid-template-columns:repeat(2,1fr)!important} }
+  @media (max-width:540px){ #kpi-grid{grid-template-columns:1fr!important} }
+</style>
+<script>
+(function () {
+  var el = document.getElementById("ist-now");
+  if (el && window.Intl) {
+    try {
+      el.textContent = new Intl.DateTimeFormat("en-IN", {
+        timeZone: "Asia/Kolkata", day: "numeric", month: "short",
+        hour: "2-digit", minute: "2-digit", hour12: true
+      }).format(new Date()) + " IST";
+    } catch (e) { /* keep the static fallback */ }
+  }
+})();
+</script>
+{% endblock %}

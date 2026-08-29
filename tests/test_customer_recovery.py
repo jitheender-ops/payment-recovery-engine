@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src import recovery_link
+from src.auth import client_ip
 from src.config import get_settings
 from src.customer import routes as customer_routes
 from src.customer.routes import router as customer_router
@@ -518,7 +519,7 @@ def _isolated_rate_buckets() -> Iterator[None]:
 
 
 class _FakeRequest:
-    """Just enough of a Request for _client_ip."""
+    """Just enough of a Request for client_ip."""
 
     def __init__(self, headers: dict[str, str], host: str = "203.0.113.9") -> None:
         self.headers = headers
@@ -539,7 +540,7 @@ def test_xff_is_ignored_without_a_trusted_proxy(monkeypatch: Any) -> None:
     get_settings.cache_clear()
     monkeypatch.delenv("BEHIND_TRUSTED_PROXY", raising=False)
     req = _FakeRequest({"x-forwarded-for": "1.2.3.4, 5.6.7.8"}, host="203.0.113.9")
-    assert customer_routes._client_ip(req) == "203.0.113.9"  # type: ignore[arg-type]
+    assert client_ip(req) == "203.0.113.9"  # type: ignore[arg-type]
     get_settings.cache_clear()
 
 
@@ -552,7 +553,7 @@ def test_xff_rightmost_entry_is_used_behind_a_trusted_proxy(monkeypatch: Any) ->
     get_settings.cache_clear()
     monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
     req = _FakeRequest({"x-forwarded-for": "1.2.3.4, 5.6.7.8"}, host="10.0.0.1")
-    assert customer_routes._client_ip(req) == "5.6.7.8"  # type: ignore[arg-type]
+    assert client_ip(req) == "5.6.7.8"  # type: ignore[arg-type]
     get_settings.cache_clear()
 
 

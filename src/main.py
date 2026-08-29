@@ -24,6 +24,7 @@ from src.customer.routes import router as customer_router
 from src.database import close_db, init_db
 from src.ingestion.risk_router import router as risk_router
 from src.ingestion.router import router as webhook_router
+from src.merchant.routes import router as merchant_router
 
 settings = get_settings()
 
@@ -140,6 +141,13 @@ app.include_router(risk_router, prefix="/risks", tags=["risks"])
 # include_in_schema=False: these routes are for humans with a link, not for API
 # clients, and listing them in the schema only advertises the shape of the URL.
 app.include_router(customer_router, tags=["customer"], include_in_schema=False)
+
+# The merchant-facing surface: a public landing (/console) and a password-gated
+# live console (/console/live). Like the customer routes these are HTML for
+# humans, not API clients, so they stay out of the schema. The live console
+# authenticates with the DASHBOARD_PASSWORD session cookie and fails closed when
+# it is unset; the landing renders product facts only and no live numbers.
+app.include_router(merchant_router, tags=["merchant"], include_in_schema=False)
 
 if not _docs_public:
     # The schema itself stays useful outside development — client codegen and

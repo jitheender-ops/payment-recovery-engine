@@ -358,7 +358,9 @@ def test_a_retry_parked_past_the_consent_window_is_rejected() -> None:
 
 def test_a_retry_inside_the_window_still_passes() -> None:
     """The bound must not reject the deferrals the agent legitimately makes."""
-    now = datetime(2026, 8, 28, 11, 0, tzinfo=UTC)
+    # Wall-clock relative: the schema rule compares retry_at to the real now,
+    # so a hardcoded date fails once the clock passes it.
+    now = datetime.now(UTC)
     failed_at = now - timedelta(hours=1)
     action = RetryAction(
         action="retry_at",
@@ -389,26 +391,26 @@ def test_the_client_is_read_hops_from_the_right(monkeypatch: Any) -> None:
     EXPLOIT (too many): you read an entry the client wrote and it walks
     around the limit one header value at a time.
     """
-    from src.customer import routes
+    from src.auth import client_ip
 
     get_settings.cache_clear()
     monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
     # client-spoofed , real client , cdn-added
     xff = "1.2.3.4, 203.0.113.9, 10.1.1.1"
-    assert routes._client_ip(_Req(xff)) == "203.0.113.9"  # type: ignore[arg-type]
+    assert client_ip(_Req(xff)) == "203.0.113.9"  # type: ignore[arg-type]
     get_settings.cache_clear()
 
 
 def test_a_short_header_falls_back_to_the_socket_peer(monkeypatch: Any) -> None:
     """Fewer entries than trusted hops means the chain is not the one we
     expect — reading it anyway would key on a value the client supplied."""
-    from src.customer import routes
+    from src.auth import client_ip
 
     get_settings.cache_clear()
     monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
-    assert routes._client_ip(_Req("1.2.3.4", host="198.51.100.7")) == "198.51.100.7"  # type: ignore[arg-type]
+    assert client_ip(_Req("1.2.3.4", host="198.51.100.7")) == "198.51.100.7"  # type: ignore[arg-type]
     get_settings.cache_clear()
 
 

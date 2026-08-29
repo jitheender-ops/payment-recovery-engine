@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Sign in · Recovery Console{% endblock %}
+
+{% block body %}
+<nav class="nav">
+  <div class="nav-in">
+    <a class="brand" href="/console">
+      <span class="brand-mark">₹</span>
+      <span class="brand-name">{{ merchant_name or "Recovery Engine" }}</span>
+    </a>
+    <div class="nav-links">
+      <a class="nav-link" href="/console">Overview</a>
+    </div>
+  </div>
+</nav>
+
+<main class="wrap" style="min-height:calc(100vh - 64px);display:flex;flex-direction:column;justify-content:center;padding-top:3rem;padding-bottom:3rem">
+  <div style="max-width:440px;width:100%;margin:0 auto">
+    <h1 class="display" style="font-size:clamp(3rem,9vw,4.75rem)" data-stage>Sign in</h1>
+    <p class="lede" style="margin-top:1rem" data-stage="2">
+      The live ledger is gated by this deployment's console password —
+      the same one the ops console uses.
+    </p>
+
+    {% if error %}
+    <div class="alert" style="margin-top:1.6rem" data-stage="3" role="alert">{{ icon("zap", 16) }} {{ error }}</div>
+    {% endif %}
+
+    {% if not configured %}
+    <div class="note" style="margin-top:1.6rem" data-stage="3">
+      No password is configured on this deployment, so the console stays closed.
+      Set <span class="mono" style="font-size:.8rem">DASHBOARD_PASSWORD</span> and restart to open it.
+    </div>
+    {% else %}
+    <form method="post" action="/console/login" style="margin-top:1.8rem" data-stage="3">
+      <label class="kpi-label" for="password" style="display:block;margin-bottom:.5rem">Console password</label>
+      <input class="field" type="password" id="password" name="password"
+             autocomplete="current-password" autofocus placeholder="••••••••••••">
+      <button class="btn btn-primary" type="submit" style="width:100%;margin-top:1rem">
+        Open the ledger {{ icon("arrow", 15) }}
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</main>
+{% endblock %}

@@ -44,20 +44,22 @@ from src.config import get_settings, reveal
 
 logger = logging.getLogger(__name__)
 
-_SEP = "."
+# Token primitives, shared with the merchant console session cookie
+# (src/merchant/routes.py): base64(payload).sign, "." separated.
+SEP = "."
 
 
-def _b64(raw: bytes) -> str:
+def b64(raw: bytes) -> str:
     """URL-safe base64 with the padding stripped — '=' is ugly in an SMS."""
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _unb64(text: str) -> bytes:
+def unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def _sign(payload: str, secret: str) -> str:
-    return _b64(hmac.new(secret.encode(), payload.encode(), sha256).digest())
+def sign(payload: str, secret: str) -> str:
+    return b64(hmac.new(secret.encode(), payload.encode(), sha256).digest())
 
 
 def mint(case_id: uuid.UUID, *, ttl_hours: int | None = None) -> str | None:
@@ -83,8 +85,8 @@ def mint(case_id: uuid.UUID, *, ttl_hours: int | None = None) -> str | None:
         # The cap applies to explicit callers too: a link must never outlive
         # the engine's authority to act, whoever picks the number.
         ttl_hours = min(ttl_hours, cap)
-    payload = f"{case_id.hex}{_SEP}{int(time.time()) + ttl_hours * 3600}"
-    return f"{_b64(payload.encode())}{_SEP}{_sign(payload, secret)}"
+    payload = f"{case_id.hex}{SEP}{int(time.time()) + ttl_hours * 3600}"
+    return f"{b64(payload.encode())}{SEP}{sign(payload, secret)}"
 
 
 def verify(token: str) -> uuid.UUID | None:
@@ -109,25 +111,25 @@ def verify_with_expiry(token: str) -> tuple[uuid.UUID, datetime] | None:
     failure discipline as verify(): every failure looks identical.
     """
     secret = reveal(get_settings().recovery_link_secret)
-    if not secret or not token or token.count(_SEP) != 1:
+    if not secret or not token or token.count(SEP) != 1:
         return None
 
-    encoded, signature = token.split(_SEP)
+    encoded, signature = token.split(SEP)
     try:
-        payload = _unb64(encoded).decode("ascii")
+        payload = unb64(encoded).decode("ascii")
     except (ValueError, UnicodeDecodeError):
         return None
 
     # compare_digest on bytes: it raises TypeError on a str holding non-ASCII,
     # and the token is whatever arrived in the URL.
     if not hmac.compare_digest(
-        _sign(payload, secret).encode("ascii"), signature.encode("utf-8", "replace")
+        sign(payload, secret).encode("ascii"), signature.encode("utf-8", "replace")
     ):
         return None
 
-    if payload.count(_SEP) != 1:
+    if payload.count(SEP) != 1:
         return None
-    case_hex, _, expiry = payload.partition(_SEP)
+    case_hex, _, expiry = payload.partition(SEP)
     try:
         expiry_epoch = int(expiry)
         if expiry_epoch < int(time.time()):
