@@ -59,6 +59,7 @@ class EvalRunner:
         output_dir: str = "eval/results",
         skip_llm: bool = False,
         retry_cost_inr: float = COST_PER_RETRY_INR,
+        llm_concurrency: int = 3,
     ) -> None:
         self.n_scenarios = n_scenarios
         self.n_seeds = n_seeds
@@ -69,6 +70,9 @@ class EvalRunner:
         self.economics: dict[str, Any] = {}
         self.retry_cost_inr = retry_cost_inr
         self.llm_fallback_rate: float | None = None
+        # Default (3) matches Groq's free-tier TPM ceiling. A self-hosted
+        # endpoint with no external rate limit can take much more concurrency.
+        self.llm_concurrency = llm_concurrency
 
     def run_policy(
         self,
@@ -185,6 +189,7 @@ class EvalRunner:
                         scenarios,
                         seed=seed,
                         cache_path="eval/results/.llm_decision_cache.jsonl",
+                        concurrency=self.llm_concurrency,
                     )
                 results_df = self.run_policy(policy_name, policy, scenarios, simulator)
                 metrics = compute_all_metrics(results_df, self.retry_cost_inr)
@@ -519,6 +524,11 @@ def main() -> None:
     )
     parser.add_argument("--retry-cost-inr", type=float, default=COST_PER_RETRY_INR,
                         help="Cost charged per retry attempt, in rupees")
+    parser.add_argument(
+        "--llm-concurrency", type=int, default=3,
+        help="Concurrent LLM prefetch calls. Default (3) fits Groq's free-tier "
+        "TPM ceiling; raise it for a self-hosted or higher-limit endpoint.",
+    )
     args = parser.parse_args()
 
     console.print("[bold cyan]🔄 Payment Failure Recovery — Eval Harness[/bold cyan]")
@@ -532,6 +542,7 @@ def main() -> None:
         output_dir=args.output,
         skip_llm=args.skip_llm,
         retry_cost_inr=args.retry_cost_inr,
+        llm_concurrency=args.llm_concurrency,
     )
 
     results = runner.run_with_variance()
