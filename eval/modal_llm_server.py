@@ -58,7 +58,7 @@ model_cache = modal.Volume.from_name("llm-eval-model-cache", create_if_missing=T
 )
 @modal.concurrent(max_inputs=32)
 @modal.web_server(port=8000, startup_timeout=10 * 60)
-def serve():
+def serve() -> None:
     import os
     import subprocess
 
