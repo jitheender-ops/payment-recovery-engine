@@ -7,12 +7,18 @@ GPU-second instead of a daily token quota, so this sidesteps the ceiling
 entirely. Points LLM_BASE_URL at this and nothing else in the app changes —
 PolicyAgent already just talks to any OpenAI-compatible endpoint.
 
-Deploy:  modal deploy eval/modal_llm_server.py
+The URL Modal prints is public — anyone who has it can run inference on your
+GPU. vLLM's --api-key gates it with a bearer token, sourced from a Modal
+secret so the key itself is never in this file or in source control:
+
+    modal secret create llm-eval-api-key LLM_EVAL_API_KEY=<some-random-string>
+    modal deploy eval/modal_llm_server.py
+
 Then set (in .env, not committed):
     LLM_PROVIDER=openai
     LLM_BASE_URL=<the printed https://...modal.run URL>/v1
     LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
-    OPENAI_API_KEY=anything-nonempty   # vLLM's server doesn't check it
+    OPENAI_API_KEY=<the same LLM_EVAL_API_KEY value>
 """
 
 import modal
@@ -48,10 +54,12 @@ model_cache = modal.Volume.from_name("llm-eval-model-cache", create_if_missing=T
     # second GPU no matter how bursty the caller gets.
     max_containers=1,
     volumes={"/root/.cache/huggingface": model_cache},
+    secrets=[modal.Secret.from_name("llm-eval-api-key")],
 )
 @modal.concurrent(max_inputs=32)
 @modal.web_server(port=8000, startup_timeout=10 * 60)
 def serve():
+    import os
     import subprocess
 
     subprocess.Popen(
@@ -67,5 +75,7 @@ def serve():
             "0.0.0.0",
             "--max-model-len",
             "8192",
+            "--api-key",
+            os.environ["LLM_EVAL_API_KEY"],
         ]
     )
