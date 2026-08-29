@@ -172,7 +172,14 @@
         overdue invoices and bounced mandates — on the rail most likely to
         clear, inside bounds a regulator could read.
       </p>
-      <div style="display:flex;gap:.8rem;margin-top:2rem;flex-wrap:wrap" data-stage="3">
+      <div class="kpi" style="margin-top:1.3rem;max-width:27rem;display:inline-flex" data-stage="2">
+        <div>
+          <div class="kpi-label">Proven vs. a fixed 3-retry baseline</div>
+          <div class="kpi-value green">₹11.70L <span style="font-size:1rem;font-weight:500;color:var(--ink-3)">extra net revenue / ₹1Cr failed volume</span></div>
+          <div class="kpi-foot">+11.03pp recovery rate · 95% CI [+10.54, +11.52] · n=25,000, paired under common random numbers — not two overlapping error bars. Reproduce: <span class="mono">eval/runner.py</span></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:.8rem;margin-top:1.6rem;flex-wrap:wrap" data-stage="3">
         <a class="btn btn-primary" href="/console/live">Open the live ledger {{ icon("arrow", 16) }}</a>
         <a class="btn btn-ghost" href="#how">How it works</a>
       </div>

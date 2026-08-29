@@ -143,7 +143,7 @@ class PolicyAgent:
                 self.last_error_status = status
                 self.last_error_detail = f"HTTP {status}: {str(e)[:160]}"
             self.fallback_count += 1
-            return self._fallback_action(context, f"LLM error: {str(e)}")
+            return self._fallback_action(context, f"LLM error: {str(e)[:160]}")
 
     async def _call_llm(self, user_prompt: str) -> str:
         """Call the LLM and return the raw response text."""

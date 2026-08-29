@@ -123,7 +123,11 @@ class NudgeGenerator:
                 self._client = anthropic.AsyncAnthropic(api_key=anthropic_key, timeout=3.0)
             elif self._settings.llm_provider == "openai" and openai_key:
                 import openai
-                self._client = openai.AsyncOpenAI(api_key=openai_key, timeout=3.0)
+                self._client = openai.AsyncOpenAI(
+                    api_key=openai_key,
+                    base_url=self._settings.llm_base_url or None,
+                    timeout=3.0,
+                )
         except Exception:
             logger.warning("Failed to initialize LLM client for nudge generation")
 
