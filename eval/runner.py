@@ -181,7 +181,11 @@ class EvalRunner:
                 # the eval loop itself stays sequential and just reads the cache.
                 if hasattr(policy, "prefetch"):
                     console.print(f"  [dim]{policy_name}: prefetching decisions...[/dim]")
-                    policy.prefetch(scenarios)
+                    policy.prefetch(
+                        scenarios,
+                        seed=seed,
+                        cache_path="eval/results/.llm_decision_cache.jsonl",
+                    )
                 results_df = self.run_policy(policy_name, policy, scenarios, simulator)
                 metrics = compute_all_metrics(results_df, self.retry_cost_inr)
                 elapsed = time.time() - t0

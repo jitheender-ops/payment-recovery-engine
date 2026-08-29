@@ -77,3 +77,7 @@ uv.lock
 .mutmut-cache
 .schemathesis/
 preview/
+
+# Machine-local resume cache for the LLM eval prefetch (accumulates real
+# decisions across free-tier daily-quota-limited runs). Not a result artifact.
+eval/results/.llm_decision_cache.jsonl

@@ -92,7 +92,11 @@ services:
 
       - key: LLM_PROVIDER
         value: openai
-      # LLM_BASE_URL left unset — defaults to https://api.openai.com/v1
+      # Groq's OpenAI-compatible endpoint — free tier, no per-account daily
+      # cap like OpenRouter's shared free-model pool. Swap back to unset (or
+      # api.openai.com) if a real OpenAI key is ever used instead.
+      - key: LLM_BASE_URL
+        value: https://api.groq.com/openai/v1
 
       # sync: false = "prompt me in the dashboard, never store in git".
       # Set each of these once, under the service's Environment tab.
@@ -107,10 +111,13 @@ services:
       # never generated. Empty = /risks rejects everything.
       - key: RISK_WEBHOOK_SECRET
         sync: false
+      # A Groq API key, despite the OpenAI-shaped variable name — the openai
+      # SDK client just points at LLM_BASE_URL above. Set by hand in the
+      # dashboard, same as the other secrets on this list.
       - key: OPENAI_API_KEY
         sync: false
       - key: LLM_MODEL
-        value: gpt-4o-mini
+        value: openai/gpt-oss-20b
       - key: API_KEY
         generateValue: true          # guards /openapi.json outside development
       - key: DASHBOARD_PASSWORD

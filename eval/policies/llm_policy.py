@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -22,6 +24,22 @@ if TYPE_CHECKING:
 Decision = dict[str, Any]
 
 logger = logging.getLogger(__name__)
+
+
+def _load_jsonl_cache(path: str) -> dict[str, Decision]:
+    """Real (non-fallback) decisions from a previous, interrupted prefetch run."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    cache: dict[str, Decision] = {}
+    with p.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            cache[entry["key"]] = entry["decision"]
+    return cache
 
 
 class LLMPolicy:
@@ -72,7 +90,12 @@ class LLMPolicy:
         return self.fallback_count + getattr(self._agent, "fallback_count", 0)
 
     def prefetch(
-        self, scenarios: pd.DataFrame, max_attempt: int = 3, concurrency: int = 10
+        self,
+        scenarios: pd.DataFrame,
+        max_attempt: int = 3,
+        concurrency: int = 3,
+        seed: int | None = None,
+        cache_path: str | None = None,
     ) -> None:
         """
         Precompute every (scenario, attempt) decision concurrently.
@@ -80,11 +103,21 @@ class LLMPolicy:
         The eval loop is sequential, and one LLM call takes ~4.7s wall-clock —
         60,000 of those in series is 79 hours. Decisions depend only on
         (scenario, attempt), never on prior outcomes, so they can all be issued
-        at once: measured ~14x faster at concurrency 10.
+        at once: measured ~14x faster at concurrency 10 on a high-TPM provider.
+        Default lowered to 3 — free-tier Groq cuts off at 8000 TPM and a call
+        here runs ~2.4k tokens, so much above 3 in flight trips 429s constantly.
+        Raise it back if the configured provider's tier can take the burst.
 
         Attempts that the loop never reaches are computed and discarded. That
         wastes maybe a third of the calls, which at these token prices is worth
         far less than the complexity of a wave-by-wave scheduler.
+
+        cache_path, if given, persists every genuine (non-fallback) decision to
+        a JSONL file keyed by (model, seed, scenario, attempt) as it lands, and
+        skips re-requesting anything already there. A free-tier daily token cap
+        means one process run rarely finishes 2,700 calls — re-running this
+        command on a later day resumes instead of re-spending an exhausted
+        budget on the same decisions.
         """
         if self._agent is None:
             return
@@ -94,19 +127,37 @@ class LLMPolicy:
         # a local keeps that guarantee visible to the reader and the type
         # checker instead of relying on self._agent never being reassigned.
         agent = self._agent
+        model_tag = getattr(agent, "_model", "unknown")
+
+        def cache_key(sid: int, attempt: int) -> str:
+            return f"{model_tag}|{seed}|{sid}|{attempt}"
+
+        disk_cache = _load_jsonl_cache(cache_path) if cache_path else {}
+        if disk_cache:
+            logger.info("Resuming %d cached decisions from %s", len(disk_cache), cache_path)
 
         async def run() -> list[tuple[tuple[int, int], Decision]]:
             sem = asyncio.Semaphore(concurrency)
+            cache_file = open(cache_path, "a") if cache_path else None  # noqa: SIM115
 
             async def one(
                 sid: int, row: pd.Series, attempt: int
             ) -> tuple[tuple[int, int], Decision]:
+                key = cache_key(sid, attempt)
+                if key in disk_cache:
+                    # A resumed decision is a genuine past success, not a fresh
+                    # call — but total_calls/total_fallbacks (runner.py's drop
+                    # threshold) read agent.call_count as the denominator, so a
+                    # cache hit has to count there too or a resumed run reports
+                    # only today's fresh slice's fallback rate, not the true one.
+                    agent.call_count += 1
+                    return (sid, attempt), disk_cache[key]
                 async with sem:
                     if self._abort_reason is not None:
                         self.fallback_count += 1
                         return (sid, attempt), self._fallback.decide(row, attempt)
                     try:
-                        result = (sid, attempt), await self._decide_async(agent, row, attempt)
+                        decision = await self._decide_async(agent, row, attempt)
                         # decide() catches its own errors, so a fatal provider
                         # failure arrives as a flag rather than an exception.
                         if agent.last_error_status is not None:
@@ -115,7 +166,12 @@ class LLMPolicy:
                                 f"HTTP {agent.last_error_status}",
                             )
                             logger.error("Aborting LLM prefetch — %s", self._abort_reason)
-                        return result
+                        elif cache_file is not None and not str(
+                            decision.get("reason", "")
+                        ).startswith("Fallback:"):
+                            cache_file.write(json.dumps({"key": key, "decision": decision}) + "\n")
+                            cache_file.flush()
+                        return (sid, attempt), decision
                     except Exception as exc:
                         status = getattr(exc, "status_code", None)
                         if status in (401, 402, 403, 404):
@@ -127,11 +183,15 @@ class LLMPolicy:
                         self.fallback_count += 1
                         return (sid, attempt), self._fallback.decide(row, attempt)
 
-            return await asyncio.gather(*[
-                one(int(row["scenario_id"]), row, a)
-                for _, row in scenarios.iterrows()
-                for a in range(max_attempt)
-            ])
+            try:
+                return await asyncio.gather(*[
+                    one(int(row["scenario_id"]), row, a)
+                    for _, row in scenarios.iterrows()
+                    for a in range(max_attempt)
+                ])
+            finally:
+                if cache_file is not None:
+                    cache_file.close()
 
         for key, decision in asyncio.run(run()):
             self._cache[key] = decision
