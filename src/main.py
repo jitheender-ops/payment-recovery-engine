@@ -16,6 +16,7 @@ from hashlib import sha256
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
+from fastapi.responses import RedirectResponse
 
 from src import scheduler
 from src.auth import require_api_key
@@ -191,9 +192,15 @@ async def health_check() -> dict[str, str]:
     return {"status": "healthy"}
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    """Root endpoint — confirms the service is running."""
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """Bare domain root — send a human straight to the product, not a JSON blob."""
+    return RedirectResponse(url="/console")
+
+
+@app.get("/status")
+async def status() -> dict[str, str]:
+    """Machine-readable service info — formerly served at '/'. See root()."""
     body = {
         "service": "Payment Failure Recovery Engine",
         "version": "0.1.0",

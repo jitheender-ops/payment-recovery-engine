@@ -49,8 +49,8 @@ def test_docs_are_open_in_development(monkeypatch: Any) -> None:
     assert client.get("/docs").status_code == 200
     assert client.get("/redoc").status_code == 200
     assert client.get("/openapi.json").status_code == 200
-    # And the root advertises them, because they exist.
-    assert client.get("/").json()["docs"] == "/docs"
+    # And /status advertises them, because they exist.
+    assert client.get("/status").json()["docs"] == "/docs"
 
 
 def test_docs_ui_is_gone_in_production(monkeypatch: Any) -> None:
@@ -58,8 +58,16 @@ def test_docs_ui_is_gone_in_production(monkeypatch: Any) -> None:
 
     assert client.get("/docs").status_code == 404
     assert client.get("/redoc").status_code == 404
-    # The root must not advertise a 404.
-    assert "docs" not in client.get("/").json()
+    # /status must not advertise a 404.
+    assert "docs" not in client.get("/status").json()
+
+
+def test_root_sends_a_human_to_the_product(monkeypatch: Any) -> None:
+    client = _client(monkeypatch, "production", api_key="k" * 32)
+
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code in (302, 307)
+    assert resp.headers["location"] == "/console"
 
 
 def test_schema_requires_the_key_in_production(monkeypatch: Any) -> None:
