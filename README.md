@@ -20,21 +20,24 @@ Razorpay webhook ──▶ classify ──▶ decide (LLM / XGBoost) ──▶ g
 ## 📊 Headline Result
 
 ```
-Run: .venv/bin/python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm
+Run: .venv/bin/python -m eval.runner --scenarios 5000 --seeds 5 --llm-concurrency 30
 ```
 
-> **₹11.70L additional net revenue per ₹1Cr of failed volume vs. a fixed 3-retry
-> baseline, at 15% fewer retry attempts and zero false retries.**
+> **₹11.71L additional net revenue per ₹1Cr of failed volume vs. a fixed 3-retry
+> baseline, at 15% fewer retry attempts and zero false retries — from XGBoost,
+> which beats the LLM Agent too.**
 
 5,000 scenarios × 5 seeds (mean ± σ). These are the exact contents of
-`eval/results/` — reproduce them with the command above.
+`eval/results/` — reproduce them with the command above (needs an
+OpenAI-compatible `LLM_BASE_URL`; see `eval/modal_llm_server.py` for a
+self-hosted one sized for full-scale runs).
 
 | Policy | Recovery Rate | Retry Cost (avg) | False-Retry % | ₹ per ₹1Cr | Net ₹ per ₹1Cr |
 |--------|-------------|-------------------|---------------|------------|----------------|
 | No Retry | 0.0% | 0.00 | 0.0% | ₹0 | ₹0 |
 | Fixed 3-Retry | 19.2% ± 0.7 | 2.73 ± 0.01 | 8.0% ± 0.3 | ₹18,49,489 | ₹17,95,744 |
-| XGBoost | 30.2% ± 0.5 | 2.32 ± 0.00 | 0.0% ± 0.0 | ₹30,11,921 | ₹29,66,234 |
-| LLM Agent | blocked — see below | — | — | — | — |
+| XGBoost | 30.2% ± 0.5 | 2.32 ± 0.00 | 0.0% ± 0.0 | ₹30,11,938 | ₹29,66,249 |
+| LLM Agent | 26.6% ± 0.5 | 2.38 ± 0.01 | 0.0% ± 0.0 | ₹26,44,430 | ₹25,97,603 |
 
 **This row moved.** It previously read 27.4% and was labelled "XGBoost/Rules",
 because `XGBoostPolicy.decide()` loaded a trained model into `self._model` and
@@ -43,6 +46,18 @@ production call site passed a model path at all. The model is consulted now
 (`scripts/train_xgboost.py` builds it, `run.sh` trains one if missing), and it
 disagrees with the rules often enough to be worth 2.8pp.
 
+**The LLM Agent row is filled in now, and it loses.** Earlier revisions of this
+README showed it blocked (the configured provider had no API credits) — see
+git history if you want that story. Run at full scale against a self-hosted
+Qwen2.5-7B-Instruct (`eval/modal_llm_server.py`), it beats Fixed 3-Retry but
+**trails XGBoost on both recovery (26.6% vs 30.2%) and net revenue**. It's also
+the more expensive policy to run in practice: the ₹ figures above price only
+retry/gateway attempts, the same as every other row — they do not include the
+LLM's own inference cost, which is zero for XGBoost and non-zero for this row.
+Nothing in this eval justifies choosing the LLM Agent over XGBoost for this
+task; it's kept in the harness as the interesting negative result and as
+scaffolding for a policy where free-text reasoning earns its cost.
+
 ### Is that difference real?
 
 Two overlapping ± ranges can't answer that, so the harness doesn't try. Every
@@ -50,10 +65,15 @@ policy runs under **common random numbers** — the same scenario draws the
 identical random sequence no matter which policy is deciding — and outcomes are
 differenced one-to-one, giving a confidence interval on the *difference*:
 
-| vs. Fixed 3-Retry | Δ | 95% CI | n | Real? |
-|---|---|---|---|---|
-| Recovery rate | **+11.03pp** | [+10.54, +11.52] | 25,000 | **yes** |
-| Retry attempts | **−0.409** | [−0.421, −0.397] | 25,000 | **yes** |
+| Policy | Metric | Δ vs. Fixed 3-Retry | 95% CI | n | Real? |
+|---|---|---|---|---|---|
+| XGBoost | Recovery rate | **+11.03pp** | [+10.54, +11.52] | 25,000 | **yes** |
+| XGBoost | Retry attempts | **−0.409** | [−0.421, −0.397] | 25,000 | **yes** |
+| LLM Agent | Recovery rate | **+7.34pp** | [+6.90, +7.78] | 25,000 | **yes** |
+| LLM Agent | Retry attempts | **−0.351** | [−0.363, −0.340] | 25,000 | **yes** |
+
+Both real, and XGBoost's is bigger — it's not just cheaper than the LLM Agent,
+it's the more effective policy, full stop.
 
 ### Why net, and why you don't have to trust our cost number
 
@@ -63,10 +83,13 @@ defaulting to ₹2.00/attempt (`--retry-cost-inr` to change it).
 
 That default is a floor: it prices gateway and ops cost only, not decline-ratio
 penalties or customer goodwill, neither of which we can source honestly. So the
-harness also reports the **break-even** — the retry cost at which the two
-policies would tie. Here the agent recovers *more* while attempting *fewer*, so
-it **dominates at any retry cost including ₹0**, and the assumption never has to
-be argued.
+harness also reports the **break-even** — the retry cost at which a policy and
+Fixed 3-Retry would tie. Both XGBoost and the LLM Agent recover *more* while
+attempting *fewer*, so both **dominate Fixed 3-Retry at any retry cost including
+₹0** — that comparison isn't in question. What the break-even framing doesn't
+cover is XGBoost vs. the LLM Agent directly: XGBoost wins that one outright, on
+every axis measured, before even counting the inference cost the LLM Agent
+doesn't have to pay under this accounting.
 
 ### What the model assumes
 
@@ -78,22 +101,17 @@ modelled per failure class in `eval/bank_profiles.py`. Blended baseline recovery
 lands at 19.2%, inside the 15–30% band public figures report, and
 `tests/test_calibration.py` fails if a change pushes it out.
 
-**Remaining gap:** the LLM policy row is blank because the configured provider
-returns HTTP 402 — the OpenRouter key in `.env` is on an account with no
-credits. It is not blank because the policy scored badly.
-
-The harness refuses to fill it in dishonestly. `PolicyAgent.decide()` swallows
-LLM errors and returns a heuristic action, so a dead provider would otherwise
-produce a full, plausible LLM row made entirely of XGBoost fallbacks. The runner
-counts those (`fallback_count`) and **drops the row** when they dominate:
-
-```
-Dropping the LLM Agent row: 100.0% of its decisions came from the XGBoost
-fallback, so it does not measure the LLM.
-```
-
-Add credits, or point `LLM_PROVIDER`/`ANTHROPIC_API_KEY` at a working account,
-and re-run without `--skip-llm`.
+**Why the LLM Agent row can be trusted:** the harness refuses to fill it in
+dishonestly. `PolicyAgent.decide()` swallows LLM errors and returns a
+heuristic action, so a dead provider would otherwise produce a full, plausible
+LLM row made entirely of XGBoost fallbacks. The runner counts those
+(`fallback_count`) and drops the row when they dominate — an earlier revision
+of this README shipped with the row blank for exactly that reason (the
+configured provider had no API credits). The run behind the current numbers
+used a self-hosted Qwen2.5-7B-Instruct on Modal (`eval/modal_llm_server.py`)
+instead, specifically because free-tier providers cap out far below the ~6M
+tokens a full 5000×5 run needs — so this row is measuring the LLM, not the
+fallback.
 
 **On the XGBoost model's near-perfect held-out score:** the training labels are
 the argmax of the simulator's own expected-value calculation, which is a

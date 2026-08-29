@@ -1,4 +1,5 @@
 policy,recovery_rate_%,recovery_rate_%_std,retry_cost_avg,retry_cost_avg_std,false_retry_rate_%,false_retry_rate_%_std,time_to_recovery_min,time_to_recovery_min_std,₹_per_₹1Cr_failed,₹_per_₹1Cr_failed_std,attempts_per_₹1Cr,attempts_per_₹1Cr_std,net_₹_per_₹1Cr_failed,net_₹_per_₹1Cr_failed_std
 No Retry,0.0,0.0,0.0,0.0,0.0,0.0,,,0.0,0.0,0.0,0.0,0.0,0.0
 Fixed 3-Retry,19.21,0.66,2.73,0.01,8.03,0.33,15.0,0.0,1849489.0,84214.84,26872.8,485.17,1795743.6,83842.82
-XGBoost,30.24,0.51,2.32,0.0,0.0,0.0,0.0,0.0,3011921.0,120481.1,22843.2,447.99,2966234.2,120597.72
+XGBoost,30.24,0.51,2.32,0.0,0.0,0.0,0.0,0.0,3011938.0,120459.32,22844.2,448.74,2966249.4,120599.89
+LLM Agent,26.55,0.46,2.38,0.01,0.0,0.01,0.0,0.0,2644429.6,101375.31,23413.4,513.08,2597603.2,101285.06
