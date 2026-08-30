@@ -581,6 +581,16 @@ class CaseEvent(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # Hash chain, stamped by src/audit_chain.py — deliberately NOT computed
+    # inline in cases.log_event(). That function is a synchronous, no-I/O
+    # session.add() by design (the audit row lands in the same transaction as
+    # the change it describes); reading the previous row's hash before every
+    # insert would add a query to that hot path. Instead these start NULL and
+    # a separate stamping pass (idempotent, append-only) fills them in after
+    # the fact — verifiable independently of whether it has run yet.
+    event_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prev_event_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     __table_args__ = (
         Index("ix_case_events_case", "recovery_case_id", "id"),
         Index("ix_case_events_type_created", "event_type", "created_at"),
