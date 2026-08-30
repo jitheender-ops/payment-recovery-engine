@@ -114,6 +114,17 @@ def _post(
         req.add_header("api-subscription-key", key)
         req.add_header("Content-Type", content_type)
         try:
+            # `url` is a parameter, but it is never attacker-influenced: both
+            # call sites pass a module-level constant (STT_URL / TTS_URL, the
+            # two literal https://api.sarvam.ai endpoints above) and nothing
+            # reaches this function from a request body. The rule's concern is
+            # a `file://` scheme smuggled in through user input, which has no
+            # path here. Suppressed at this line rather than by rule, so a
+            # genuinely caller-supplied URL would still be flagged.
+            # The annotation has to be the LAST line before the finding —
+            # semgrep reads only the immediately preceding line, so the
+            # rationale goes above it, not between it and the code.
+            # nosemgrep: dynamic-urllib-use-detected
             with urllib.request.urlopen(req, timeout=timeout_s, context=_ctx()) as r:
                 return dict(json.loads(r.read()))
         except urllib.error.HTTPError as e:
