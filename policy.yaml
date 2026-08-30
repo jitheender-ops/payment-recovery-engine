@@ -132,6 +132,38 @@ verification:
   scoreboard: "merchant console (/console/live) reports actions_blocked and compliance_blocks counts, sourced from RetryAttempt.result='rejected' rows — not a slide, a live query"
   audit_chain: "python scripts/audit_chain.py --stamp / --verify — recomputes the whole case_events chain from raw rows, trusts nothing stored"
 
+# ── Voice recovery agent (Hinglish) — the sixth chaser's rules ──────────────
+# Built (src/voice/), provider-agnostic, grounded; no phone calls are made by
+# the engine — telephony providers POST transcripts to /voice/turn and read
+# the JSON reply back through their own TTS. Voice inherits every never-rule
+# above, plus its own:
+voice:
+  language: "Hinglish — code-mixed Hindi + English, Roman and Devanagari"
+  auth: "HMAC over the raw body, X-Voice-Signature, VOICE_WEBHOOK_SECRET; empty secret = endpoint closed"
+  opt_out: "Recognised in either language before any other gate; closes every open case via cases.record_opt_out — never a counter-offer"
+  chaser_integration: >
+    VOICE_CHASER_ENABLED (default off) makes the orchestrator queue a voice
+    follow-up call after a successful nudge_customer touch — same
+    transaction as the attempt outcome (write-ahead), one queue row per
+    attempt. The telephony leg claims rows atomically via
+    POST /voice/queue/claim (UPDATE...RETURNING, one winner per row) and
+    reports outcomes to /voice/queue/report; a reported spoken opt-out
+    closes the customer's cases through the same record_opt_out path as
+    every other channel.
+  prompt_injection: "Instruction-shaped transcript content is refused by lexicon before retrieval or generation (gate 1)"
+  grounding: "Every answer is verified against its retrieved passages and case facts; a number absent from the passages is an abstention, regardless of fluency (gate 4, numeric half)"
+  answer_paths: >
+    Extractive by default (replies assembled verbatim from passages + facts,
+    zero dependencies). VOICE_LLM_ENABLED=on opts into an LLM rephrase of
+    the same passages — JSON-constrained, and the numeric grounding gate
+    still applies.
+  corpus: "policy.yaml bounds mirrored from src/chasers/policy.py at import, FailureClass taxonomy, hand-authored Hinglish FAQ; hashed bag-of-words retriever (offline-first), e5 upgrade swaps embed() only"
+  deployment_obligation: >
+    Commercial voice calls in India need the merchant's own telephony
+    registration (DoT/TCPB for the number and route; a disclosed caller ID),
+    and AI-disclosure at call start in the provider's greeting. The engine's
+    templates never claim a human is speaking.
+
 # ── Regulatory posture — what the code enforces vs what the deployer owes ───
 # Honest line: software cannot make a merchant compliant. This section
 # records which obligations are enforced in code (and where), and which are

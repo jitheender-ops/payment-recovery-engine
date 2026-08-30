@@ -3,6 +3,9 @@
 A knowledge graph of this codebase lives in `graphify-out/` (gitignored,
 regenerable). Use it before grepping.
 
+New here? `docs/ARCHITECTURE_MAP.md` is the one-page file-by-file map;
+`docs/architecture.md` is the design principles behind it.
+
 ## Codebase questions
 
 Run graphify first; fall back to file search only when the answer is missing:

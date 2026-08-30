@@ -1,6 +1,6 @@
 # Customer recovery page — design rules
 
-**Overrides `design-system/recovery-console/MASTER.md` for `src/customer/templates/**`.**
+**Overrides `docs/design-system/recovery-console/MASTER.md` for `src/customer/templates/**`.**
 
 MASTER describes the **Recovery Console**: an operator's dashboard, dark, dense,
 glassmorphic, GSAP-animated. This is a different product on a different surface —

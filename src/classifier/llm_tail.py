@@ -24,7 +24,8 @@ import logging
 from typing import Any
 
 from src.classifier.taxonomy import FailureClass
-from src.config import get_settings, reveal
+from src.config import get_settings
+from src.llm import build_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,27 @@ def _user_prompt(
     )
 
 
+# Module-level, built once via the shared src/llm.py construction path: a
+# fresh SDK client per classification call rebuilt a socket pool every time
+# on a path the mapper's UNKNOWN tail can hit repeatedly.
+_client: Any = None
+
+
+def _get_client() -> Any:
+    """The process-wide LLM client, built lazily on first use."""
+    global _client
+    if _client is None:
+        _client = build_llm_client()
+    return _client
+
+
 async def _call_llm(prompt: str) -> str:
     """Raises on any failure — the caller decides the fallback."""
     settings = get_settings()
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("LLM client unavailable (missing API key)")
     if settings.llm_provider == "anthropic":
-        import anthropic
-
-        client = anthropic.AsyncAnthropic(
-            api_key=reveal(settings.anthropic_api_key), timeout=settings.llm_timeout_seconds
-        )
         response = await client.messages.create(
             model=settings.llm_model,
             max_tokens=100,
@@ -73,14 +86,7 @@ async def _call_llm(prompt: str) -> str:
         block = response.content[0]
         return block.text if hasattr(block, "text") else str(block)
 
-    import openai
-
-    oai_client = openai.AsyncOpenAI(
-        api_key=reveal(settings.openai_api_key),
-        base_url=settings.llm_base_url or None,
-        timeout=settings.llm_timeout_seconds,
-    )
-    completion = await oai_client.chat.completions.create(
+    completion = await client.chat.completions.create(
         model=settings.llm_model,
         max_tokens=100,
         messages=[

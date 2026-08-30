@@ -406,8 +406,11 @@ predates it. A migration that crashes half the time is a migration nobody runs.
 | `0001_recovery_cases` | `recovery_cases`, the attribution join keys, consent columns |
 | `0002_revenue_recovery` | `promises_to_pay`, `case_events`, case scheduling, and **drops NOT NULL on `retry_attempts.payment_failure_id`/`payment_id`** — the constraint that confined the engine to the payment rail |
 | `0003_scheduler_indexes` | Composite indexes on `(result, scheduled_at)` and `(result, created_at)` — the Layer 6 sweeps poll these every tick and were seq-scanning the table |
+| `0008_promise_capture` | Promise quality columns (`is_partial`, `confidence`, `condition_note`, `promised_rail`), the reminder's one-shot `reminded_at`, and the kept-rate delta `kept_late_days` — the capture and workflow halves the promise ledger was missing |
 
-See [docs/architecture.md](docs/architecture.md) for the full ER diagram.
+See [docs/architecture.md](docs/architecture.md) for the full ER diagram and
+[docs/ARCHITECTURE_MAP.md](docs/ARCHITECTURE_MAP.md) for the file-by-file map
+of where everything lives.
 
 ## 🚢 Deploy
 

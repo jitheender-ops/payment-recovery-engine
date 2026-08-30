@@ -19,10 +19,13 @@ from src import recovery_link
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
 from src.cases import (
+    CaseEventType,
+    PromiseScore,
     attach_attempt,
     canonical_key,
     close_case,
     customer_key,
+    customer_promise_score,
     ledger_keys,
     log_event,
     open_case,
@@ -38,10 +41,12 @@ from src.guardrail.rules import IST, clamp_retry_at_out_of_blackout, is_in_black
 from src.messaging.nudge_generator import NudgeGenerator
 from src.models import (
     PaymentFailure,
+    PromiseToPay,
     RecoveryCase,
     RetryAttempt,
     RetryLedger,
     RiskEvent,
+    VoiceCallQueue,
     WebhookEvent,
 )
 
@@ -63,6 +68,40 @@ def _aware(dt: datetime | None) -> datetime | None:
     if dt is None or dt.tzinfo is not None:
         return dt
     return dt.replace(tzinfo=UTC)
+
+
+def cart_summary_from_meta(meta: dict[str, Any] | None) -> str | None:
+    """
+    One bounded, printable line naming what was left in the cart.
+
+    Merchant meta is untrusted free-form (see sanitize_meta for the prompt
+    discipline); this is the same reduction for the message path. Accepts
+    either a list of item names or a single string; anything else is not a
+    cart we can name honestly, and None renders exactly the old nudge.
+    """
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("cart_items")
+    if isinstance(raw, str):
+        parts = [raw]
+    elif isinstance(raw, (list, tuple)):
+        parts = [p for p in raw if isinstance(p, str) and p.strip()]
+    else:
+        return None
+    if not parts:
+        return None
+    line = ", ".join(" ".join(p.split()) for p in parts)
+    return line[:80].strip() or None
+
+
+def _stop_event_type(stop: str) -> CaseEventType:
+    """
+    "deferred" and "stopped" are different facts and the audit has to keep
+    them apart: one case is waiting out an escalation gap, the other is
+    finished. Reading both as "we did nothing" is how a bounded workflow
+    gets mistaken for a broken one.
+    """
+    return "deferred" if stop.startswith("next action not due") else "stopped"
 
 
 class PaymentRecoveryOrchestrator:
@@ -291,7 +330,7 @@ class PaymentRecoveryOrchestrator:
             log_event(
                 session,
                 case,
-                "deferred" if stop.startswith("next action not due") else "stopped",
+                _stop_event_type(stop),
                 reason=stop,
                 attempts_used=case.attempts_used,
                 max_attempts=case.max_attempts,
@@ -376,30 +415,10 @@ class PaymentRecoveryOrchestrator:
 
         # ── Step 7b: Re-validate under the lock ───────────────────────────
         # The lock was released for the agent call, and the world moved in
-        # that window: a capture may have recovered the case, an opt-out may
-        # have closed it, other webhooks may have spent the customer's
-        # tally. (Before the lock was released early, record_opt_out's
-        # ledger write blocked on it until this pipeline committed, which
-        # serialised the two by accident; that accidental guarantee is gone,
-        # so it is replaced by an explicit re-check here.) Re-read the case
-        # and the ledger, re-run the stopping rule, patch the context counts
-        # — the lock then stays held through execution and the ledger bump,
-        # which is the span that actually has to be serialised.
-        await session.refresh(case)
-        fresh_ledger = None
-        if context.customer_id:
-            fresh_ledger = await self._get_ledger(context.customer_id, session)
-            if fresh_ledger is not None:
-                retry_count, nudge_count = self._effective_counts(
-                    fresh_ledger, datetime.now(UTC)
-                )
-                context = context.model_copy(
-                    update={
-                        "retry_count_24h": retry_count,
-                        "nudge_count_24h": nudge_count,
-                    }
-                )
-        stop = stop_reason(case, fresh_ledger)
+        # that window (see _revalidate_under_lock for the full reasoning and
+        # the accidental-guarantee history). The lock is now held through
+        # execution and the ledger bump — the span that has to be serialised.
+        context, stop = await self._revalidate_under_lock(case, context, session)
         if stop is not None:
             logger.info(
                 "Case stopped while the agent was deciding: payment=%s reason=%s",
@@ -408,7 +427,7 @@ class PaymentRecoveryOrchestrator:
             log_event(
                 session,
                 case,
-                "deferred" if stop.startswith("next action not due") else "stopped",
+                _stop_event_type(stop),
                 reason=stop,
                 attempts_used=case.attempts_used,
                 max_attempts=case.max_attempts,
@@ -422,29 +441,14 @@ class PaymentRecoveryOrchestrator:
         )
 
         # ── Step 9: Create RetryAttempt record ────────────────────────────
-        attempt = RetryAttempt(
+        attempt = self._make_attempt(
+            action=action,
+            agent_type=agent_type,
+            guardrail_result=guardrail_result,
+            idem_key=idem_key,
+            attempt_number=attempt_count + 1,
             payment_failure_id=failure_record.id,
             payment_id=payment_id,
-            idempotency_key=idem_key,
-            attempt_number=attempt_count + 1,
-            action_type=action.action,
-            target_rail=action.rail,
-            # Persist UTC, always. The agent hands back an IST-aware time and
-            # Postgres would normalise it, but SQLite's DATETIME drops the zone
-            # and stores the wall clock it was given — so an IST value read back
-            # naive is 5h30m adrift, which is enough to move a retry into the
-            # blackout window it was just clamped out of.
-            scheduled_at=(
-                action.retry_at.astimezone(UTC) if action.retry_at else None
-            ),
-            agent_reasoning=action.reason,
-            agent_type=agent_type,
-            agent_confidence=action.confidence,
-            guardrail_passed=guardrail_result.passed,
-            guardrail_rejection_reason=(
-                "; ".join(guardrail_result.rejection_reasons)
-                if guardrail_result.rejection_reasons else None
-            ),
         )
         # Binds the attempt to the case and spends one unit of its budget.
         # Called for rejected attempts too: a rejection is a decision the case
@@ -515,6 +519,49 @@ class PaymentRecoveryOrchestrator:
             payment_id, action.action, guardrail_result.passed, attempt.result,
         )
 
+    def _make_attempt(
+        self,
+        *,
+        action: RetryAction,
+        agent_type: str,
+        guardrail_result: Any,
+        idem_key: str,
+        attempt_number: int,
+        payment_failure_id: Any = None,
+        payment_id: str | None = None,
+    ) -> RetryAttempt:
+        """
+        The RetryAttempt row both decision paths record. Deterministic-keyed
+        and guardrail-stamped, with the write-ahead ordering owned by the
+        CALLERS (see _execute_and_record / _execute_case_and_record — the row
+        is committed before Razorpay is called, never after).
+
+        scheduled_at is persisted UTC, always. The agent hands back an
+        IST-aware time and Postgres would normalise it, but SQLite's DATETIME
+        drops the zone and stores the wall clock it was given — so an IST
+        value read back naive is 5h30m adrift, which is enough to move a
+        retry into the blackout window it was just clamped out of.
+        """
+        return RetryAttempt(
+            payment_failure_id=payment_failure_id,
+            payment_id=payment_id,
+            idempotency_key=idem_key,
+            attempt_number=attempt_number,
+            action_type=action.action,
+            target_rail=action.rail,
+            scheduled_at=(
+                action.retry_at.astimezone(UTC) if action.retry_at else None
+            ),
+            agent_reasoning=action.reason,
+            agent_type=agent_type,
+            agent_confidence=action.confidence,
+            guardrail_passed=guardrail_result.passed,
+            guardrail_rejection_reason=(
+                "; ".join(guardrail_result.rejection_reasons)
+                if guardrail_result.rejection_reasons else None
+            ),
+        )
+
     async def _update_ledger_and_commit(
         self, customer_id: str | None, action: RetryAction, session: AsyncSession
     ) -> None:
@@ -522,6 +569,42 @@ class PaymentRecoveryOrchestrator:
         if customer_id:
             await self._update_retry_ledger(customer_id, action, session)
         await session.commit()
+
+    async def _revalidate_under_lock(
+        self,
+        case: RecoveryCase,
+        context: FailureContext,
+        session: AsyncSession,
+    ) -> tuple[FailureContext, str | None]:
+        """
+        Steps 7b / chase-recheck — the world moved while the agent decided,
+        so re-read the case and the ledger under the lock, patch the
+        context's counts, and re-run the stopping rule.
+
+        A capture may have recovered the case, an opt-out may have closed
+        it, other webhooks may have spent the customer's tally. The lock
+        (released for the agent call, deliberately — see step 5b) is taken
+        again here and stays held through execution and the ledger bump,
+        which is the span that actually has to be serialised.
+
+        Returns (possibly-updated context, stop reason or None). The caller
+        decides what a stop means on its rail and owns the commit.
+        """
+        await session.refresh(case)
+        fresh_ledger = None
+        if context.customer_id:
+            fresh_ledger = await self._get_ledger(context.customer_id, session)
+            if fresh_ledger is not None:
+                retry_count, nudge_count = self._effective_counts(
+                    fresh_ledger, datetime.now(UTC)
+                )
+                context = context.model_copy(
+                    update={
+                        "retry_count_24h": retry_count,
+                        "nudge_count_24h": nudge_count,
+                    }
+                )
+        return context, stop_reason(case, fresh_ledger)
 
     # ── Chaser-driven risk types ──────────────────────────────────────────
     # A card decline announces itself through a webhook; an abandoned cart, a
@@ -556,6 +639,7 @@ class PaymentRecoveryOrchestrator:
         *,
         now: datetime | None = None,
         meta: dict[str, Any] | None = None,
+        promise_score: PromiseScore | None = None,
     ) -> FailureContext:
         """
         Assemble a FailureContext from a case with no PaymentFailure behind it.
@@ -626,6 +710,9 @@ class PaymentRecoveryOrchestrator:
             is_retryable=True,
             original_failure_id=None,
             last_notification_sent_at=last_notification_sent_at,
+            promise_kept=promise_score.kept if promise_score else 0,
+            promise_broken=promise_score.broken if promise_score else 0,
+            promise_pending=promise_score.pending if promise_score else 0,
         )
 
     async def chase_case(
@@ -686,7 +773,7 @@ class PaymentRecoveryOrchestrator:
         if stop is not None:
             log_event(
                 session, case,
-                "deferred" if stop.startswith("next action not due") else "stopped",
+                _stop_event_type(stop),
                 actor=actor, reason=stop,
                 attempts_used=case.attempts_used, max_attempts=case.max_attempts,
             )
@@ -718,6 +805,65 @@ class PaymentRecoveryOrchestrator:
             )
             return
 
+        # An open dispute freezes this case. The customer said the money is
+        # not owed; chasing them anyway is how a billing disagreement becomes
+        # a legal one, and the recovery page's dispute button promises exactly
+        # this freeze ("the freeze is total"). Until now that promise was kept
+        # in ONE place — the AR statement composer skipped disputed cases —
+        # while this pipeline, the only path that actually contacts anybody,
+        # never looked at the table at all.
+        #
+        # Checked AFTER the consent-window expiry above, so a disputed case
+        # still ages out and closes on its own clock; a freeze that also
+        # suspended expiry would leave disputed cases open forever. And
+        # deferred rather than closed, because resolve_dispute has to be able
+        # to hand the case back to the chase — a terminal state cannot.
+        from src.receivables.models import CaseDispute
+
+        dispute = await session.scalar(
+            select(CaseDispute).where(
+                CaseDispute.case_id == case.id,
+                CaseDispute.status == "open",
+            )
+        )
+        if dispute is not None:
+            case.next_action_at = now + timedelta(hours=policy.re_chase_hours)
+            log_event(
+                session, case, "deferred", actor=actor,
+                reason="open dispute — chase frozen until a human resolves it",
+                dispute_id=str(dispute.id),
+                next_action_at=case.next_action_at.isoformat(),
+            )
+            await session.commit()
+            logger.info(
+                "Chase frozen by an open dispute: case=%s dispute=%s",
+                case.id, dispute.id,
+            )
+            return
+
+        # Invoices are a B2B contact: a person at a desk, Mon–Fri 09:30–18:30
+        # IST. That window used to live only in the AR consolidation sweep,
+        # which meant every invoice case reachable through THIS path — an
+        # unlinked invoice, or any invoice once the sweep order slipped — was
+        # chaseable on a Sunday morning. Same defer-don't-burn shape as the
+        # blackout below: move to the window's edge, spend no budget slot.
+        if case.risk_type == "invoice_overdue":
+            from src.receivables.ladder import is_b2b_contact_time, next_b2b_window
+
+            if not is_b2b_contact_time(now):
+                case.next_action_at = next_b2b_window(now)
+                log_event(
+                    session, case, "deferred", actor=actor,
+                    reason="outside the B2B contact window — deferred to its edge",
+                    next_action_at=case.next_action_at.isoformat(),
+                )
+                await session.commit()
+                logger.info(
+                    "Chase deferred past the B2B window: case=%s until=%s",
+                    case.id, case.next_action_at.isoformat(),
+                )
+                return
+
         # The blackout is a timing rule, not a case verdict — and the chaser
         # picks its own moment, unlike the payment rail whose events arrive
         # when they arrive. Walking into the quiet hours and letting the
@@ -745,8 +891,28 @@ class PaymentRecoveryOrchestrator:
         meta = event.meta if event is not None else None
         customer_email = event.customer_email if event is not None else None
         customer_contact = event.customer_contact if event is not None else None
+        # The merchant's incentive, if any: only from the SECOND touch on.
+        # attempts_used is 0 on the first touch — the research is clear that
+        # an incentive on touch 1 trains discount-waiting, so touch 1 never
+        # carries one, whatever the event said.
+        offer_id = (
+            event.offer_id
+            if event is not None
+            and event.offer_id
+            and case.attempts_used >= 1
+            else None
+        )
 
-        context = await self._build_case_context(case, policy, session, now=now, meta=meta)
+        # The kept-rate signal, read into the context: the one thing the
+        # promises table exists to feed into the next contact decision.
+        # Raw counts, never a derived rate — the prompt block stays
+        # auditable against the rows.
+        promise_score = await customer_promise_score(session, case.customer_id)
+
+        context = await self._build_case_context(
+            case, policy, session, now=now, meta=meta,
+            promise_score=promise_score,
+        )
 
         # Release the ledger lock before the agent call — same reasoning as
         # step 5b on the payment path. The counts are re-read fresh under the
@@ -768,8 +934,50 @@ class PaymentRecoveryOrchestrator:
                 )
                 action.rail = resolved
 
+        # RBI e-mandate framework: a collection attempt needs a pre-debit
+        # notice at least 24h old. Guardrail rule 12 rejects one without it —
+        # and a rejection still spends an attempt slot, so a mandate case
+        # (budget: 3) could burn its way to "exhausted" without ever sending
+        # the notice the rule is asking for. Both decision paths walk into it:
+        # the prompt tells the LLM "retry_at next day is usually right" and
+        # the XGBoost heuristic hardcodes the same, and neither is told about
+        # last_notification_sent_at at all.
+        #
+        # So the prerequisite is supplied deterministically rather than hoped
+        # for. A nudge IS the pre-debit notification (see rule 12's own
+        # docstring), which makes this a downgrade to the action that had to
+        # happen first, not a substitution of a different intent. Same idiom
+        # as the rail override above: the gate validates what executes, and
+        # the agent's original choice is logged rather than lost.
+        if case.risk_type == "mandate_failure" and action.action in (
+            "retry_now", "retry_at",
+        ):
+            notice_ok, _ = self._guardrail._rules.check_mandate_predebit_notification(
+                case.risk_type, "retry_now",
+                context.last_notification_sent_at, now,
+            )
+            if not notice_ok:
+                logger.info(
+                    "Mandate pre-debit notice missing or stale: case=%s "
+                    "agent_chose=%s sending the notice instead of collecting",
+                    case.id, action.action,
+                )
+                action.action = "nudge_customer"
+                action.retry_at = None
+
         if action.action == "retry_at" and action.retry_at is not None:
             action.retry_at = clamp_retry_at_out_of_blackout(action.retry_at)
+
+        # The policy's rail preference, applied when the agent expressed none.
+        # Subscriptions and mandates fail on card OTPs the way one-off
+        # payments do, which is why their policy names UPI — but that
+        # preference only ever reached the recovery page and the console, and
+        # the engine's OWN link minted generic, so the chase contradicted the
+        # page it pointed at. Only fills a gap: an explicit agent choice has
+        # context this default does not and is left alone. Set before the
+        # guardrail so the gate validates the action that actually executes.
+        if action.rail is None and policy.recommended_rail is not None:
+            action.rail = policy.recommended_rail
 
         # Deterministic idempotency key: (case, attempts_used) fully determines
         # it, so two workers chasing the same case collide onto the same key
@@ -780,26 +988,14 @@ class PaymentRecoveryOrchestrator:
             await session.commit()
             return
 
-        # Re-validate under the lock: the world moved while the agent decided.
-        await session.refresh(case)
-        fresh_ledger = None
-        if context.customer_id:
-            fresh_ledger = await self._get_ledger(context.customer_id, session)
-            if fresh_ledger is not None:
-                retry_count, nudge_count = self._effective_counts(
-                    fresh_ledger, datetime.now(UTC)
-                )
-                context = context.model_copy(
-                    update={
-                        "retry_count_24h": retry_count,
-                        "nudge_count_24h": nudge_count,
-                    }
-                )
-        stop = stop_reason(case, fresh_ledger)
+        # Re-validate under the lock: the world moved while the agent decided
+        # (see _revalidate_under_lock — same reasoning as the payment path's
+        # step 7b).
+        context, stop = await self._revalidate_under_lock(case, context, session)
         if stop is not None:
             log_event(
                 session, case,
-                "deferred" if stop.startswith("next action not due") else "stopped",
+                _stop_event_type(stop),
                 actor=actor, reason=stop,
                 attempts_used=case.attempts_used, max_attempts=case.max_attempts,
             )
@@ -810,24 +1006,12 @@ class PaymentRecoveryOrchestrator:
             action, context, idem_key, case.attempts_used
         )
 
-        attempt = RetryAttempt(
-            payment_failure_id=None,
-            payment_id=None,
-            idempotency_key=idem_key,
-            attempt_number=case.attempts_used + 1,
-            action_type=action.action,
-            target_rail=action.rail,
-            scheduled_at=(
-                action.retry_at.astimezone(UTC) if action.retry_at else None
-            ),
-            agent_reasoning=action.reason,
+        attempt = self._make_attempt(
+            action=action,
             agent_type=agent_type,
-            agent_confidence=action.confidence,
-            guardrail_passed=guardrail_result.passed,
-            guardrail_rejection_reason=(
-                "; ".join(guardrail_result.rejection_reasons)
-                if guardrail_result.rejection_reasons else None
-            ),
+            guardrail_result=guardrail_result,
+            idem_key=idem_key,
+            attempt_number=case.attempts_used + 1,
         )
         attach_attempt(case, attempt)
 
@@ -862,6 +1046,8 @@ class PaymentRecoveryOrchestrator:
                 session=session,
                 customer_email=customer_email,
                 customer_contact=customer_contact,
+                cart_summary=cart_summary_from_meta(meta),
+                offer_id=offer_id,
             )
         else:
             attempt.result = "rejected"
@@ -903,6 +1089,55 @@ class PaymentRecoveryOrchestrator:
             guardrail_result.passed, attempt.result,
         )
 
+    def _record_execution_outcome(
+        self,
+        session: AsyncSession,
+        case: RecoveryCase,
+        attempt: RetryAttempt,
+        action: RetryAction,
+        exec_result: dict[str, Any],
+        *,
+        actor: str,
+        nudge_message: str | None,
+    ) -> None:
+        """
+        Resolve a write-ahead row from the executor's result — shared by both
+        execute paths, one copy on purpose. The attribution join key
+        (external_ref = the Payment Link id) is the only place this id and
+        the eventual capture appear together; not persisting it is what made
+        recovered revenue unattributable.
+
+        The channel that actually reached them: a nudge notifies by SMS and
+        email both; only the first is recorded, which is enough for
+        per-channel limits and not enough to reconstruct a two-channel send —
+        split this into its own contacts table if that becomes the question.
+        """
+        attempt.executed_at = datetime.now(UTC)
+        attempt.result = "success" if exec_result.get("success") else "failed"
+        attempt.result_details = exec_result
+        link_id = exec_result.get("payment_link_id")
+        if link_id:
+            attempt.external_ref = str(link_id)
+        if nudge_message:
+            attempt.nudge_sent = exec_result.get("nudge_sent", False)
+        channels = exec_result.get("channels") or []
+        attempt.channel = channels[0] if channels else "payment_link"
+
+        if attempt.result == "success" and action.action == "nudge_customer":
+            log_event(
+                session, case, "escalated", actor=actor,
+                level=case.escalation_level, channel=attempt.channel,
+                next_action_at=(
+                    case.next_action_at.isoformat() if case.next_action_at else None
+                ),
+            )
+        elif attempt.result == "success":
+            log_event(
+                session, case, "contacted", actor=actor,
+                action=action.action, channel=attempt.channel,
+                external_ref=attempt.external_ref,
+            )
+
     async def _execute_case_and_record(
         self,
         *,
@@ -915,6 +1150,8 @@ class PaymentRecoveryOrchestrator:
         session: AsyncSession,
         customer_email: str | None,
         customer_contact: str | None,
+        cart_summary: str | None = None,
+        offer_id: str | None = None,
     ) -> None:
         """
         Case-driven twin of _execute_and_record: generate any nudge, write the
@@ -948,6 +1185,10 @@ class PaymentRecoveryOrchestrator:
                     # the four never attempted a payment, and the prompt must
                     # not open with "your payment failed" for those.
                     risk_type=case.risk_type,
+                    # Carts only: naming the items is the personalization the
+                    # research says lifts the message; None elsewhere keeps the
+                    # old wording byte-for-byte.
+                    cart_summary=cart_summary if case.risk_type == "checkout_abandonment" else None,
                 )
                 attempt.nudge_message = nudge_message
             except Exception:
@@ -985,36 +1226,177 @@ class PaymentRecoveryOrchestrator:
                 nudge_message=nudge_message,
                 customer_email=customer_email,
                 customer_contact=customer_contact,
+                offer_id=offer_id,
             )
-            attempt.executed_at = datetime.now(UTC)
-            attempt.result = "success" if exec_result.get("success") else "failed"
-            attempt.result_details = exec_result
-            link_id = exec_result.get("payment_link_id")
-            if link_id:
-                attempt.external_ref = str(link_id)
-            if nudge_message:
-                attempt.nudge_sent = exec_result.get("nudge_sent", False)
-            channels = exec_result.get("channels") or []
-            attempt.channel = channels[0] if channels else "payment_link"
-
-            if attempt.result == "success" and action.action == "nudge_customer":
-                log_event(
-                    session, case, "escalated", actor=actor,
-                    level=case.escalation_level, channel=attempt.channel,
-                    next_action_at=(
-                        case.next_action_at.isoformat() if case.next_action_at else None
-                    ),
-                )
-            elif attempt.result == "success":
-                log_event(
-                    session, case, "contacted", actor=actor,
-                    action=action.action, channel=attempt.channel,
-                    external_ref=attempt.external_ref,
-                )
+            self._record_execution_outcome(
+                session, case, attempt, action, exec_result,
+                actor=actor, nudge_message=nudge_message,
+            )
+            await self._queue_voice_call(
+                session, case=case, attempt=attempt, customer_contact=customer_contact,
+                action=action,
+            )
         except Exception:
             logger.exception("Execution failed for case %s", case.id)
             attempt.result = "failed"
             attempt.result_details = {"error": "Execution exception"}
+
+    async def _queue_voice_call(
+        self,
+        session: AsyncSession,
+        *,
+        case: RecoveryCase,
+        attempt: RetryAttempt,
+        customer_contact: str | None,
+        action: RetryAction,
+    ) -> None:
+        """
+        After a successful chase touch, queue a voice follow-up call.
+
+        Opt-in (VOICE_CHASER_ENABLED, default off) because a phone call is
+        the highest-friction contact the engine can make: it doubles the
+        touches a chase makes on the customer, needs its own compliance
+        posture (DoT/TCPB, AI disclosure), and must never appear silently
+        because someone deployed with a new env var set. The queue row
+        joins the SAME session (and thus the same commit) as the attempt
+        outcome — write-ahead like every other intent the engine records.
+
+        Only after a SUCCESSFUL nudge_customer — a call that follows a
+        failed message is a second annoyance chasing a first failure, and
+        the voice loop's own opt-out handling inherits this case's caps.
+        """
+        settings = get_settings()
+        if not settings.voice_chaser_enabled:
+            return
+        if action.action != "nudge_customer" or attempt.result != "success":
+            return
+        if not customer_contact:
+            return
+        # One queued call per attempt: the attempt id is the natural key.
+        existing = await session.execute(
+            select(VoiceCallQueue.retry_attempt_id).where(
+                VoiceCallQueue.retry_attempt_id == attempt.id
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            return
+        session.add(
+            VoiceCallQueue(
+                recovery_case_id=case.id,
+                retry_attempt_id=attempt.id,
+                customer_contact=customer_contact,
+                risk_type=case.risk_type,
+                amount_paise=case.amount_at_risk,
+                state="queued",
+            )
+        )
+        log_event(
+            session, case, "contacted", actor="system",
+            action="voice_call_queued",
+            channel="voice",
+            attempt_id=str(attempt.id),
+        )
+
+    async def send_promise_reminder(
+        self,
+        case: RecoveryCase,
+        promise: PromiseToPay,
+        session: AsyncSession,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """
+        One pre-due reminder for a pending promise. Returns its outcome.
+
+        The 48h-before reminder is the kept-rate research's single biggest
+        lift, but a reminder is a CONTACT — it must pay the same toll every
+        other contact pays or the promise feature becomes a free nagging
+        lane the compliance rules never saw. So it rides the exact chase
+        discipline: stopping rule, guardrail subset, write-ahead attempt,
+        ledger bump. No agent call — the content is the promise itself
+        (amount + date + link), not a fresh decision, and a mid-promise LLM
+        invention is precisely what the silence invariant exists to prevent.
+
+        The promise's silence still holds: the reminder never moves
+        next_action_at (it is not an escalation rung), and reminded_at is
+        stamped by the CALLER whatever the outcome, so "guardrail refused"
+        cannot become "remind again next tick" — that would nag on a case
+        the gate already said to leave alone.
+        """
+        now = now or datetime.now(UTC)
+        policy = policy_for(case.risk_type)
+        if policy is None:
+            return "skipped_no_policy"
+
+        ledger = await self._get_ledger(case.customer_id, session)
+        stop = stop_reason(case, ledger)
+        # The one stop the reminder legitimately trips is "not due until
+        # ..." — every other stop (terminal, budget, opt-out) means no
+        # contact of any kind is allowed.
+        if stop is not None and "not due until" not in stop:
+            return f"skipped_stop:{stop}"
+
+        action = RetryAction(
+            action="nudge_customer",
+            reason=(
+                f"Pre-due reminder for promise {promise.id} "
+                f"(₹{promise.amount_promised // 100} due "
+                f"{promise.due_at.isoformat()})"
+            ),
+        )
+        # Same deterministic-key construction as a chase: two workers
+        # reminding one promise collide onto one attempt row.
+        idem_key = (
+            f"reminder_{case.risk_type}_{case.subject_ref}_{promise.id}"
+        )
+        if await self._attempt_exists(idem_key, session):
+            return "already_sent"
+
+        context = await self._build_case_context(
+            case, policy, session, now=now,
+            promise_score=await customer_promise_score(session, case.customer_id),
+        )
+        guardrail_result = self._guardrail.validate(
+            action, context, idem_key, case.attempts_used
+        )
+        attempt = self._make_attempt(
+            action=action,
+            agent_type="promise_reminder",
+            guardrail_result=guardrail_result,
+            idem_key=idem_key,
+            attempt_number=case.attempts_used + 1,
+        )
+        attach_attempt(case, attempt)
+        session.add(attempt)
+
+        if not guardrail_result.passed:
+            attempt.result = "rejected"
+            await session.commit()
+            return "skipped_guardrail"
+
+        event = await self._latest_risk_event(case, session)
+        await self._execute_case_and_record(
+            attempt=attempt,
+            case=case,
+            policy=policy,
+            action=action,
+            idem_key=idem_key,
+            actor="promise_reminder",
+            session=session,
+            customer_email=event.customer_email if event else None,
+            customer_contact=event.customer_contact if event else None,
+        )
+        await self._update_ledger_and_commit(context.customer_id, action, session)
+
+        # attach_attempt pushed next_action_at out (escalation backoff for a
+        # nudge) — but the PROMISE owns the silence, and the reminder must not
+        # extend the case's quiet past the promise date nor pull it earlier.
+        # The promise's due_at was the floor before the reminder ran; keep it.
+        case_next = _aware(case.next_action_at) or now
+        promise_due = _aware(promise.due_at) or now
+        case.next_action_at = max(case_next, promise_due)
+        await session.commit()
+        return attempt.result or "sent"
 
     async def process_risk_event(self, event: RiskEvent, session: AsyncSession) -> None:
         """
@@ -1056,6 +1438,40 @@ class PaymentRecoveryOrchestrator:
             due_at=event.due_at,
             next_action_at=first_touch,
         )
+
+        # Link the case to its AR account (B2B receivables layer). Explicit
+        # merchant account_ref wins; else the account is derived from the
+        # canonical customer key. A case with neither stays unlinked and
+        # chases per-case, exactly as before the receivables layer existed.
+        # Invoice cases only: the other chaser types are consumer-shaped
+        # (a cart has no buyer organisation behind it).
+        if case.account_id is None and event.risk_type == "invoice_overdue":
+            from src.receivables.accounts import (
+                get_or_create_account,
+            )
+
+            canonical = customer_key(
+                email=event.customer_email,
+                contact=event.customer_contact,
+                external_id=event.customer_id,
+            )
+            if event.account_ref or canonical:
+                account = await get_or_create_account(
+                    session,
+                    account_ref=(
+                        f"ref:{event.account_ref}"
+                        if event.account_ref
+                        else f"derived:{canonical}"
+                    ),
+                    display_name=event.meta.get("account_name")
+                    if isinstance(event.meta, dict)
+                    else None,
+                )
+                case.account_id = account.id
+                logger.info(
+                    "Case %s linked to AR account %s", case.id, account.account_ref
+                )
+
         await session.commit()
 
         if policy.first_action_hours <= 0:
@@ -1174,48 +1590,12 @@ class PaymentRecoveryOrchestrator:
                 idempotency_key=idem_key,
                 nudge_message=nudge_message,
             )
-            attempt.executed_at = datetime.now(UTC)
-            attempt.result = "success" if exec_result.get("success") else "failed"
-            attempt.result_details = exec_result
-            # The attribution join key. Razorpay returns the Payment Link id
-            # here; when the customer pays it, the capture webhook is the only
-            # place this id and the new payment id appear together. Not
-            # persisting it is what made recovered revenue unattributable.
-            link_id = exec_result.get("payment_link_id")
-            if link_id:
-                attempt.external_ref = str(link_id)
-            if nudge_message:
-                attempt.nudge_sent = exec_result.get("nudge_sent", False)
-            # The channel that actually reached them. A nudge notifies by SMS
-            # and email both; only the first is recorded, which is enough for
-            # per-channel limits and not enough to reconstruct a two-channel
-            # send — split this into its own contacts table if that becomes
-            # the question.
-            channels = exec_result.get("channels") or []
-            attempt.channel = channels[0] if channels else "payment_link"
-
-            if attempt.result == "success" and action.action == "nudge_customer":
-                log_event(
-                    session,
-                    case,
-                    "escalated",
-                    actor=actor,
-                    level=case.escalation_level,
-                    channel=attempt.channel,
-                    next_action_at=(
-                        case.next_action_at.isoformat() if case.next_action_at else None
-                    ),
-                )
-            elif attempt.result == "success":
-                log_event(
-                    session,
-                    case,
-                    "contacted",
-                    actor=actor,
-                    action=action.action,
-                    channel=attempt.channel,
-                    external_ref=attempt.external_ref,
-                )
+            # The attribution join key and the escalation trail are recorded
+            # by the shared outcome resolver — see _record_execution_outcome.
+            self._record_execution_outcome(
+                session, case, attempt, action, exec_result,
+                actor=actor, nudge_message=nudge_message,
+            )
         except Exception:
             logger.exception("Execution failed for %s", payment_id)
             attempt.result = "failed"
@@ -1256,6 +1636,11 @@ class PaymentRecoveryOrchestrator:
         # the 23–7 IST window.
         local_now = now.astimezone(IST)
 
+        promise_score = (
+            await customer_promise_score(session, customer_id)
+            if customer_id else None
+        )
+
         return FailureContext(
             payment_id=failure.payment_id,
             order_id=failure.order_id,
@@ -1282,6 +1667,9 @@ class PaymentRecoveryOrchestrator:
             day_of_week=local_now.weekday(),
             is_retryable=failure.is_retryable,
             original_failure_id=str(failure.id),
+            promise_kept=promise_score.kept if promise_score else 0,
+            promise_broken=promise_score.broken if promise_score else 0,
+            promise_pending=promise_score.pending if promise_score else 0,
         )
 
     @staticmethod

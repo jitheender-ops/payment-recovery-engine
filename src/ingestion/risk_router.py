@@ -40,18 +40,18 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings, reveal
 from src.database import async_session_factory, get_session
-from src.ingestion.router import EVENT_RECONCILE_MAX_ATTEMPTS
 from src.ingestion.signature import body_too_large, verify_webhook_signature
 from src.models import RiskEvent
 
@@ -104,16 +104,41 @@ class RiskEventIn(BaseModel):
     customer_id: str | None = Field(default=None, max_length=255)
     customer_email: str | None = Field(default=None, max_length=255)
     customer_contact: str | None = Field(default=None, max_length=20)
+    # The merchant's own code for the buyer organisation (their ERP customer
+    # code). Optional: with it, the receivables layer consolidates this
+    # invoice's chase under one account for the whole buyer — one statement,
+    # one contact budget; without it, the account is derived from the
+    # customer identity.
+    account_ref: str | None = Field(default=None, max_length=255)
     occurred_at: datetime | None = None
     due_at: datetime | None = None
+    # A Razorpay offer id in the MERCHANT's own account, cart events only.
+    # The engine relays a discount the merchant already created — it never
+    # computes money it does not control. Applied from the second touch on
+    # (never the first: research is clear an incentive on touch 1 trains
+    # discount-waiting). Validated as an offer-shaped string; Razorpay
+    # enforces the offer's real validity/amount rules at link creation.
+    offer_id: str | None = Field(default=None, pattern=r"^offer_[A-Za-z0-9]{6,40}$")
     meta: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("event_id", "reference_id", "customer_id", "customer_contact")
+    @field_validator(
+        "event_id", "reference_id", "customer_id", "customer_contact", "account_ref"
+    )
     @classmethod
     def _no_control_characters(cls, value: str | None) -> str | None:
         """Reject identifiers carrying control characters — see _CONTROL_CHARS."""
         if value is not None and _CONTROL_CHARS.search(value):
             raise ValueError("control characters are not allowed in identifiers")
+        return value
+
+    @field_validator("offer_id")
+    @classmethod
+    def _offer_only_on_carts(cls, value: str | None, info: Any) -> str | None:
+        """Refuse offers outside the cart rail — the merchant's incentive
+        discipline (invoice/mandate/subscription money is contract money,
+        not discountable through a recovery link)."""
+        if value is not None and info.data.get("risk_type") != "checkout_abandonment":
+            raise ValueError("offer_id is only valid on checkout_abandonment events")
         return value
 
     @field_validator("meta")
@@ -129,53 +154,19 @@ class RiskEventIn(BaseModel):
 
 async def rearm_failed_risk_event(session: AsyncSession, event_id: str) -> None:
     """
-    Give a failed risk event another chance instead of burying it.
-
-    Mirror of rearm_failed_event for webhook events — same cap, same logic:
-    re-arm (processed=False) until EVENT_RECONCILE_MAX_ATTEMPTS, then rest
-    with the error recorded. One number, one meaning, across both stores.
+    Re-arm a failed risk event — the shared rearm(), risk flavour. Same cap,
+    same logic as the webhook store: one number, one meaning, both stores.
     """
-    try:
-        result = await session.execute(
-            select(RiskEvent).where(RiskEvent.event_id == event_id)
-        )
-        event = result.scalar_one_or_none()
-        if event is None:
-            return
-        attempts = (event.processing_attempts or 0) + 1
-        if attempts < EVENT_RECONCILE_MAX_ATTEMPTS:
-            await session.execute(
-                update(RiskEvent)
-                .where(RiskEvent.id == event.id)
-                .values(
-                    processed=False,
-                    processing_attempts=attempts,
-                    processing_error=(
-                        f"Background processing failed (attempt {attempts}); re-armed"
-                    ),
-                )
-            )
-            logger.warning(
-                "Risk event %s re-armed after failure (%d/%d)",
-                event_id, attempts, EVENT_RECONCILE_MAX_ATTEMPTS,
-            )
-        else:
-            await session.execute(
-                update(RiskEvent)
-                .where(RiskEvent.id == event.id)
-                .values(
-                    processed=True,
-                    processing_attempts=attempts,
-                    processing_error="Background processing failed after retry cap",
-                )
-            )
-            logger.error(
-                "Risk event %s permanently failed after %d attempts",
-                event_id, attempts,
-            )
-        await session.commit()
-    except Exception:
-        logger.exception("Failed to re-arm risk event %s", event_id)
+    from src.ingestion.router import rearm
+
+    await rearm(
+        session,
+        model=RiskEvent,
+        lookup_col=RiskEvent.event_id,
+        id_col=RiskEvent.id,
+        event_id=event_id,
+        label="Risk event",
+    )
 
 
 async def _process_risk_event_background(event_id: str) -> None:
@@ -199,6 +190,139 @@ async def _process_risk_event_background(event_id: str) -> None:
             logger.exception("Error processing risk event: %s", event_id)
             await session.rollback()
             await rearm_failed_risk_event(session, event_id)
+
+
+class PromiseIn(BaseModel):
+    """
+    A promise the merchant's own systems collected (a human call, a chat,
+    an email reply), for the same ledger the voice agent and recovery page
+    write to. The merchant heard it; the engine enforces the silence.
+    """
+
+    amount_paise: int = Field(gt=0, le=2_147_483_647)
+    due_at: datetime
+    is_partial: bool | None = None
+    # "explicit" | "tentative" | "conditional" — the merchant's read of how
+    # firmly it was said. Free text beyond these is refused here, not
+    # sanitized later: the column is a segment label, not a note field.
+    confidence: Literal["explicit", "tentative", "conditional"] | None = None
+    condition_note: str | None = Field(default=None, max_length=200)
+    channel: str | None = Field(default=None, max_length=20)
+    language: str | None = Field(default=None, max_length=20)
+
+    @field_validator("condition_note", "channel", "language")
+    @classmethod
+    def _no_control_characters(cls, value: str | None) -> str | None:
+        """Reject control characters — see _CONTROL_CHARS."""
+        if value is not None and _CONTROL_CHARS.search(value):
+            raise ValueError("control characters are not allowed")
+        return value
+
+
+@router.post(
+    "/{risk_type}/{reference_id}/promise",
+    responses={
+        200: {"description": "Promise recorded — the case goes quiet until due_at"},
+        401: {"description": "Missing or invalid X-Risk-Signature — fail closed"},
+        404: {"description": "No open case for that reference"},
+        422: {"description": "Promise refused: per-case promise cap reached"},
+    },
+)
+async def record_promise_for_case(
+    request: Request,
+    risk_type: str,
+    reference_id: str,
+    x_risk_signature: Annotated[str | None, Header()] = None,
+) -> Response:
+    """
+    Log a promise a merchant's operator collected, against their open case.
+
+    Same HMAC envelope as POST /risks — this is the merchant's second write
+    surface, and a forgeable one would let a third party silence arbitrary
+    cases (an attacker's dream: stop the recovery, never pay). The promise
+    enforces the exact silence a customer-voiced one does: next_action_at
+    moves out to due_at, the chase stops, and the kept-rate ledger gains a
+    row whose source is auditable (`channel`, `source_ref`).
+
+    Closed cases 404 — a promise on a recovered case is not a deferral,
+    it is noise, and writing it would fabricate ledger history.
+    """
+    raw_body = await request.body()
+    if not x_risk_signature:
+        return Response(status_code=401, content="Missing signature")
+    if not verify_webhook_signature(
+        raw_body, x_risk_signature, reveal(get_settings().risk_webhook_secret)
+    ):
+        return Response(status_code=401, content="Invalid signature")
+
+    try:
+        body = json.loads(raw_body)
+        promise_in = PromiseIn.model_validate(body)
+    except Exception as e:
+        logger.warning("Merchant promise failed schema validation: %s", e)
+        return Response(status_code=400, content="Invalid promise payload")
+
+    # The risk types this surface covers. A payment-failure promise has its
+    # own path (the gateway's webhook drives that rail); anything unknown
+    # fails closed like policy_for does.
+    if risk_type not in ("checkout_abandonment", "subscription_failure",
+                        "invoice_overdue", "mandate_failure"):
+        return Response(status_code=404, content="Unknown risk type")
+
+    due = promise_in.due_at
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
+    horizon = timedelta(days=get_settings().promise_max_horizon_days)
+    if not (now < due <= now + horizon):
+        return Response(
+            status_code=400,
+            content=f"due_at must be in the future and within {horizon.days} days",
+        )
+
+    from src.cases import customer_promise_score, find_case, record_promise
+
+    async with async_session_factory() as session:
+        case = await find_case(session, risk_type=risk_type, subject_ref=reference_id)
+        if case is None or case.state != "open":
+            return Response(status_code=404, content="No open case for that reference")
+
+        promise = await record_promise(
+            session,
+            case,
+            amount=promise_in.amount_paise,
+            due_at=due,
+            channel=promise_in.channel or "merchant",
+            language=promise_in.language,
+            source_ref="merchant_api",
+            is_partial=promise_in.is_partial,
+            confidence=promise_in.confidence,
+            condition_note=promise_in.condition_note,
+        )
+        if promise is None:
+            await session.commit()  # the refusal audit row persists too
+            return Response(
+                status_code=422,
+                content="Promise cap reached for this case",
+            )
+        score = await customer_promise_score(session, case.customer_id)
+        await session.commit()
+
+    logger.info(
+        "Merchant promise recorded: %s/%s amount=%s due=%s",
+        risk_type, reference_id, promise_in.amount_paise, due.isoformat(),
+    )
+    return JSONResponse(
+        {
+            "status": "recorded",
+            "silenced_until": due.isoformat(),
+            "attempts_used": case.attempts_used,
+            "max_attempts": case.max_attempts,
+            "customer_kept_rate": (
+                round(score.kept_rate, 3) if score.kept_rate is not None else None
+            ),
+        }
+    )
 
 
 @router.post(
@@ -284,8 +408,12 @@ async def receive_risk_event(
         customer_id=event_in.customer_id,
         customer_email=event_in.customer_email,
         customer_contact=event_in.customer_contact,
+        account_ref=(
+            event_in.account_ref.strip() if event_in.account_ref else None
+        ),
         occurred_at=occurred,
         due_at=due,
+        offer_id=event_in.offer_id,
         meta=event_in.meta,
         payload=body,
         received_at=datetime.now(UTC),

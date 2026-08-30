@@ -30,6 +30,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -50,9 +51,7 @@ class WebhookEvent(Base):
 
     __tablename__ = "webhook_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     razorpay_event_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g. payment.failed
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -60,7 +59,7 @@ class WebhookEvent(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
-    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_error: Mapped[str | None] = mapped_column(Text)
     # How many times the reconciler has tried to run this event through the
     # pipeline. The claim-then-process sweep used to consume the event on the
     # first exception — a transient database blip permanently skipped a real
@@ -99,9 +98,7 @@ class RiskEvent(Base):
 
     __tablename__ = "risk_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # The dedup key: merchant-supplied, or derived from
     # (risk_type, reference_id, occurred_at) when absent. UNIQUE so a
     # re-delivered event is a clean 200, not a second case.
@@ -110,13 +107,24 @@ class RiskEvent(Base):
     reference_id: Mapped[str] = mapped_column(String(255), nullable=False)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)  # paise
     currency: Mapped[str] = mapped_column(String(10), default="INR")
-    customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    customer_contact: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    customer_id: Mapped[str | None] = mapped_column(String(255))
+    customer_email: Mapped[str | None] = mapped_column(String(255))
+    customer_contact: Mapped[str | None] = mapped_column(String(20))
+    # The merchant's own code for the buyer organisation (their ERP customer
+    # code). When present, the receivables layer consolidates this event's
+    # cases under that account; when absent, the account is derived from the
+    # canonical customer key. Denormalised here for the same reason the other
+    # customer_* columns are: the consolidation runs days after arrival.
+    account_ref: Mapped[str | None] = mapped_column(String(255))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # When the money was due — an invoice's due date, a subscription's charge
     # date. Drives RecoveryCase.due_at, which the receivables ladder ages on.
-    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A Razorpay offer id (merchant's own account) for cart chases — the
+    # incentive a merchant may attach from the second touch on. NULL is the
+    # default and means no offer, which keeps every pre-existing event's
+    # behaviour byte-for-byte.
+    offer_id: Mapped[str | None] = mapped_column(String(64))
     # Merchant free-form context (cart contents, invoice number, mandate name,
     # plan). Reduced to bounded printable data before it reaches an LLM prompt
     # — see src/agent/prompts.py, UNTRUSTED INPUT.
@@ -127,7 +135,7 @@ class RiskEvent(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
-    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_error: Mapped[str | None] = mapped_column(Text)
     # Same re-arm discipline as webhook_events: a transient failure re-arms the
     # event until the cap; only a deterministically-broken payload rests.
     processing_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -160,7 +168,7 @@ class SchedulerHeartbeat(Base):
         DateTime(timezone=True), nullable=False
     )
     last_tick_counts: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True
+        JSONB
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -194,35 +202,33 @@ class PaymentFailure(Base):
 
     __tablename__ = "payment_failures"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     payment_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    order_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    order_id: Mapped[str | None] = mapped_column(String(255), index=True)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)  # in paise
     currency: Mapped[str] = mapped_column(String(10), default="INR")
     method: Mapped[str] = mapped_column(String(50), nullable=False)  # card, upi, netbanking, wallet
-    bank: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    wallet: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    vpa: Mapped[str | None] = mapped_column(String(255), nullable=True)  # UPI VPA
-    card_network: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    card_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    card_issuer: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    bank: Mapped[str | None] = mapped_column(String(100))
+    wallet: Mapped[str | None] = mapped_column(String(100))
+    vpa: Mapped[str | None] = mapped_column(String(255))  # UPI VPA
+    card_network: Mapped[str | None] = mapped_column(String(50))
+    card_type: Mapped[str | None] = mapped_column(String(20))
+    card_issuer: Mapped[str | None] = mapped_column(String(100))
 
     # Error details from Razorpay (5-tuple)
     error_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    error_description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_source: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    error_step: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    error_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_description: Mapped[str | None] = mapped_column(Text)
+    error_source: Mapped[str | None] = mapped_column(String(50))
+    error_step: Mapped[str | None] = mapped_column(String(100))
+    error_reason: Mapped[str | None] = mapped_column(String(100))
 
     # Classification
     failure_class: Mapped[str] = mapped_column(String(50), nullable=False)
     is_retryable: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
     # Customer info
-    customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    customer_contact: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    customer_email: Mapped[str | None] = mapped_column(String(255))
+    customer_contact: Mapped[str | None] = mapped_column(String(20))
 
     # Metadata
     webhook_event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -258,12 +264,17 @@ class RecoveryCase(Base):
 
     __tablename__ = "recovery_cases"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     risk_type: Mapped[str] = mapped_column(String(40), nullable=False)
     subject_ref: Mapped[str] = mapped_column(String(255), nullable=False)
-    customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    # The AR account this case consolidates under (B2B receivables layer,
+    # src/receivables/accounts.py). Nullable on purpose: a case with no
+    # derivable buyer identity chases per-case exactly as it did before the
+    # receivables layer existed. No FK — same convention as every cross-table
+    # reference in this schema (bare UUID + index), so the receivables tables
+    # stay loadable and testable on their own.
+    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     # ── Money ────────────────────────────────────────────────────────────
     amount_at_risk: Mapped[int] = mapped_column(Integer, nullable=False)  # paise
@@ -273,16 +284,16 @@ class RecoveryCase(Base):
     # Razorpay Payment Link, and the customer paying it produces a brand-new
     # payment id. Storing only the original id is why nothing could be
     # attributed before this table existed.
-    recovered_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    recovered_ref: Mapped[str | None] = mapped_column(String(255))
     recovered_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # Which attempt earned it. NULL means the money came back without us — the
     # customer paid the order directly and the capture matched on order_id, not
     # on a link we sent. Both are recoveries; only this one is *ours*, and a
     # headline that cannot tell them apart takes credit for the control group.
     recovered_via_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        UUID(as_uuid=True)
     )
 
     # ── Timing ───────────────────────────────────────────────────────────
@@ -292,21 +303,21 @@ class RecoveryCase(Base):
     # that from. NULL for a card decline, where "due" and "failed" are the same
     # instant and payment_failures already records it.
     due_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # Earliest this case may be touched again. Written by the escalation backoff
     # and by a promise-to-pay; read by stop_reason() and by the sweep that finds
     # work for risk types with no inbound webhook. NULL means no wait, so every
     # path that existed before this column behaves exactly as it did.
     next_action_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
 
     # ── Bounded workflow ─────────────────────────────────────────────────
     state: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
-    close_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(Text)
     closed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # Persisted rather than recounted. A count(*) over retry_attempts answers
     # "how many rows exist", which is not the same question once a case can be
@@ -317,7 +328,7 @@ class RecoveryCase(Base):
     escalation_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # ── Batch / audit ────────────────────────────────────────────────────
-    batch_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    batch_id: Mapped[str | None] = mapped_column(String(100), index=True)
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -336,6 +347,9 @@ class RecoveryCase(Base):
         # abandoned cart never sends us a webhook, so something has to go
         # looking, and it must not seq-scan every case ever opened.
         Index("ix_recovery_cases_due", "state", "next_action_at"),
+        # The receivables consolidation sweep: open invoice cases grouped by
+        # account. account_id is nullable, so partial rows never use it.
+        Index("ix_recovery_cases_account", "account_id", "state"),
     )
 
 
@@ -347,52 +361,50 @@ class RetryAttempt(Base):
 
     __tablename__ = "retry_attempts"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # Both NULL for a case with no payment behind it — an abandoned cart, an
     # overdue invoice, a mandate that never presented. NOT NULL here is what
     # confined this table to the payment rail: `risk_type` already named five
     # sources, but four of them could not write an attempt row at all.
     payment_failure_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        UUID(as_uuid=True)
     )
-    payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    payment_id: Mapped[str | None] = mapped_column(String(255), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # Nullable so rows written before recovery_cases existed still load.
     recovery_case_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
+        UUID(as_uuid=True)
     )
     # What we handed the customer — the Razorpay Payment Link id. This is the
     # join key for revenue attribution: the payment.captured webhook for a link
     # carries the link id, and it is the ONLY thing connecting the new payment
     # back to the case, because the captured payment has an id we have never
     # seen. Without this column the recovered rupees are unattributable.
-    external_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_ref: Mapped[str | None] = mapped_column(String(255))
 
     # Agent decision
     action_type: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # retry_now, retry_at, switch_rail, nudge_customer, abandon
-    target_rail: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_rail: Mapped[str | None] = mapped_column(String(50))
     scheduled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
-    agent_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_reasoning: Mapped[str | None] = mapped_column(Text)
     agent_type: Mapped[str] = mapped_column(
         String(20), default="llm"
     )  # llm, xgboost, fixed_retry
-    agent_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    agent_confidence: Mapped[float | None] = mapped_column(Float)
 
     # Guardrail
     guardrail_passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    guardrail_rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    guardrail_rejection_reason: Mapped[str | None] = mapped_column(Text)
 
     # Execution
     executed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # Lifecycle: pending (write-ahead, Razorpay not yet answered) → success |
     # failed; scheduled (a retry_at parked for the Layer 6 scheduler) → pending
@@ -402,20 +414,20 @@ class RetryAttempt(Base):
     # on (result, scheduled_at) and (result='pending', created_at), which is
     # what the indexes below exist for.
     result: Mapped[str | None] = mapped_column(
-        String(50), nullable=True
+        String(50)
     )
-    result_details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    result_details: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     # Nudge (if applicable)
-    nudge_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nudge_message: Mapped[str | None] = mapped_column(Text)
     nudge_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     # How the customer was reached and in what language. Recorded because
     # contact-frequency rules are per-channel, not global — two WhatsApp nudges
     # and a voice call is three contacts, and an audit that stores only the text
     # cannot show which of them a complaint is about. "hinglish" is a real value
     # here: it is what the voice script speaks, and it is not "hi".
-    channel: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    language: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    channel: Mapped[str | None] = mapped_column(String(20))
+    language: Mapped[str | None] = mapped_column(String(20))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -450,10 +462,10 @@ class RetryLedger(Base):
     total_retries_24h: Mapped[int] = mapped_column(Integer, default=0)
     total_nudges_24h: Mapped[int] = mapped_column(Integer, default=0)
     last_retry_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     last_nudge_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # When the CURRENT counting window opened. The old reset rule keyed off
     # last_retry_at alone, so contacts spaced just inside the window kept the
@@ -463,13 +475,13 @@ class RetryLedger(Base):
     # matter how recently the last contact was. NULL on legacy rows = fall
     # back to the old last_* behaviour (see orchestrator._effective_counts).
     retries_window_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     nudges_window_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     blocked_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # Compliance stop, distinct from the rate limits above. blocked_until is a
     # cooldown that expires on its own; an opt-out does not. Checked before any
@@ -479,7 +491,7 @@ class RetryLedger(Base):
         String(20), nullable=False, default="granted"
     )
     opted_out_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -507,13 +519,11 @@ class PromiseToPay(Base):
 
     __tablename__ = "promises_to_pay"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     recovery_case_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False, index=True
     )
-    customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(255), index=True)
 
     amount_promised: Mapped[int] = mapped_column(Integer, nullable=False)  # paise
     promised_at: Mapped[datetime] = mapped_column(
@@ -522,19 +532,48 @@ class PromiseToPay(Base):
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     # Where the promise came from, so a disputed one can be produced on demand.
-    channel: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    language: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    source_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    channel: Mapped[str | None] = mapped_column(String(20))
+    language: Mapped[str | None] = mapped_column(String(20))
+    source_ref: Mapped[str | None] = mapped_column(String(255))
 
     # "pending" | "kept" | "broken" | "cancelled" — Literals in src/cases.py.
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     resolved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True)
     )
     # The payment that kept it. A different id from anything on the case, for
     # the same reason `recovered_ref` is: paying a link mints a new payment.
-    resolved_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_ref: Mapped[str | None] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    # ── Capture quality (who promised, how firmly) ────────────────────────
+    # Nullable because every pre-existing row and every operator-logged
+    # promise simply was not assessed — None means "unknown", never "full
+    # confidence", and the metrics treat it as its own segment.
+    is_partial: Mapped[bool | None] = mapped_column(Boolean)
+    # "explicit" | "tentative" | "conditional" — the kept-rate analysis
+    # segment research (Monk) puts the whole kept-vs-count argument on:
+    # a tentative promise breaking is not the same signal as an explicit one.
+    confidence: Mapped[str | None] = mapped_column(String(20))
+    # A stated condition, sanitized at the WRITE boundary (same reduction as
+    # gateway free text): "salary aane ke baad" is a promise about the
+    # customer's cash cycle and belongs in the re-ask decision. Never rides
+    # verbatim into an LLM prompt — the score aggregates only.
+    condition_note: Mapped[str | None] = mapped_column(Text)
+    # The rail the customer named, if any — kept-rate by rail is the honest
+    # answer to "should we steer promises toward UPI links".
+    promised_rail: Mapped[str | None] = mapped_column(String(20))
+
+    # ── Workflow markers ──────────────────────────────────────────────────
+    # The pre-due reminder sweep's one-shot marker: set when the reminder
+    # fired (or was skipped-with-reason), so "remind 48h before due" can
+    # never become "remind every tick until due". Never reset — one promise,
+    # one reminder, by construction.
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Days between due_at and the payment that kept it (0 = on time or
+    # early). The honest kept-rate metric separates kept-on-time from
+    # kept-in-grace with this, instead of libelling a late payment as on-time.
+    kept_late_days: Mapped[int | None] = mapped_column(Integer)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -576,7 +615,7 @@ class CaseEvent(Base):
     # operator id when a human overrode it — the distinction a compliance review
     # asks for first and the one a single boolean cannot carry.
     actor: Mapped[str] = mapped_column(String(40), nullable=False, default="system")
-    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -588,10 +627,61 @@ class CaseEvent(Base):
     # insert would add a query to that hot path. Instead these start NULL and
     # a separate stamping pass (idempotent, append-only) fills them in after
     # the fact — verifiable independently of whether it has run yet.
-    event_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    prev_event_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    event_hash: Mapped[str | None] = mapped_column(String(64))
+    prev_event_hash: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (
         Index("ix_case_events_case", "recovery_case_id", "id"),
         Index("ix_case_events_type_created", "event_type", "created_at"),
+    )
+
+
+class VoiceCallQueue(Base):
+    """
+    Voice calls the engine wants placed, in the order the chasers queued
+    them.
+
+    The engine never dials. This row is a work item for the telephony leg:
+    the orchestrator writes it in the SAME transaction as the chase attempt
+    (write-ahead, same correctness property as RetryAttempt), the telephony
+    leg claims it via POST /voice/queue/claim (HMAC-signed), places the call
+    through its own provider, and drives the conversation by POSTing
+    transcripts to /voice/turn. Opt-in by risk type — VOICE_CHASER_ENABLED
+    gates the queueing at all, because a call is the highest-friction
+    contact the engine can make and must never ship silently on.
+
+    States are the call's real lifecycle: queued -> claimed -> done/failed,
+    with opted_out as the terminal a spoken "band karo" forces.
+    """
+
+    __tablename__ = "voice_call_queue"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recovery_case_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("recovery_cases.id"),
+        nullable=False,
+    )
+    # The RetryAttempt this call belongs to — the voice touch of a chase is
+    # still an attempt-row event, audited and capped like every other.
+    retry_attempt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Customer's phone, copied at queue time: the telephony leg must never
+    # need a case join to dial, and the number it dialed is part of the
+    # compliance record. PII like the rest of the contact fields.
+    customer_contact: Mapped[str | None] = mapped_column(String(20))
+    risk_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    amount_paise: Mapped[int] = mapped_column(Integer, nullable=False)
+    # queued / claimed / done / failed / opted_out
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(String(120))
+    # What the call leg reported back: outcome, spoken opt-out, last intent.
+    result: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_voice_call_queue_recovery_case_id", "recovery_case_id"),
+        Index("ix_voice_call_queue_state_created", "state", "created_at"),
     )

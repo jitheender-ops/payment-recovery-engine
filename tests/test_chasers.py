@@ -365,7 +365,7 @@ async def test_background_failure_rearms_the_risk_event(
 
 async def test_reconcile_risk_events_recovers_a_dropped_event(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     """The sweep is the only retry mechanism there is for an event whose
     background task died: it must re-run it and mark it processed."""
     orch = _orchestrator(monkeypatch)
@@ -470,7 +470,7 @@ async def test_process_risk_event_opens_case_with_policy_budget(
 
 async def test_process_risk_event_chases_immediate_types_right_away(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -520,6 +520,22 @@ async def test_process_risk_event_is_idempotent(
 # ── chase_case: the bounded pipeline ──────────────────────────────────────
 
 
+@pytest.fixture
+def inside_b2b_window(monkeypatch: Any) -> None:
+    """
+    Hold the Mon–Fri 09:30–18:30 IST B2B contact window open.
+
+    chase_case defers an invoice_overdue chase outside that window (the same
+    defer-don't-burn rule the IST blackout uses), so a test about anything
+    else — the write-ahead ordering, the ladder, idempotency — would pass or
+    fail depending on the day of the week it happened to run on. Tests that
+    are ABOUT a timing rule pin their own clock and do not take this fixture.
+    """
+    import src.receivables.ladder as ladder
+
+    monkeypatch.setattr(ladder, "is_b2b_contact_time", lambda _dt: True)
+
+
 async def _open_chase_case(
     sm: async_sessionmaker[AsyncSession],
     risk_type: str,
@@ -552,7 +568,7 @@ async def _open_chase_case(
 
 async def test_chase_writes_attempt_ahead_of_execution(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     """The money-safety invariant, on the chase path too: the attempt row must
     be committed BEFORE Razorpay is called."""
     orch = _orchestrator(monkeypatch)
@@ -590,7 +606,7 @@ async def test_chase_writes_attempt_ahead_of_execution(
 
 async def test_chase_advances_the_ladder_after_a_link_action(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -669,7 +685,7 @@ async def test_chase_refuses_to_act_on_top_of_a_pending_attempt(
 
 async def test_chase_defers_during_ist_blackout_without_burning_a_slot(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     """The chaser picks its own moment, so it must not walk into the IST
     quiet hours and let the guardrail burn a slot on a rejection it could
     see coming: defer to the window's edge with budget intact."""
@@ -757,7 +773,7 @@ async def test_chase_respects_opt_out(
 
 async def test_chase_is_idempotent_per_budget_slot(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     """Two workers chasing the same case build the same key; the second must
     not execute again."""
     orch = _orchestrator(monkeypatch)
@@ -798,6 +814,12 @@ async def test_chase_parks_retry_at_and_sets_next_action(
     )
 
     case = await _open_chase_case(db_sessionmaker, "mandate_failure")
+    # The RBI pre-debit notice, already sent and older than 24h. Without it a
+    # mandate's retry is downgraded to the notice itself (chase_case), so a
+    # test about PARKING has to be at the rung where collecting is lawful —
+    # which is the second touch, not the first.
+    await _seed_predebit_notice(db_sessionmaker, case)
+
     async with db_sessionmaker() as session:
         await orch.chase_case(case, session)
 
@@ -805,7 +827,10 @@ async def test_chase_parks_retry_at_and_sets_next_action(
         fresh = await session.get(RecoveryCase, case.id)
         attempt = (
             await session.execute(
-                select(RetryAttempt).where(RetryAttempt.recovery_case_id == case.id)
+                select(RetryAttempt).where(
+                    RetryAttempt.recovery_case_id == case.id,
+                    RetryAttempt.idempotency_key.startswith("chase_"),
+                )
             )
         ).scalar_one()
         assert fresh is not None
@@ -814,12 +839,156 @@ async def test_chase_parks_retry_at_and_sets_next_action(
         assert fresh.next_action_at is not None
 
 
+async def _seed_predebit_notice(
+    sm: async_sessionmaker[AsyncSession], case: RecoveryCase, *, hours_ago: int = 25
+) -> None:
+    """A successful nudge on the case, old enough to satisfy the RBI 24h notice."""
+    async with sm() as session:
+        session.add(
+            RetryAttempt(
+                idempotency_key=f"notice_{case.subject_ref}",
+                attempt_number=1,
+                recovery_case_id=case.id,
+                action_type="nudge_customer",
+                guardrail_passed=True,
+                result="success",
+                executed_at=datetime.now(UTC) - timedelta(hours=hours_ago),
+            )
+        )
+        await session.commit()
+
+
+async def test_a_mandate_collection_without_a_notice_becomes_the_notice(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    RBI e-mandate: no pre-debit notice on record → send the notice, do not
+    try to collect.
+
+    Guardrail rule 12 rejects a collection without one, and a rejection still
+    spends a slot — so a mandate case (budget: 3) could exhaust itself never
+    sending the notice the rule was asking for. Both decision paths steered
+    into it: the prompt tells the LLM "retry_at next day is usually right"
+    and the XGBoost heuristic hardcodes the same.
+    """
+    orch = _orchestrator(monkeypatch, action="retry_at")
+    monkeypatch.setattr(
+        orch,
+        "_get_agent",
+        lambda: _FixedAgent("retry_at", datetime.now(UTC) + timedelta(hours=24)),
+    )
+    calls: list[dict[str, Any]] = []
+    _spy_executor(monkeypatch, orch, calls)
+
+    case = await _open_chase_case(db_sessionmaker, "mandate_failure")
+    async with db_sessionmaker() as session:
+        await orch.chase_case(case, session)
+
+    async with db_sessionmaker() as session:
+        attempt = (
+            await session.execute(
+                select(RetryAttempt).where(RetryAttempt.recovery_case_id == case.id)
+            )
+        ).scalar_one()
+
+    assert attempt.action_type == "nudge_customer", (
+        "a collection attempt with no pre-debit notice must become the notice"
+    )
+    assert attempt.result == "success", "the notice went out — the slot was not wasted"
+    assert len(calls) == 1
+
+
+async def test_a_mandate_collection_with_a_valid_notice_is_left_alone(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """The downgrade must not fire once the notice exists — otherwise a
+    mandate could never be collected at all."""
+    orch = _orchestrator(monkeypatch, action="retry_now")
+    calls: list[dict[str, Any]] = []
+    _spy_executor(monkeypatch, orch, calls)
+
+    case = await _open_chase_case(db_sessionmaker, "mandate_failure")
+    await _seed_predebit_notice(db_sessionmaker, case)
+
+    async with db_sessionmaker() as session:
+        await orch.chase_case(case, session)
+
+    async with db_sessionmaker() as session:
+        attempt = (
+            await session.execute(
+                select(RetryAttempt).where(
+                    RetryAttempt.recovery_case_id == case.id,
+                    RetryAttempt.idempotency_key.startswith("chase_"),
+                )
+            )
+        ).scalar_one()
+
+    assert attempt.action_type == "retry_now"
+
+
+async def test_the_policy_rail_reaches_the_engine_minted_link(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    A subscription chase must mint the UPI link its policy names.
+
+    recommended_rail reached the recovery page and the console and stopped
+    there — the engine's own link minted generic, so the chase contradicted
+    the page it pointed at, and the "renewals die on card OTPs" reasoning the
+    policy encodes never actually applied to our own outreach.
+    """
+    orch = _orchestrator(monkeypatch, action="nudge_customer")
+    calls: list[dict[str, Any]] = []
+    _spy_executor(monkeypatch, orch, calls)
+
+    case = await _open_chase_case(db_sessionmaker, "subscription_failure")
+    async with db_sessionmaker() as session:
+        await orch.chase_case(case, session)
+
+    assert calls, "the chase never reached the executor"
+    assert calls[0]["target_rail"] == "upi", (
+        f"policy names UPI, executor got {calls[0]['target_rail']!r}"
+    )
+
+
+async def test_an_explicit_agent_rail_is_not_overridden_by_the_policy(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """The default fills a gap; it does not overrule a choice the agent made
+    with context this default does not have."""
+    orch = PaymentRecoveryOrchestrator()
+
+    class _CardAgent:
+        fallback_count = 0
+
+        async def decide(self, context: FailureContext) -> RetryAction:
+            return RetryAction(
+                action="switch_rail", rail="card", reason="agent picked card"
+            )
+
+    monkeypatch.setattr(orch, "_get_agent", lambda: _CardAgent())
+    monkeypatch.setattr(
+        orch._guardrail,
+        "validate",
+        lambda *a, **k: GuardrailResult(passed=True, rejection_reasons=[], rules_checked=1),
+    )
+    monkeypatch.setattr(orch._nudge_gen, "_get_client", lambda: None)
+    calls: list[dict[str, Any]] = []
+    _spy_executor(monkeypatch, orch, calls)
+
+    case = await _open_chase_case(db_sessionmaker, "subscription_failure")
+    async with db_sessionmaker() as session:
+        await orch.chase_case(case, session)
+
+    assert calls[0]["target_rail"] == "card"
+
+
 # ── the scheduler's chase sweep ───────────────────────────────────────────
 
 
 async def test_chase_due_cases_chases_the_four_types(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -885,7 +1054,7 @@ async def test_chase_due_cases_skips_cases_not_yet_due(
 
 async def test_chase_due_cases_serves_oldest_first_across_types(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-) -> None:
+, inside_b2b_window: None) -> None:
     """One oldest-first query across all four types: under a backlog the
     longest-waiting case is chased first, whatever its type — the per-type
     loop used to serve the first type in the dict until it was empty."""

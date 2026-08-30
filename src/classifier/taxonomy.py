@@ -82,11 +82,6 @@ class FailureClass(str, Enum):
         """Whether this failure class is a hard decline (never retry)."""
         return self in _HARD_DECLINE_CLASSES
 
-    @property
-    def suggest_rail_switch(self) -> bool:
-        """Whether this failure class benefits from switching payment rails."""
-        return self in _RAIL_SWITCH_CLASSES
-
 
 # Pre-computed sets for O(1) membership checks
 _RETRYABLE_CLASSES = {
@@ -106,11 +101,4 @@ _HARD_DECLINE_CLASSES = {
     FailureClass.FRAUD_BLOCK,
     FailureClass.HARD_DECLINE,
     FailureClass.CUSTOMER_CANCELLED,
-}
-
-_RAIL_SWITCH_CLASSES = {
-    FailureClass.THREEDS_DROPOFF,
-    FailureClass.ISSUER_DECLINE,
-    FailureClass.CARD_LIMIT_EXCEEDED,
-    FailureClass.INSUFFICIENT_FUNDS,
 }

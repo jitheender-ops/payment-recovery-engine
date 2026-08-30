@@ -14,7 +14,8 @@ from typing import Any
 
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.prompts import SYSTEM_PROMPT, format_user_prompt
-from src.config import get_settings, reveal
+from src.config import get_settings
+from src.llm import build_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -41,27 +42,10 @@ class PolicyAgent:
         self._max_tokens = settings.llm_max_tokens
         self._timeout = settings.llm_timeout_seconds
 
-        # Two SDK clients with entirely different shapes. The branch below keys
-        # off self._provider (a str), which mypy cannot use to narrow a union,
-        # so a union type here would need a cast at every call site.
-        self._client: Any
-        if self._provider == "anthropic":
-            import anthropic
-            self._client = anthropic.AsyncAnthropic(
-                api_key=reveal(settings.anthropic_api_key),
-                timeout=self._timeout,
-            )
-        elif self._provider == "openai":
-            import openai
-            self._client = openai.AsyncOpenAI(
-                api_key=reveal(settings.openai_api_key),
-                # Empty base_url means api.openai.com; set it to point the same
-                # client at any OpenAI-compatible host (OpenRouter, Ollama, ...).
-                base_url=settings.llm_base_url or None,
-                timeout=self._timeout,
-            )
-        else:
-            raise ValueError(f"Unsupported LLM provider: {self._provider}")
+        # One client for either provider, built by the shared src/llm.py path
+        # (Any: two SDK clients with entirely different shapes, and the branch
+        # keys off a str setting, which mypy cannot use to narrow a union).
+        self._client: Any = build_llm_client(timeout=self._timeout)
 
         # Counts decisions that came from _fallback_action rather than the LLM.
         # PolicyAgent.decide() swallows LLM errors and returns a heuristic action
@@ -74,6 +58,10 @@ class PolicyAgent:
         # can stop early. decide() swallows its own errors by design, so without
         # this a bad key or empty balance is invisible above this class.
         self.last_error_status: int | None = None
+        # Human-readable companion to last_error_status (eval/policies reads
+        # it via getattr with a default, but it is a real field, set on the
+        # same path as the status).
+        self.last_error_detail: str | None = None
 
         logger.info("PolicyAgent initialized: provider=%s, model=%s", self._provider, self._model)
 

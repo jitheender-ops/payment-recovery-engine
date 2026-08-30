@@ -136,3 +136,36 @@ def render() -> None:
             width="stretch",
             hide_index=True,
         )
+
+    st.divider()
+    theme.section("Chaser effectiveness", "Per risk type, per touch: does the rung earn its slot.")
+    # Straight SQL over the engine's own tables — the same facts
+    # cases.chase_effectiveness computes for the eval harness. Success-
+    # attempts per (risk_type, touch) and eventual recovery among them.
+    chase = query_db(
+        """
+        SELECT rc.risk_type            AS "Risk type",
+               ra.attempt_number       AS Touch,
+               COUNT(DISTINCT rc.id)   AS Contacted,
+               COUNT(DISTINCT CASE WHEN rc.state = 'recovered' THEN rc.id END)
+                                        AS Recovered,
+               ROUND(100.0 * COUNT(DISTINCT CASE WHEN rc.state = 'recovered'
+                     THEN rc.id END) / COUNT(DISTINCT rc.id), 1) AS "Recovered %"
+        FROM retry_attempts ra
+        JOIN recovery_cases rc ON rc.id = ra.recovery_case_id
+        WHERE ra.result = 'success'
+        GROUP BY rc.risk_type, ra.attempt_number
+        ORDER BY rc.risk_type, ra.attempt_number
+        """
+    )
+    if chase is None or chase.empty:
+        st.info("No chaser-driven contacts yet.")
+        return
+    st.dataframe(chase, width="stretch", hide_index=True)
+    st.markdown(
+        f"<p style='color:{theme.SLATE};font-size:0.82rem;margin:-0.4rem 0 1.4rem 0;'>"
+        f"Recovered % is eventual recovery among cases contacted at that touch — "
+        f"a case may recover on a later rung. The per-touch page-view rate lives in "
+        f"the eval harness (cases.chase_effectiveness), which joins case_events.</p>",
+        unsafe_allow_html=True,
+    )

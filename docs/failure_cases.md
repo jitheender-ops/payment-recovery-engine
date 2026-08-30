@@ -189,3 +189,26 @@ outbox/two-phase write, which is not implemented.
 4. Processing is idempotent end to end: `process_risk_event` opens the case via the get-or-create path, so a re-run after a partial first attempt can never open a second case (which would double the attempt budget) or double-chase a budget slot (the UNIQUE idempotency key breaks that tie).
 
 **What a reviewer sees:** A reconciled risk event in the logs; the cart, subscription, invoice or mandate gets its chase on the next tick instead of never — and at most one case and one chase per budget slot however many times the event replays.
+
+---
+
+## 14. Checkout Drop-off Recovery — Research-Grounded Parameters
+
+Not a failure case but a documented decision record: the cart chaser's bounds and
+where each number comes from (specs/checkout-dropoff-recovery-plan.md).
+
+| Parameter | Value | Research basis |
+|---|---|---|
+| Max touches | 2 ("a third is spam") | Product promise; Klaviyo cadence data shows 2–3 touches carry the returns |
+| First touch | +1h after the cart goes cold | Day-0 contact recovers most; <1h reads as surveillance |
+| Final touch | positioned near consent-window close (−2h) | Honest real deadlines speed payment (Loopwork); a flat +24h past the window could never fire |
+| Cart items in nudge | merchant meta `cart_items`, scrubbed to ≤80 chars | Personalization lifts opens ~+26% (Slicker) |
+| Merchant offer | `offer_id` relayed to Razorpay link, touch ≥2 only | Incentive on touch 1 trains discount-waiting (Klaviyo 2024) |
+| Page-view signal | `page_viewed` case_event per recovery-page serve | The CTR proxy; engine-owned surfaces, no third-party JS |
+
+**The offer relay is a relay, not a computation:** the merchant creates the offer in
+their own Razorpay account; the engine validates the id's shape at intake, refuses
+it off the cart rail, and passes it through `options.order.offers` at link creation.
+Razorpay enforces the offer's validity and amount rules — the engine never computes
+discounted money. A refused/expired offer fails that one attempt honestly; the next
+rung mints without it.

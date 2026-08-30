@@ -447,3 +447,73 @@ async def test_the_timeout_survives_all_the_way_to_the_transport(monkeypatch: An
     assert seen["url"].endswith("/payment_links")
     assert result["success"] is True
     assert result["payment_link_id"] == "plink_transport"
+
+
+# ── The link must be for what is STILL owed ──────────────────────────────
+
+
+async def test_case_link_is_for_the_outstanding_not_the_original(
+    monkeypatch: Any,
+) -> None:
+    """
+    A part-paid case must be chased for the BALANCE.
+
+    `amount_at_risk` is what was owed when the case opened and never shrinks;
+    the case stays open until the balance clears. Minting against it asked a
+    customer who had already paid ₹600 of ₹1,000 for the full ₹1,000 a second
+    time — normal on a B2B invoice, where part payments are routine.
+    """
+    executor = RetryExecutor()
+    seen: dict[str, Any] = {}
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        seen["data"] = data
+        return {"id": "plink_out_1", "short_url": "https://rzp.io/i/out"}
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+
+    case = _case()                 # amount_at_risk = 50000 paise
+    case.amount_recovered = 30000  # ₹300 of ₹500 already paid
+
+    result = await executor.execute_case_action(
+        case=case,
+        action_type="retry_now",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_1",
+        notify_customer=False,
+    )
+
+    assert result["success"] is True
+    assert seen["data"]["amount"] == 20000, (
+        "the link re-charged money the customer had already paid"
+    )
+
+
+async def test_case_link_refuses_when_nothing_is_outstanding(
+    monkeypatch: Any,
+) -> None:
+    """A fully-paid case mints nothing. The stopping rules should close it
+    first; this refuses honestly rather than asking Razorpay for ₹0."""
+    executor = RetryExecutor()
+    called = False
+
+    def fake_create(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {"id": "plink_never", "short_url": "https://rzp.io/i/never"}
+
+    monkeypatch.setattr(executor._client.payment_link, "create", fake_create)
+
+    case = _case()
+    case.amount_recovered = case.amount_at_risk
+
+    result = await executor.execute_case_action(
+        case=case,
+        action_type="retry_now",
+        target_rail=None,
+        idempotency_key="chase_invoice_overdue_inv_san_1_2",
+        notify_customer=False,
+    )
+
+    assert result["success"] is False
+    assert called is False, "Razorpay was asked for a zero-amount link"

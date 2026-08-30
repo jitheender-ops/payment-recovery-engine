@@ -81,7 +81,13 @@ erDiagram
         timestamp due_at
         string status "pending|kept|broken|cancelled"
         string resolved_ref
-        string channel
+        string channel "voice|payment_link|merchant|payment_plan"
+        boolean is_partial "NULL = not assessed"
+        string confidence "explicit|tentative|conditional"
+        string condition_note "sanitized at write; never in a prompt verbatim"
+        string promised_rail
+        timestamp reminded_at "one pre-due reminder per promise, ever"
+        int kept_late_days "0 = on time; the honest kept-rate split"
     }
     case_events {
         int id PK
@@ -127,8 +133,24 @@ erDiagram
 `next_action_at` is written by two things: the escalation backoff in
 `attach_attempt()` (24h × escalation level, so the gap widens per rung) and a
 promise to pay, which takes the *later* of the promise date and whatever the
-ladder had already scheduled. A promise is permission to wait, not permission to
-contact sooner.
+ladder had already scheduled. A promise is permission to wait, not permission
+to contact sooner.
+
+A promise breaks on the clock plus a grace window (`PROMISE_GRACE_HOURS`,
+default 24h) — a payment initiated on the due date can post a day late, and
+breaking a kept promise is the one lie this ledger must never tell. Inside
+grace, a capture keeps the promise with `kept_late_days` recording how late.
+
+Promises are captured from three surfaces — the Hinglish voice agent (dates
+resolved by a deterministic lexicon, never the LLM), the recovery page's
+"promise a date" form, and `POST /risks/{type}/{ref}/promise` for merchants
+who collected one on their own calls. All three enforce the horizon cap
+(`PROMISE_MAX_HORIZON_DAYS`, 14 — kept rate decays with length) and the
+per-case promise cap (`MAX_PROMISES_PER_CASE`, 3 — words that stopped
+predicting money must not park a case forever; payment-plan instalments are
+exempt as a validated set). The 48h pre-due reminder is sweep #9 in the
+scheduler and spends a real contact slot through the chase pipeline — a
+promise buys silence for the chase, never a free lane to remind from.
 
 A broken promise pulls `next_action_at` back to *now* rather than NULL —
 `due_cases()` skips NULL because NULL means "a webhook is this case's trigger",

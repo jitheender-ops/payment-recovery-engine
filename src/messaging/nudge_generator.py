@@ -11,7 +11,8 @@ import logging
 import re
 from typing import Any
 
-from src.config import get_settings, reveal
+from src.config import get_settings
+from src.llm import build_llm_client
 from src.messaging.templates import render_fallback
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ def build_llm_prompt(
     customer_name: str | None,
     merchant_name: str,
     risk_type: str | None = None,
+    cart_summary: str | None = None,
 ) -> str:
     """The nudge LLM's user prompt. Split out so the wording is testable."""
     method = _scrub(method) or "unknown"
@@ -87,6 +89,11 @@ def build_llm_prompt(
     situation = _RISK_SITUATIONS.get(risk_type or "")
     if situation is not None:
         opening = situation.format(amount=amount_display)
+        if cart_summary and risk_type == "checkout_abandonment":
+            # Already scrubbed to one printable line by the caller; say it as
+            # data, because the research (Slicker, +26% opens) says naming
+            # the items is what lifts the message.
+            opening += f" The order contains: {cart_summary}."
     else:
         opening = (
             f"Payment of ₹{amount_display} via {method} failed. "
@@ -111,26 +118,13 @@ class NudgeGenerator:
         self._client: Any = None
 
     def _get_client(self) -> Any:
-        """Lazy-initialize LLM client."""
+        """Lazy-initialize LLM client (shared builder, nudge's 3s timeout)."""
         if self._client is not None:
             return self._client
-
-        anthropic_key = reveal(self._settings.anthropic_api_key)
-        openai_key = reveal(self._settings.openai_api_key)
         try:
-            if self._settings.llm_provider == "anthropic" and anthropic_key:
-                import anthropic
-                self._client = anthropic.AsyncAnthropic(api_key=anthropic_key, timeout=3.0)
-            elif self._settings.llm_provider == "openai" and openai_key:
-                import openai
-                self._client = openai.AsyncOpenAI(
-                    api_key=openai_key,
-                    base_url=self._settings.llm_base_url or None,
-                    timeout=3.0,
-                )
+            self._client = build_llm_client(timeout=3.0)
         except Exception:
             logger.warning("Failed to initialize LLM client for nudge generation")
-
         return self._client
 
     async def generate(
@@ -142,6 +136,7 @@ class NudgeGenerator:
         customer_name: str | None = None,
         merchant_name: str = "the merchant",
         risk_type: str | None = None,
+        cart_summary: str | None = None,
     ) -> str:
         """
         Generate a customer nudge message.
@@ -158,18 +153,22 @@ class NudgeGenerator:
             merchant_name: Merchant display name.
             risk_type: Chaser risk type, when there is no payment failure
                 behind the nudge — it selects honest situation wording.
+            cart_summary: Optional bounded, scrubbed item list for
+                checkout_abandonment nudges.
 
         Returns:
             Nudge message string (max 160 chars).
         """
         amount_display = f"{amount / 100:,.2f}"
+        # Same reduction the other untrusted fields get: one printable line.
+        cart = _scrub(cart_summary, limit=80)
 
         client = self._get_client()
         if client is not None:
             try:
                 message = await self._generate_llm(
                     client, failure_class, amount_display, method, next_step,
-                    customer_name, merchant_name, risk_type,
+                    customer_name, merchant_name, risk_type, cart,
                 )
                 if message and len(message) <= 200:  # small buffer over 160
                     logger.info("Nudge generated via LLM (len=%d)", len(message))
@@ -178,7 +177,9 @@ class NudgeGenerator:
                 logger.warning("LLM nudge generation failed, using template fallback")
 
         # Fallback to template
-        message = render_fallback(failure_class, amount_display, next_step, customer_name)
+        message = render_fallback(
+            failure_class, amount_display, next_step, customer_name, cart
+        )
         logger.info("Nudge generated via template fallback (len=%d)", len(message))
         return message[:160]
 
@@ -192,6 +193,7 @@ class NudgeGenerator:
         customer_name: str | None,
         merchant_name: str,
         risk_type: str | None = None,
+        cart_summary: str | None = None,
     ) -> str:
         """Call LLM to generate a personalized nudge."""
         user_prompt = build_llm_prompt(
@@ -202,6 +204,7 @@ class NudgeGenerator:
             customer_name=customer_name,
             merchant_name=merchant_name,
             risk_type=risk_type,
+            cart_summary=cart_summary,
         )
 
         settings = self._settings

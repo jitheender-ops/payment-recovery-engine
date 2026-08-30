@@ -41,7 +41,8 @@ def _with_llm(gen: NudgeGenerator, monkeypatch: Any, reply: str | Exception) -> 
 
     async def fake(client: Any, failure_class: str, amount_display: str, method: str,
                    next_step: str, customer_name: str | None, merchant_name: str,
-                   risk_type: str | None = None) -> str:
+                   risk_type: str | None = None,
+                   cart_summary: str | None = None) -> str:
         prompts.append(
             f"{failure_class}|{amount_display}|{method}|{next_step}|{customer_name}|{merchant_name}"
         )

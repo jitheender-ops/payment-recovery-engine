@@ -11,7 +11,7 @@ Structure: flat key → string catalogs, one per language. `pick()` resolves
 the language from an explicit ?lang= override first (it must be possible
 to force a language for support walks-throughs), then the Accept-Language
 header, then English. English is the source of truth; every other
-catalog must carry the same keys — `_MISSING` renders the English string
+catalog must carry the same keys — a missing key renders the English string
 rather than a blank, so a half-finished translation degrades to English
 instead of to nothing.
 
@@ -80,6 +80,9 @@ CATALOGS: dict[str, dict[str, str]] = {
         "timeline_risk_subscription": "The renewal charge didn't go through",
         "timeline_risk_invoice": "The due date passed without payment",
         "timeline_risk_mandate": "The autopay debit didn't go through",
+        # cart line (payable state, carts only): what the order contains.
+        # Rendered only when the merchant's event actually named the items.
+        "cart_items": "In your order: {items}",
         # register labels
         "register_attempted": "Attempted",
         "register_opened": "Opened",
@@ -148,6 +151,7 @@ CATALOGS: dict[str, dict[str, str]] = {
         "timeline_risk_subscription": "रिन्युअल चार्ज नहीं हो पाया",
         "timeline_risk_invoice": "बिना भुगतान के डेट निकल गई",
         "timeline_risk_mandate": "ऑटोपे डेबिट नहीं हो पाया",
+        "cart_items": "आपके ऑर्डर में: {items}",
         "register_attempted": "कोशिश की गई",
         "register_opened": "खोला गया",
         "pay_securely": "{amount} सुरक्षित रूप से भुगतान करें",
@@ -168,8 +172,6 @@ CATALOGS: dict[str, dict[str, str]] = {
         "lang_name": "हिंदी",
     },
 }
-
-_MISSING = "__MISSING__"
 
 
 def pick(request_lang_param: str | None, accept_language: str | None) -> str:

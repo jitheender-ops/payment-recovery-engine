@@ -32,7 +32,6 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
-from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -184,7 +183,3 @@ async def verify_chain(session: AsyncSession) -> ChainVerification:
         intact=True, events_checked=checked, first_broken_id=None,
         detail=f"{checked} events verified, chain intact",
     )
-
-
-def select_all_events_ordered() -> Any:
-    return sa.select(CaseEvent).order_by(CaseEvent.id.asc())

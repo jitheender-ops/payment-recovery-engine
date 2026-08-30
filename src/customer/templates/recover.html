@@ -161,7 +161,36 @@
   {% endif %}
 
   <div class="sec"><h2>{{ t('sec_what_to_do') }}</h2></div>
+  {% if cart_items and not is_payment %}
+    {# Only when the merchant's event named the items — never invented. #}
+    <p class="quiet small" style="margin:0 0 var(--sp-3)">{{ t('cart_items', items=cart_items) }}</p>
+  {% endif %}
   <p>{{ detail.next }}</p>
+
+  {# The promise flash. Three outcomes, each named so the customer is never
+     left wondering what the form did. `promise=ok` re-renders payable here —
+     the silence is real (the chase stops) but the page keeps offering the
+     link, because a promise still needs a way to fulfill it. #}
+  {% set promise_flash = request.query_params.get("promise") %}
+  {% if promise_flash == "ok" %}
+    <div class="note settled">
+      <p><strong>Thank you — we've noted your date.</strong> We won't contact
+      you before then. Your payment link below stays open whenever you're
+      ready.</p>
+    </div>
+  {% elif promise_flash == "invalid" %}
+    <div class="note halt">
+      <p><strong>We couldn't read that date.</strong> Pick a date between
+      tomorrow and {{ promise_max_date }} — we can only hold follow-ups for a
+      short, honest window.</p>
+    </div>
+  {% elif promise_flash == "refused" %}
+    <div class="note halt">
+      <p><strong>We can't take another date on this payment.</strong> Earlier
+      commitments here weren't kept. You can still pay now from the button
+      below, any amount, any time before the link expires.</p>
+    </div>
+  {% endif %}
 
   {% if request.query_params.get("error") %}
     {# The pay POST bounced back here with ?error=1. Saying nothing hands the
@@ -188,6 +217,103 @@
   <p class="quiet small" style="margin:var(--sp-3) 0 0">
     {{ t('pay_note') }} {{ t('pay_other_methods') }}
   </p>
+
+  {# "Can't pay today?" — the promise affordance. A date promise buys real
+     silence (the engine's never-rule for answered customers), so offering it
+     beside the pay button is honest dunning, not a soft exit. Bounded by the
+     same horizon the voice agent enforces; the POST validates it again. #}
+  <details class="promise-box">
+    <summary>Can't pay today? Promise a date instead</summary>
+    <p class="small quiet">Pick the date you can pay by. We'll pause all
+    reminders until then — no calls, no messages.</p>
+    <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -- capability-token auth: the path secret IS the authority (see routes.py) -->
+    <form method="post" action="/recover/{{ token }}/promise" class="promise-form">
+      <input type="date" name="due_date" min="{{ promise_min_date }}"
+             max="{{ promise_max_date }}" required
+             aria-label="The date you'll pay by">
+      <button class="btn btn-quiet" type="submit">I'll pay by this date</button>
+    </form>
+  </details>
+
+  {% if risk_timeline_key == "timeline_risk_invoice" %}
+  {# The B2B dialogs — dispute and instalment plan — exist only for invoices:
+     a cart has no "wrong quantity" and no AP desk to plan with. Both are
+     POST endpoints validated server-side (same law as the merchant API);
+     the flashes below name every outcome, same honesty rule as the promise
+     flash. #}
+  {% set dispute_flash = request.query_params.get("dispute") %}
+  {% if dispute_flash == "ok" %}
+    <div class="note settled">
+      <p><strong>Noted — we've paused all reminders on this invoice.</strong>
+      Our team has been told and will review it. Reminders stay off until
+      they answer.</p>
+    </div>
+  {% elif dispute_flash == "invalid" %}
+    <div class="note halt">
+      <p><strong>Tell us what's wrong before we can pause.</strong> Open the
+      dispute box and describe the problem — one line is enough.</p>
+    </div>
+  {% endif %}
+
+  {% set plan_flash = request.query_params.get("plan") %}
+  {% if plan_flash == "ok" %}
+    <div class="note settled">
+      <p><strong>Your plan is in place.</strong> Reminders pause between
+      instalments. Pay each instalment by its date and the follow-ups stay
+      quiet. A missed instalment resumes them.</p>
+    </div>
+  {% elif plan_flash == "invalid" %}
+    <div class="note halt">
+      <p><strong>We couldn't read that plan.</strong> Every instalment needs
+      both a date and an amount, and the amounts must add up to the
+      outstanding total.</p>
+    </div>
+  {% elif plan_flash == "refused" %}
+    <div class="note halt">
+      <p><strong>We can't set that plan.</strong> Plans need 2–6 instalments,
+      adding up to the full amount, within a short honest window. A single
+      date is a promise — use the promise form above for that.</p>
+    </div>
+  {% endif %}
+
+  <details class="promise-box">
+    <summary>Something wrong with this invoice? Dispute it</summary>
+    <p class="small quiet">Telling us what's wrong pauses every reminder on
+    this invoice until our team reviews it. It does not pause the others, and
+    it is not a cancellation.</p>
+    <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -- capability-token auth: the path secret IS the authority (see routes.py) -->
+    <form method="post" action="/recover/{{ token }}/dispute" class="promise-form">
+      <input type="text" name="reason" maxlength="500" required
+             placeholder="e.g. wrong quantity, already paid by NEFT…"
+             aria-label="What's wrong with this invoice">
+      <button class="btn btn-quiet" type="submit">Send to the team</button>
+    </form>
+  </details>
+
+  <details class="promise-box">
+    <summary>Need to pay in parts? Request an instalment plan</summary>
+    <p class="small quiet">2–6 instalments, adding up to
+      <strong>{{ amount }}</strong>. Each instalment
+      is a dated commitment — reminders pause between them, and a missed one
+      resumes the follow-ups.</p>
+    <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -- capability-token auth: the path secret IS the authority (see routes.py) -->
+    <form method="post" action="/recover/{{ token }}/plan" class="promise-form" style="flex-direction:column;gap:.4rem">
+      <label class="small quiet" style="margin:0">Instalment 1
+        <input type="date" name="instalment_1_date" min="{{ promise_min_date }}" required
+               aria-label="Instalment 1 date">
+        <input type="number" name="instalment_1_amount" min="1" step="0.01" required
+               placeholder="Amount (₹)" aria-label="Instalment 1 amount">
+      </label>
+      <label class="small quiet" style="margin:0">Instalment 2
+        <input type="date" name="instalment_2_date" min="{{ promise_min_date }}" required
+               aria-label="Instalment 2 date">
+        <input type="number" name="instalment_2_amount" min="1" step="0.01" required
+               placeholder="Amount (₹)" aria-label="Instalment 2 amount">
+      </label>
+      <button class="btn btn-quiet" type="submit">Request this plan</button>
+    </form>
+  </details>
+  {% endif %}
   {% if expires_line %}
   {# No `| safe`: the date is rendered through normal autoescaping. The old
      form injected raw `</span>…<span>` around the value and marked the whole

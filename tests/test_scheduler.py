@@ -434,8 +434,12 @@ async def test_tick_reports_what_each_sweep_did(
             "links_cancelled": 0,
             "superseded_links_cancelled": 0,
             "promises_expired": 0,
+            "promises_reminded": 0,
             "cases_chased": 0,
+            "accounts_consolidated": 0,
             "due_cases_reported": 0,
+            "plans_reconciled": 0,
+            "alerts_delivered": 0,
         }
 
 

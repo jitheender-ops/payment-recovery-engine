@@ -7,13 +7,27 @@ Used when the LLM is unavailable or times out. Messages are kept under
 
 from __future__ import annotations
 
+import re
+
 from jinja2 import BaseLoader, Environment
 
-# autoescape ON: customer_name arrives from webhook-controlled payload fields,
-# so a future caller wiring a display name through here must not be able to
-# smuggle markup into what becomes an SMS/email body. Escaping entities in a
-# plain-text nudge costs a few &amp;; an injected message costs trust.
-_env = Environment(loader=BaseLoader(), autoescape=True)  # nosemgrep
+# Plain text, not HTML: these bodies go out as SMS and email text, where
+# autoescape's HTML entities reach the customer verbatim ("didn&#39;t").
+# The injection defense for plain text is stripping the characters that
+# could carry markup or hide content (angle brackets, quotes, backslashes,
+# non-printables/bidi/zero-width) from the webhook-controlled fields — the
+# variables in here an attacker influences.
+_UNSAFE_CHARS = re.compile(r"[<>\"'`\\]")
+
+_env = Environment(loader=BaseLoader(), autoescape=False)  # nosemgrep
+
+
+def _sanitize_plain_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = _UNSAFE_CHARS.sub("", value)
+    # isprintable() False covers control chars, bidi overrides, zero-widths.
+    return "".join(ch for ch in cleaned if ch.isprintable() or ch == " ")
 
 # Per-failure-class templates — all under 160 chars for SMS
 _TEMPLATES: dict[str, str] = {
@@ -51,10 +65,13 @@ _TEMPLATES: dict[str, str] = {
     ),
     # Non-payment risk types (src/chasers/policy.py). No payment was attempted
     # for three of these, so the wording never says "payment failed" — that
-    # would be a lie on the one line the customer reads first.
+    # would be a lie on the one line the customer reads first. Carts carry the
+    # items when we have them: personalization is the one lever the research
+    # agrees lifts opens (+26%, Slicker) and the meta already holds the data.
     "abandoned_checkout": (
-        "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} order is still "
-        "waiting. Complete it here when you're ready. {{ next_step }}"
+        "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} order"
+        "{{ ' — ' + items if items else '' }} is still waiting. "
+        "Complete it here when you're ready. {{ next_step }}"
     ),
     "subscription_charge_failed": (
         "Hi{{ ' ' + name if name else '' }}, we couldn't renew your subscription "
@@ -86,6 +103,7 @@ def render_fallback(
     amount_display: str,
     next_step: str = "Please try again or use a different payment method.",
     customer_name: str | None = None,
+    cart_summary: str | None = None,
 ) -> str:
     """
     Render a nudge message using the fallback Jinja2 template.
@@ -95,14 +113,21 @@ def render_fallback(
         amount_display: Formatted amount string (e.g., "500.00").
         next_step: What the customer should do next.
         customer_name: Optional customer name.
+        cart_summary: Optional bounded item list for cart nudges, already
+            scrubbed to one printable line by the caller.
 
     Returns:
         Rendered message string (under 160 chars for SMS).
     """
     template_str = get_template(failure_class)
     template = _env.from_string(template_str)
-    return template.render(
-        name=customer_name,
+    rendered = template.render(
+        name=_sanitize_plain_text(customer_name),
         amount=amount_display,
-        next_step=next_step,
+        next_step=_sanitize_plain_text(next_step) or "Please try again.",
+        items=_sanitize_plain_text(cart_summary),
     )
+    # The 160-char ceiling is a promise (test_every_path_respects_160_characters),
+    # and a long item list can break it. The message stays true without the
+    # items; it does not stay under 160 with them.
+    return rendered[:160]
