@@ -40,6 +40,32 @@ def _compile_jsonb_on_sqlite(type_: Any, compiler: Any, **kw: Any) -> str:
     return "JSON"
 
 
+@pytest.fixture(autouse=True)
+def hermetic_settings(monkeypatch: Any) -> Any:
+    """
+    Never let a test read the developer's .env, and never let one test's
+    settings leak into the next.
+
+    Settings declares `env_file=".env"`, so without this the suite inherits
+    whatever the person running it happens to have configured. That is not a
+    theoretical worry: two cart-chaser tests minted a recovery link, passed on
+    a machine whose .env set RECOVERY_LINK_SECRET, and failed in CI where
+    mint() saw an empty secret, returned None, and the page 404'd. The test
+    was green for the author and red for everyone else — the worst failure
+    mode a suite has.
+
+    get_settings is lru_cached, so monkeypatch.setenv on its own does nothing
+    once anything has read settings. Clearing on the way IN and the way OUT
+    means a fixture's setenv takes effect and does not survive the test.
+    """
+    from src.config import Settings, get_settings
+
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 class RealTimingRules(NamedTuple):
     """The unpatched clock rules, handed back by ``chaseable_clock``."""
 

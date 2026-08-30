@@ -712,6 +712,16 @@ red at 23:00 IST. The `chaseable_clock` fixture in
 autouse so the next test written at noon cannot inherit the bug silently;
 tests that are *about* a timing rule restore it from the fixture's handback.
 
+**And it does not read your `.env`.** `Settings` declares `env_file=".env"`,
+so the suite used to inherit whatever the person running it had configured —
+two cart-chaser tests minted a recovery link, passed on a machine whose `.env`
+set `RECOVERY_LINK_SECRET`, and failed in CI where `mint()` saw an empty
+secret, returned `None`, and the page 404'd. Green for the author and red for
+everyone else is the worst failure mode a suite has. The `hermetic_settings`
+fixture unsets `env_file` and clears the `lru_cache` on `get_settings` on the
+way in *and* out — without the clear, a fixture's `monkeypatch.setenv` does
+nothing at all once anything has already read settings.
+
 ## 🧾 Recent Hardening
 
 The engine's first cut could decide; it could not always be trusted about what
