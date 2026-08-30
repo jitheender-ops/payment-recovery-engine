@@ -225,3 +225,70 @@ def test_self_serve_ignores_the_outreach_rules() -> None:
     context = _make_context(hour_of_day=2, retry_count_24h=99, nudge_count_24h=99)
     result = gate.validate_self_serve(_self_serve_action(), context, "selfserve_k5", 1)
     assert result.passed is True
+
+
+# ── Mandate pre-debit notification (RBI e-mandate framework, 2026) ─────────
+
+
+def test_mandate_retry_without_any_notification_is_blocked() -> None:
+    passed, reason = rules.check_mandate_predebit_notification(
+        "mandate_failure", "retry_now", None, now,
+    )
+    assert passed is False
+    assert reason is not None
+    assert "RBI" in reason
+
+
+def test_mandate_retry_notified_too_recently_is_blocked() -> None:
+    passed, reason = rules.check_mandate_predebit_notification(
+        "mandate_failure", "retry_now", now - timedelta(hours=23), now,
+    )
+    assert passed is False
+    assert reason is not None and "23" in reason
+
+
+def test_mandate_retry_notified_24h_ago_or_more_is_allowed() -> None:
+    passed, _ = rules.check_mandate_predebit_notification(
+        "mandate_failure", "retry_now", now - timedelta(hours=24), now,
+    )
+    assert passed is True
+
+
+def test_non_mandate_risk_type_is_unaffected() -> None:
+    """The rule only ever applies to risk_type=mandate_failure."""
+    passed, _ = rules.check_mandate_predebit_notification(
+        "subscription_failure", "retry_now", None, now,
+    )
+    assert passed is True
+
+
+def test_mandate_nudge_action_is_unaffected() -> None:
+    """
+    nudge_customer IS how the notification gets sent — the rule must not
+    block the notification itself, only a retry_now that skipped it.
+    """
+    passed, _ = rules.check_mandate_predebit_notification(
+        "mandate_failure", "nudge_customer", None, now,
+    )
+    assert passed is True
+
+
+def test_gate_rejects_a_mandate_retry_with_no_notification_on_record() -> None:
+    action = RetryAction(action="retry_now", reason="Re-present the mandate charge")
+    context = _make_context(
+        risk_type="mandate_failure", failure_class="mandate_debit_failed",
+        last_notification_sent_at=None,
+    )
+    result = gate.validate(action, context, "mandate_key_1", 0)
+    assert result.passed is False
+    assert any("RBI" in r for r in result.rejection_reasons)
+
+
+def test_gate_passes_a_mandate_retry_notified_well_in_advance() -> None:
+    action = RetryAction(action="retry_now", reason="Re-present the mandate charge")
+    context = _make_context(
+        risk_type="mandate_failure", failure_class="mandate_debit_failed",
+        last_notification_sent_at=now - timedelta(hours=48),
+    )
+    result = gate.validate(action, context, "mandate_key_2", 0)
+    assert result.passed is True

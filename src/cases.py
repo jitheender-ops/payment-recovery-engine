@@ -118,6 +118,7 @@ CaseEventType = Literal[
     "deferred",
     "stopped",
     "reconciled",
+    "mandate_post_debit_confirmation",
 ]
 
 _TERMINAL: frozenset[str] = frozenset(
@@ -511,6 +512,21 @@ async def attribute_capture(
             "link_id" if link_id else "idempotency_key" if idempotency_key else "order_ref"
         ),
     )
+
+    # RBI e-mandate framework, 2026: a post-debit confirmation is required on
+    # every successful mandate collection, distinct from the generic
+    # "attributed" event above — this one exists specifically so the
+    # compliance clause it satisfies is visible in the audit trail, not
+    # implied by a general-purpose event.
+    if case.risk_type == "mandate_failure":
+        log_event(
+            session,
+            case,
+            "mandate_post_debit_confirmation",
+            amount=amount,
+            recovered_ref=recovered_ref,
+            clause="RBI Digital Payments E-mandate Framework, 2026 — post-debit confirmation",
+        )
 
     # Money arriving is what keeps a promise, whichever channel collected it —
     # the customer said they would pay and they did. Resolving here rather than

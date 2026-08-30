@@ -183,6 +183,50 @@ class GuardrailRules:
             return False, "Missing idempotency key — every retry must be idempotent"
         return True, None
 
+    def check_mandate_predebit_notification(
+        self,
+        risk_type: str,
+        action_type: str,
+        last_notification_sent_at: datetime | None,
+        current_time: datetime,
+    ) -> tuple[bool, str | None]:
+        """
+        RBI Digital Payments E-mandate Framework, 2026: an issuer must send a
+        pre-transaction notification at least 24 hours before a mandate is
+        charged. Applies across cards, UPI and prepaid instruments.
+
+        Only relevant here for risk_type=mandate_failure and action=retry_now
+        — that is the one action that re-presents the mandate for collection.
+        Every other action (nudge_customer, retry_at, switch_rail, abandon)
+        does not move money against the mandate and is unaffected; a
+        nudge_customer IS how the notification gets sent in the first place,
+        so this rule cannot block the notification itself, only a collection
+        attempt that skipped it.
+        """
+        if risk_type != "mandate_failure" or action_type != "retry_now":
+            return True, None
+
+        if last_notification_sent_at is None:
+            return False, (
+                "RBI e-mandate framework: no pre-debit notification on record "
+                "for this mandate — send nudge_customer at least 24h before "
+                "re-presenting the charge"
+            )
+
+        if last_notification_sent_at.tzinfo is None:
+            last_notification_sent_at = last_notification_sent_at.replace(tzinfo=UTC)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=UTC)
+
+        elapsed_hours = (current_time - last_notification_sent_at).total_seconds() / 3600
+        if elapsed_hours < 24:
+            return False, (
+                f"RBI e-mandate framework: pre-debit notification sent only "
+                f"{elapsed_hours:.1f}h ago — 24h notice is required before "
+                f"re-presenting the charge"
+            )
+        return True, None
+
 
 def is_in_blackout(hour: int, settings: Settings | None = None) -> bool:
     """

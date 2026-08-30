@@ -1,0 +1,89 @@
+# Recovery engine policy — read this, not the code.
+#
+# This file is documentation, not configuration: every value here is a mirror
+# of a real threshold enforced in code (src/guardrail/rules.py, src/config.py,
+# src/chasers/policy.py). It exists so a reviewer can see every rule the
+# engine runs under without reading Python. If this file and the code ever
+# disagree, the code wins — file an issue, don't trust this page.
+#
+# The rules below run in src/guardrail/gate.py, AFTER the policy agent (LLM or
+# XGBoost) proposes an action and BEFORE anything touches money or a
+# customer's phone. No model is in this loop. Rejected actions never execute;
+# they are recorded (RetryAttempt.result = "rejected") with the specific
+# clause that blocked them, and both counts surface on the merchant console.
+
+version: 1
+last_verified_against_code: "2026-08-30"
+
+# ── Global guardrail thresholds (src/config.py, env-configurable) ──────────
+global:
+  max_retries_per_payment: 3
+  max_retries_per_customer_24h: 5
+  max_nudges_per_customer_24h: 2
+  amount_ceiling_inr: 250000          # retries above this need explicit consent, not automation
+  consent_window_hours: 72            # default; chaser risk types override per type below
+  retry_blackout_ist: "23:00-07:00"   # no retries fire in this window; bank success rates fall off a cliff
+
+# ── Hard rules (always on, no threshold to tune) ────────────────────────────
+hard_rules:
+  - id: hard_decline_blocklist
+    rule: "Fraud blocks and true hard declines are never retried. Full stop."
+  - id: idempotency_key_required
+    rule: "Every retry attempt must carry an idempotency key. Missing = refused, never defaulted."
+  - id: retry_at_within_consent_window
+    rule: "A deferred retry scheduled past the consent deadline is rejected outright, not silently retimed."
+  - id: mandate_predebit_notification   # RBI Digital Payments E-mandate Framework, 2026
+    rule: >
+      A mandate (autopay) retry that re-presents the charge is blocked unless
+      a notification to the customer was confirmed sent at least 24 hours
+      before the retry. Applies only to risk_type=mandate_failure with
+      action=retry_now — the one action that actually re-attempts a debit.
+      Post-debit: a successful mandate capture logs a confirmation event.
+      Opt-out is honoured immediately across every risk type, not just this one.
+    source: "RBI Digital Payments E-mandate Framework, 2026 — 24h pre-debit notice, post-debit confirmation, opt-out in the pre-debit notice."
+    enforced_in: "src/guardrail/rules.py:check_mandate_predebit_notification"
+
+# ── Per-risk-type chase policy (src/chasers/policy.py — code change required to move these) ──
+chasers:
+  checkout_abandonment:
+    max_attempts: 2
+    consent_window_hours: 48
+    first_action_hours: 1.0
+    re_chase_hours: 24.0
+    note: "No payment was ever attempted. One reminder, one follow-up. A third is spam."
+  subscription_failure:
+    max_attempts: 4
+    consent_window_hours: 168   # 7 days, a typical renewal grace period
+    first_action_hours: 0.0
+    re_chase_hours: 24.0
+    note: "Structurally a payment failure. First touch goes out immediately."
+  invoice_overdue:
+    max_attempts: 4
+    consent_window_hours: 720   # 30 days
+    first_action_hours: 0.0
+    re_chase_hours: 72.0
+    note: "B2B receivable. Slow ladder, long window, four contacts is where dunning research puts diminishing returns."
+  mandate_failure:
+    max_attempts: 3
+    consent_window_hours: 168   # 7 days
+    first_action_hours: 24.0
+    re_chase_hours: 48.0
+    note: "The mandate is standing consent to collect, so a retry may re-present the charge — subject to the 24h pre-debit notification rule above."
+  payment_failure:
+    note: >
+      Webhook-driven, not a chaser — every payment.failed event re-triggers
+      the pipeline directly. Its bounds are the global thresholds above, not
+      a per-type entry here.
+
+# ── What the engine will never do, regardless of any threshold above ───────
+never:
+  - "Let the LLM call the Razorpay API directly. It proposes a structured action; only the deterministic executor, after the guardrail passes it, moves money."
+  - "Retry a fraud-blocked or hard-declined payment, at any attempt count."
+  - "Contact a customer who has opted out, on any risk type, until they opt back in."
+  - "Report a recovered-money number that isn't a real payment the engine's own link (or the customer's own payment) actually settled."
+
+# ── Where the numbers this file promises are actually verified ─────────────
+verification:
+  tests: "pytest — 400+ tests, guardrail rules and their rejections covered explicitly (tests/test_guardrail_properties.py, tests/test_audit_fixes.py)"
+  ci: ".github/workflows — ruff + mypy --strict + pytest on 3.11 and 3.13, migration-chain check, eval reproduction"
+  scoreboard: "merchant console (/console/live) reports actions_blocked and compliance_violations counts, sourced from RetryAttempt.result='rejected' rows — not a slide, a live query"

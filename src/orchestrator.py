@@ -580,6 +580,21 @@ class PaymentRecoveryOrchestrator:
         )
         previous_outcomes = [r for (r,) in prev_attempts.all() if r]
 
+        # Only consulted by the mandate pre-debit notification rule
+        # (guardrail rule 11) — cheap to compute for every case, but only
+        # ever non-None for risk_type=mandate_failure.
+        last_notification = await session.execute(
+            select(RetryAttempt.executed_at)
+            .where(
+                RetryAttempt.recovery_case_id == case.id,
+                RetryAttempt.action_type == "nudge_customer",
+                RetryAttempt.result == "success",
+            )
+            .order_by(RetryAttempt.executed_at.desc())
+            .limit(1)
+        )
+        last_notification_sent_at = last_notification.scalar_one_or_none()
+
         local_now = now.astimezone(IST)
         opened_at = _aware(case.opened_at) or now
 
@@ -610,6 +625,7 @@ class PaymentRecoveryOrchestrator:
             risk_meta=meta,
             is_retryable=True,
             original_failure_id=None,
+            last_notification_sent_at=last_notification_sent_at,
         )
 
     async def chase_case(

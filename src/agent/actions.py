@@ -122,3 +122,10 @@ class FailureContext(BaseModel):
     # Metadata
     is_retryable: bool = True
     original_failure_id: str | None = None
+
+    # When the customer was last successfully notified about this case (any
+    # successful nudge_customer attempt). Only consulted for
+    # risk_type=mandate_failure — the RBI e-mandate framework requires a
+    # pre-debit notice at least 24h before a mandate is re-presented for
+    # collection. None means no notification has gone out yet.
+    last_notification_sent_at: datetime | None = None
