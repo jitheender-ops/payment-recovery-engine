@@ -365,7 +365,7 @@ async def test_background_failure_rearms_the_risk_event(
 
 async def test_reconcile_risk_events_recovers_a_dropped_event(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     """The sweep is the only retry mechanism there is for an event whose
     background task died: it must re-run it and mark it processed."""
     orch = _orchestrator(monkeypatch)
@@ -470,7 +470,7 @@ async def test_process_risk_event_opens_case_with_policy_budget(
 
 async def test_process_risk_event_chases_immediate_types_right_away(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -520,22 +520,6 @@ async def test_process_risk_event_is_idempotent(
 # ── chase_case: the bounded pipeline ──────────────────────────────────────
 
 
-@pytest.fixture
-def inside_b2b_window(monkeypatch: Any) -> None:
-    """
-    Hold the Mon–Fri 09:30–18:30 IST B2B contact window open.
-
-    chase_case defers an invoice_overdue chase outside that window (the same
-    defer-don't-burn rule the IST blackout uses), so a test about anything
-    else — the write-ahead ordering, the ladder, idempotency — would pass or
-    fail depending on the day of the week it happened to run on. Tests that
-    are ABOUT a timing rule pin their own clock and do not take this fixture.
-    """
-    import src.receivables.ladder as ladder
-
-    monkeypatch.setattr(ladder, "is_b2b_contact_time", lambda _dt: True)
-
-
 async def _open_chase_case(
     sm: async_sessionmaker[AsyncSession],
     risk_type: str,
@@ -568,7 +552,7 @@ async def _open_chase_case(
 
 async def test_chase_writes_attempt_ahead_of_execution(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     """The money-safety invariant, on the chase path too: the attempt row must
     be committed BEFORE Razorpay is called."""
     orch = _orchestrator(monkeypatch)
@@ -606,7 +590,7 @@ async def test_chase_writes_attempt_ahead_of_execution(
 
 async def test_chase_advances_the_ladder_after_a_link_action(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -684,11 +668,20 @@ async def test_chase_refuses_to_act_on_top_of_a_pending_attempt(
 
 
 async def test_chase_defers_during_ist_blackout_without_burning_a_slot(
-    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any,
+    chaseable_clock: Any,
+) -> None:
     """The chaser picks its own moment, so it must not walk into the IST
     quiet hours and let the guardrail burn a slot on a rejection it could
     see coming: defer to the window's edge with budget intact."""
+    # ABOUT the blackout, so it puts back the real rule that chaseable_clock
+    # holds open for everyone else, and pins its own clock.
+    import src.orchestrator as orchestrator
+
+    monkeypatch.setattr(
+        orchestrator, "is_in_blackout", chaseable_clock.is_in_blackout
+    )
+
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -773,7 +766,7 @@ async def test_chase_respects_opt_out(
 
 async def test_chase_is_idempotent_per_budget_slot(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     """Two workers chasing the same case build the same key; the second must
     not execute again."""
     orch = _orchestrator(monkeypatch)
@@ -988,7 +981,7 @@ async def test_an_explicit_agent_rail_is_not_overridden_by_the_policy(
 
 async def test_chase_due_cases_chases_the_four_types(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     orch = _orchestrator(monkeypatch)
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
@@ -1054,7 +1047,7 @@ async def test_chase_due_cases_skips_cases_not_yet_due(
 
 async def test_chase_due_cases_serves_oldest_first_across_types(
     db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
-, inside_b2b_window: None) -> None:
+) -> None:
     """One oldest-first query across all four types: under a backlog the
     longest-waiting case is chased first, whatever its type — the per-type
     loop used to serve the first type in the dict until it was empty."""

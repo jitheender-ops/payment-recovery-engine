@@ -87,23 +87,6 @@ def _orchestrator(monkeypatch: Any, calls: list[str]) -> PaymentRecoveryOrchestr
     return orch
 
 
-@pytest.fixture
-def inside_b2b_window(monkeypatch: Any) -> None:
-    """
-    Hold the Mon–Fri 09:30–18:30 IST B2B window open, leaving the clock alone.
-
-    The tempting alternative — pin `now` to next_b2b_window(...) — does not
-    work and is worth recording: stop_reason() reads datetime.now(UTC)
-    directly and ignores any injected `now`, so a `now` in the future makes
-    every case read as "next action not due yet" and nothing is chased. In
-    production the two clocks are the same instant, so this is a test-only
-    seam; freezing the RULE keeps these tests about the wiring they name.
-    """
-    import src.receivables.ladder as ladder
-
-    monkeypatch.setattr(ladder, "is_b2b_contact_time", lambda _dt: True)
-
-
 async def _due_invoice(
     session: AsyncSession,
     ref: str,
@@ -131,7 +114,6 @@ async def _due_invoice(
 async def test_tick_consolidates_before_chasing_per_case(
     db_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: Any,
-    inside_b2b_window: None,
 ) -> None:
     """
     One buyer, two overdue invoices, one tick → ONE contact.
@@ -176,7 +158,8 @@ async def test_tick_consolidates_before_chasing_per_case(
 
 
 async def test_invoice_chase_defers_outside_the_b2b_window(
-    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any,
+    chaseable_clock: Any,
 ) -> None:
     """
     chase_case itself refuses to contact an invoice outside Mon–Fri
@@ -188,6 +171,14 @@ async def test_invoice_chase_defers_outside_the_b2b_window(
     sweep running. The window has to be enforced at the funnel every contact
     passes through, not only in the sweep that schedules them.
     """
+    # ABOUT the B2B window, so it puts the real rule back that chaseable_clock
+    # holds open for everyone else, and pins its own Saturday clock.
+    import src.orchestrator as orchestrator
+
+    monkeypatch.setattr(
+        orchestrator, "is_b2b_contact_time", chaseable_clock.is_b2b_contact_time
+    )
+
     calls: list[str] = []
     orch = _orchestrator(monkeypatch, calls)
     saturday = datetime(2026, 8, 29, 4, 30, tzinfo=UTC)  # Sat 10:00 IST
@@ -213,7 +204,6 @@ async def test_invoice_chase_defers_outside_the_b2b_window(
 async def test_open_dispute_freezes_the_per_case_chase(
     db_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: Any,
-    inside_b2b_window: None,
 ) -> None:
     """
     The recovery page promises "the freeze is total". It has to hold on the
@@ -250,7 +240,6 @@ async def test_open_dispute_freezes_the_per_case_chase(
 async def test_resolved_dispute_releases_the_case_again(
     db_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: Any,
-    inside_b2b_window: None,
 ) -> None:
     """The other half: once a human resolves it, the chase resumes."""
     from src.receivables.disputes import open_dispute, resolve_dispute

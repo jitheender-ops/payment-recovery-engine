@@ -50,6 +50,13 @@ from src.models import (
     WebhookEvent,
 )
 
+# Module level, alongside the blackout rule above: chase_case consults both
+# clocks and they belong at the same seam. ladder.py imports nothing from the
+# app, so there is no cycle to work around — the function-local import this
+# replaces also forced tests to patch the ladder module itself, which broke
+# next_b2b_window() for the tests that exercise the rule directly.
+from src.receivables.ladder import is_b2b_contact_time, next_b2b_window
+
 if TYPE_CHECKING:
     from src.agent.xgboost_baseline import XGBoostBaseline
 
@@ -848,8 +855,6 @@ class PaymentRecoveryOrchestrator:
         # chaseable on a Sunday morning. Same defer-don't-burn shape as the
         # blackout below: move to the window's edge, spend no budget slot.
         if case.risk_type == "invoice_overdue":
-            from src.receivables.ladder import is_b2b_contact_time, next_b2b_window
-
             if not is_b2b_contact_time(now):
                 case.next_action_at = next_b2b_window(now)
                 log_event(

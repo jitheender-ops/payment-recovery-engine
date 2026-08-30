@@ -43,6 +43,15 @@ erDiagram
     recovery_cases ||--o{ promises_to_pay : collects
     recovery_cases ||--o{ case_events : audits
     retry_ledger ||--o{ retry_attempts : rate_limits
+    risk_events ||--o| recovery_cases : opens
+    ar_accounts ||--o{ ar_contacts : addresses
+    ar_accounts ||--o{ ar_contact_log : escalates
+    ar_accounts ||--o{ recovery_cases : groups
+    recovery_cases ||--o{ case_disputes : freezes
+    recovery_cases ||--o{ payment_plans : splits
+    payment_plans ||--o{ plan_instalments : schedules
+    plan_instalments ||--|| promises_to_pay : is_a
+    recovery_cases ||--o{ voice_call_queue : dials
 
     recovery_cases {
         uuid id PK
@@ -120,7 +129,75 @@ erDiagram
         string consent_status "granted|opted_out"
         timestamp blocked_until
     }
+    risk_events {
+        uuid id PK
+        string event_id UK
+        string risk_type
+        string reference_id
+        string offer_id "merchant incentive, 2nd touch on"
+        boolean processed
+    }
+    ar_accounts {
+        uuid id PK
+        string account_ref UK
+        string display_name
+    }
+    ar_contacts {
+        uuid id PK
+        uuid account_id FK
+        string role "ap_clerk|finance_manager|escalation"
+        string email
+        boolean active
+    }
+    ar_contact_log {
+        uuid id PK
+        uuid account_id FK
+        int stage_level "which rung fired"
+        jsonb case_refs "every invoice in the one statement"
+        timestamp planned_for
+        timestamp sent_at
+    }
+    case_disputes {
+        uuid id PK
+        uuid case_id FK
+        string reason "the customer's own words"
+        string status "open|resolved"
+        timestamp resolved_at
+    }
+    payment_plans {
+        uuid id PK
+        uuid case_id FK
+        int principal_paise "sized to the OUTSTANDING, not the opening figure"
+        int settlement_paise "approved reduced payoff, if any"
+        string status "active|completed|defaulted"
+    }
+    plan_instalments {
+        uuid id PK
+        uuid plan_id FK
+        int seq
+        int amount_paise
+        uuid promise_id FK "an instalment IS a promise"
+    }
+    voice_call_queue {
+        uuid id PK
+        uuid recovery_case_id FK
+        string customer_contact
+        string state "queued|claimed|done"
+    }
+    merchant_alerts {
+        uuid id PK
+        string event_type
+        boolean delivered
+        int delivery_attempts
+    }
 ```
+
+**Two joins carry the design.** `plan_instalments.promise_id` is why a payment
+plan needed no new state machine: an instalment IS a `promises_to_pay` row, so
+the pause, the audit event and the break-on-miss all come free from the promise
+sweep. And `ar_contact_log.case_refs` is a JSON array rather than a foreign key
+because the row records **one contact covering many invoices** — the
+consolidation guarantee is in the shape of the table.
 
 ### The three stopping rules, and where each lives
 

@@ -3,7 +3,7 @@
 [![CI](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-308%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-573%20passing-brightgreen)
 
 > AI-powered system that decides **whether**, **when**, and **on which rail** to retry a failed payment — with deterministic guardrails ensuring no LLM ever directly authorizes money movement.
 
@@ -11,10 +11,21 @@ Indian checkout success rates sit in the high 80s. Every failed payment is real,
 
 ```
 Razorpay webhook ──▶ classify ──▶ decide (LLM / XGBoost) ──▶ guardrail ──▶ execute
-                      │ no LLM      │ constrained JSON        │ 8 rules      │ Payment Link
+                      │ no LLM      │ constrained JSON        │ 12 rules     │ Payment Link
                       ▼             ▼                         ▼              ▼
                  hard declines   5 fixed actions          ALL violations   idempotent,
                  never reach it                           reported         audited, bounded
+```
+
+Sending the link is the easy half. The engine also **listens to the reply** —
+a Hinglish voice call, a promise to pay, an instalment plan, a disputed
+invoice — and a B2B buyer is escalated by person rather than by volume:
+
+```
+customer replies ──▶ promise ──▶ the case goes quiet until that date
+                 ├─▶ plan    ──▶ instalments, each its own promise
+                 ├─▶ dispute ──▶ case frozen, escalated to a human
+                 └─▶ voice   ──▶ grounded answer, or an honest "I don't know"
 ```
 
 ## 📊 Headline Result
@@ -130,12 +141,25 @@ Layer 1: Ingestion          → Signature verify → Idempotency → Event store
                               (Razorpay webhooks AND merchant-pushed /risks)
 Layer 2: Deterministic      → Error code → Failure taxonomy (NO LLM)
 Layer 3: Policy Agent       → LLM/XGBoost → Constrained JSON action
-Layer 4: Guardrail Gate     → Schema + Business rules → BEFORE execution
+Layer 4: Guardrail Gate     → Schema + 11 business rules → BEFORE execution
 Layer 5: Recovery Messaging → Customer nudge (scoped LLM generation)
-Layer 6: Scheduler          → Fires deferred retries, reconciles dropped events
-                              and stale write-ahead attempts, expires promises,
-                              chases due non-payment cases
+Layer 6: Scheduler          → 14 sweeps on one tick: fire deferred retries,
+                              reconcile dropped events / risk events / stale
+                              write-aheads, cancel dead and superseded links,
+                              expire and remind promises, reconcile plans,
+                              consolidate B2B accounts, chase due cases,
+                              deliver merchant alerts
+Layer 7: Receivables        → B2B dunning ladder, aging, disputes, payment
+                              plans, statements, merchant writeback
+Layer 8: Voice              → Hinglish call handling, 4 gates, promise capture
 ```
+
+**Layers 7 and 8 are where the reply is handled.** Everything above them is
+outbound: decide, gate, send. The receivables layer escalates a company buyer
+through five rungs by *role* (accounts payable → finance manager → escalation
+contact) and consolidates every overdue invoice for one buyer into a single
+contact per rung. The voice layer answers what the customer asks about their
+own case, grounded in that case's facts, and abstains rather than inventing.
 
 ```mermaid
 flowchart TD
@@ -157,6 +181,18 @@ flowchart TD
     L -->|chase due| C2
     M -->|still valid| I
     M -->|consent gone / blackout| N["Cancel + audit"]
+
+    I --> R{"Customer replies"}
+    J --> R
+    R -->|"promise to pay"| S["Case goes quiet<br>until the date"]
+    R -->|"can't pay in one go"| T["Payment plan<br>= group of promises"]
+    R -->|"invoice is wrong"| U["Dispute freezes<br>the case → human"]
+    R -->|"picks up the phone"| V["Layer 8: Voice<br>4 gates, grounded or abstain"]
+    V --> S
+    S -->|"date missed"| W["Promise broken<br>chase resumes"]
+    W --> C2
+    C2 -->|"B2B, per account"| X["Layer 7: Ladder<br>courtesy → final, by role"]
+    X --> F
 ```
 
 **The four chasers extend the same pipeline to money that never reached a
@@ -170,6 +206,16 @@ bounds live in `src/chasers/policy.py` — attempt budgets, consent windows
 (48h for a cold cart, 30 days for a receivable), first-touch delays and the
 recommended rail. `payment_failure` is deliberately NOT a chaser type: it
 stays webhook-driven, and the chase sweep never touches it.
+
+**Overdue invoices get a second layer on top.** A B2B buyer is not one case —
+it is an *account* with several overdue invoices and several people who could
+pay them. `chase_due_accounts` runs before the per-case sweep, picks one
+carrier case per account, defers every other joiner, and leaves the carrier due
+so the per-case sweep delivers the rung's single contact. That order is a
+correctness property, not a preference: run it the other way and all three
+guarantees break at once — the buyer is contacted once per invoice, the Mon–Fri
+09:30–18:30 IST window is skipped (only this sweep enforces it), and
+consolidation then finds nothing due, so the ladder never fires.
 
 **`retry_at` is the branch worth reading twice.** The executor maps `retry_at`
 onto the same `_create_payment_link` call as `retry_now`, so before Layer 6
@@ -187,7 +233,7 @@ This is the first question a fintech panel will ask. Here's the answer:
 1. **Hard-decline blocklist** — Fraud blocks, stolen cards, and permanent declines are caught *before* the LLM is ever called. No agent involvement.
 2. **Fixed action space** — The LLM outputs a JSON action from exactly 5 options: `retry_now`, `retry_at`, `switch_rail`, `nudge_customer`, `abandon`. No freeform.
 3. **Schema validation** — Pydantic validates every agent output. Malformed JSON → auto-reject.
-4. **8 business rules** — Max retries per payment (3), per customer per rolling 24h (5), amount ceiling (₹50K), consent window (72h), nudge rate limit (2/day), time-of-day blackout (11PM-7AM IST, computed on a true Asia/Kolkata clock), idempotency key requirement.
+4. **11 business rules + schema** — Max retries per payment (3), per customer per rolling 24h (5), amount ceiling (₹50K), consent window (72h), `retry_at` inside that window, nudge rate limit (2/day), time-of-day blackout (11PM-7AM IST, computed on a true Asia/Kolkata clock), idempotency key requirement, an expected-value stopping rule, the hard-decline blocklist, and the RBI e-mandate pre-debit notice.
 5. **Idempotency keys** — The key is deterministic (`retry_{payment_id}_{attempt_no}`) and
    `retry_attempts.idempotency_key` is UNIQUE. The orchestrator checks for an existing
    attempt *before* calling the Razorpay API, so a replayed webhook cannot produce a
@@ -200,6 +246,10 @@ This is the first question a fintech panel will ask. Here's the answer:
 10. **Rate limits that actually roll** — The per-customer tallies decay on a true 24-hour window (reads and writes apply the same rule), so "5 retries per 24h" cannot silently become a lifetime ban. And a guardrail veto counts against the *case*, never against the customer's contact quota — a rejected action contacted nobody.
 11. **Deferred retries are clamped out of the blackout before they're parked** — A deferral approved at 22:30 that lands at 23:05 would pass decision-time validation and die at fire-time re-validation, having already spent an attempt slot. It is shifted forward to the window's edge instead — forward-only, because waiting longer is always compliant.
 12. **Write-ahead attempts can't get lost in flight** — Every execution is committed as `pending` *before* Razorpay is called. If the process dies mid-call, a scheduler sweep resolves the stale row to failed-outcome-unknown after a threshold: the slot stays spent (fail-closed), but nothing sits "in flight" forever, and a later capture still attributes through the idempotency-key breadcrumb.
+13. **An open dispute freezes the case** — A customer who says "this invoice is wrong" has raised a question no chaser can answer. The case stops dead and surfaces on the merchant's worklist; nothing automated touches it until a human resolves the dispute. Arguing about an invoice is how a customer is lost, not recovered.
+14. **A mandate debit without a pre-debit notice is downgraded, not sent** — The RBI Digital Payments E-mandate Framework requires ≥24h notice before an auto-debit. If no notice has gone out, the collection is turned into the notice instead of being attempted.
+15. **The voice agent abstains rather than invents** — Four gates: opt-out honoured first, a retrieval floor below which it says it does not know, sanitation of instructions hiding in retrieved text, and a grounding check the answer must pass against its cited passage. A confident invented number on a call about money is worse than no answer.
+16. **Bounded contact for B2B buyers** — One contact per account per rung. A buyer with four overdue invoices gets one consolidated statement, not four messages, and the ladder escalates by *role* rather than by volume.
 
 ## 🚀 Quick Start
 
@@ -385,6 +435,43 @@ All timestamps render in IST (the timezone the blackout itself runs on), the
 sidebar shows a live database-status chip, and **Refresh data** busts the 30s
 query cache. The gate is fail-closed: no `DASHBOARD_PASSWORD`, no dashboard.
 
+### 💼 The merchant console
+
+Separate from the ops dashboard and built for a different reader: the merchant
+whose revenue is leaking, not the operator debugging the machinery. Two pages,
+two trust levels, both served by the API itself.
+
+| Route | Who | What |
+|---|---|---|
+| `GET /console` | public | Product facts only — the five leaks with their enforced bounds, what happens when the customer replies, what the engine refuses to do, and how to feed it. Touches no database, shows no live number, safe on a public deployment |
+| `GET /console/live` | `DASHBOARD_PASSWORD` | The live ledger, aggregate and PII-free |
+
+The live page is ordered by the questions a merchant actually asks, in order:
+
+1. **Is the engine running?** — a heartbeat strip above everything, because a
+   stale scheduler makes every figure below it a frozen snapshot. It says
+   *Engine stopped* out loud rather than leaving you to infer it from numbers
+   that quietly stopped changing.
+2. **How much is still out there?** — *Still owed* is the **balance**
+   (at-risk minus what has come in), not the opening figure, so a book with
+   heavy part-payment does not read as if nothing had been collected.
+   *Brought back* separates what our links earned from what arrived anyway.
+3. **What needs me?** — the worklist, and the spine of the page. Automation
+   here is bounded by design, so the things it **refused** — a frozen dispute,
+   a case out of attempts, a voice call stuck in the queue — are the page's
+   most important content, not a footnote. An empty worklist is a real answer
+   and gets said out loud.
+4. **How is the chase going?** — the B2B ladder drawn as a ladder, promises
+   kept vs. broken (with the grace window split out), active plans, disputes
+   in the customer's own words, per-chaser performance, aging.
+5. **What has it been doing?** — the activity feed and recent recoveries.
+
+Two things it will not do: show a customer email, phone or id — the contract
+is aggregate and PII-free, asserted by a test that seeds all three — and
+render a confident zero when it cannot read the database. An empty ledger says
+*the ledger is empty*, because zeros are indistinguishable from a broken
+deployment.
+
 ## 🗄️ Schema and Migrations
 
 `init_db()` calls `create_all(checkfirst=True)`, which creates missing *tables*
@@ -406,7 +493,14 @@ predates it. A migration that crashes half the time is a migration nobody runs.
 | `0001_recovery_cases` | `recovery_cases`, the attribution join keys, consent columns |
 | `0002_revenue_recovery` | `promises_to_pay`, `case_events`, case scheduling, and **drops NOT NULL on `retry_attempts.payment_failure_id`/`payment_id`** — the constraint that confined the engine to the payment rail |
 | `0003_scheduler_indexes` | Composite indexes on `(result, scheduled_at)` and `(result, created_at)` — the Layer 6 sweeps poll these every tick and were seq-scanning the table |
+| `0004_hardening_round2` | Anchored rate-limit windows (`*_window_started_at`) — the reset used to key off the last contact, so "5 per 24h" was really "5 per 24h from the last contact" |
+| `0005_risk_events` | `risk_events` — the merchant-pushed side of ingestion, deduped and reconcilable like webhooks |
+| `0006_canonical_customer_key` | One canonical customer key, so the same person reached by email and by phone shares a contact budget |
+| `0007_audit_hash_chain` | Hash-chains `case_events`, verifiable independently of the app |
 | `0008_promise_capture` | Promise quality columns (`is_partial`, `confidence`, `condition_note`, `promised_rail`), the reminder's one-shot `reminded_at`, and the kept-rate delta `kept_late_days` — the capture and workflow halves the promise ledger was missing |
+| `0009_risk_event_offer` | `offer_id` on risk events — the merchant incentive relay, cart chases only, never on the first touch |
+| `0010_receivables` | The B2B layer: `ar_accounts`, `ar_contacts`, `ar_contact_log`, `case_disputes`, `payment_plans`, `plan_instalments`, `merchant_alerts` |
+| `0011_voice_call_queue` | `voice_call_queue` — the telephony leg's work items |
 
 See [docs/architecture.md](docs/architecture.md) for the full ER diagram and
 [docs/ARCHITECTURE_MAP.md](docs/ARCHITECTURE_MAP.md) for the file-by-file map
@@ -418,15 +512,39 @@ of where everything lives.
 docker compose -f docker-compose.prod.yml up -d --build   # any box you own
 ```
 
-Or on Render: **New → Blueprint**, point it at this repo, and
-[render.yaml](render.yaml) provisions Postgres, the API and the dashboard. Set
-the six secrets it marks `sync: false` in the dashboard; `API_KEY` is generated.
+**The deployed path is Render + Supabase.** [render.yaml](render.yaml) defines
+two services from one image — `recovery-api` (the Razorpay webhook URL and the
+merchant console) and `recovery-dashboard` (Streamlit). Postgres is Supabase,
+not a Render database, so there is deliberately no `databases:` block. Full
+runbook in **[docs/DEPLOY.md](docs/DEPLOY.md)**; the short version:
+
+| Variable | Which Supabase string | Why |
+|---|---|---|
+| `DATABASE_URL` | **Session** pooler, port 5432 | `orchestrator._get_ledger` holds a `SELECT … FOR UPDATE` row lock to close the contact-limit TOCTOU, and a row lock only means anything while one transaction keeps one backend |
+| `DATABASE_URL_SYNC` | **Direct** connection, port 5432 | Alembic runs DDL on boot, and DDL has no business behind a pooler |
+
+**Not the transaction pooler on 6543.** Under transaction-mode pooling two
+concurrent webhooks can both read "4 of 5 contacts used" and both send —
+silently, and only under load. `DB_BEHIND_POOLER=true` shrinks the async pool
+and disables asyncpg's prepared-statement cache; **turn the Supabase Data API
+off**, since this app speaks Postgres directly through SQLAlchemy and never
+uses PostgREST or RLS.
 
 **Serverless will not work.** Layer 6 is an in-process asyncio loop, and Vercel
 / Lambda kill the process between requests — deferred retries would never fire.
-This needs a container that stays resident. On Render's *free* plan the service
-also sleeps after ~15 minutes idle, which has the same effect until something
-wakes it; [render.yaml](render.yaml) explains the consequences in full.
+This needs a container that stays resident. Both services run on Render's
+**free plan**, which is a deliberate prototype trade: they sleep after ~15
+minutes idle, so a `retry_at` scheduled for +4h fires whenever something next
+wakes the service. **Nothing is lost** — a scheduled attempt stays `scheduled`
+and fires late, a timed-out webhook is not a 200 so Razorpay re-sends it, and
+`reconcile_events` picks up anything stored but unprocessed. What is lost is
+punctuality. Hit `/health` a minute before demoing the chasers, and read the
+console's heartbeat strip. When it stops being a prototype: `plan: starter` on
+`recovery-api`, one line, no code.
+
+Modal is used **only** for the LLM eval harness
+([eval/modal_llm_server.py](eval/modal_llm_server.py)) and is not part of the
+serving path.
 
 Three things the deployment does differently from `docker compose up`:
 
@@ -442,9 +560,10 @@ database that predates a model change it "succeeds" and then fails on the first
 write to the money path. `docker-entrypoint.sh` runs migrations before uvicorn
 on every boot; they are inspector-guarded, so repeat boots are no-ops.
 
-`DATABASE_URL` and `DATABASE_URL_SYNC` can both be pointed at the same
-platform-injected connection string — [src/config.py](src/config.py) normalises
-each to the driver it needs, including Heroku's legacy `postgres://` scheme.
+Paste both Supabase strings unedited — [src/config.py](src/config.py) normalises
+each to the driver it needs (`+asyncpg` for the app, plain for Alembic),
+including Heroku's legacy `postgres://` scheme. On a platform that injects one
+connection string for everything, both variables can point at it.
 
 **Point Razorpay at it:** Settings → Webhooks → `https://<your-host>/webhooks/razorpay`,
 with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
@@ -488,10 +607,21 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   ├── executor/         # Retry execution via Razorpay API + rail selection
 │   ├── chasers/          # Per-risk-type chase policy for the four
 │   │                     #   non-payment risk types (budget, window, rail)
+│   ├── receivables/      # Layer 7: the B2B side — ladder.py (five rungs by
+│   │                     #   role), aging, disputes, plans, statements,
+│   │                     #   segments, alerts, external writeback
+│   ├── voice/            # Layer 8: pipeline.py (the 4 gates), dialogue,
+│   │                     #   knowledge, facts, sarvam.py, webhook.py
+│   ├── merchant/         # The merchant console: routes.py, console_data.py
+│   │                     #   (the read layer), receivables_api.py, templates/
+│   ├── customer/         # The public recovery page (/recover/<token>)
 │   ├── cases.py          # Recovery cases, promises to pay, audit trail
-│   ├── scheduler.py      # Layer 6: eight sweeps — fire, reconcile events +
-│   │                     #   risk events, resolve stale write-aheads, expire
-│   │                     #   promises, chase due cases, cancel dead links
+│   ├── audit_chain.py    # Hash-chained case_events, independently verifiable
+│   ├── scheduler.py      # Layer 6: 14 sweeps on one tick — fire, reconcile
+│   │                     #   events + risk events + stale write-aheads, cancel
+│   │                     #   dead + superseded links, expire + remind promises,
+│   │                     #   reconcile plans, consolidate accounts, chase due
+│   │                     #   cases, report, deliver alerts
 │   ├── orchestrator.py   # Ties the layers together
 │   └── main.py           # FastAPI app
 ├── eval/                 # Standalone eval harness
@@ -539,34 +669,89 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 - **XGBoost** — ML baseline for comparison
 - **Streamlit + Plotly** — dashboard
 - **Razorpay API** — test-mode webhooks + Payment Links
+- **Jinja2** — the merchant console and the customer recovery page, server-rendered
 - **asyncio** — the Layer 6 scheduler runs in-process; no broker, no second deployment. Swap in a real queue when there is more than one app process.
+- **Render + Supabase** — the deployed path (see [docs/DEPLOY.md](docs/DEPLOY.md)); Modal only for the eval harness
 
 ## ✅ Test Coverage
 
-342 tests, 80% statement coverage over `src/`. The money paths are where the
+573 tests, 80% statement coverage over `src/`. The money paths are where the
 coverage went:
 
 | Module | Coverage | Why it is covered |
 |---|---|---|
-| `cases.py` | 97% | Attribution, stopping rules, promises |
 | `chasers/policy.py` | 100% | Per-risk chase bounds — the four chasers' contract |
-| `ingestion/idempotency.py` | 82% | The double-charge guard, including the constraint race |
-| `ingestion/router.py` | 82% | Webhook entry point + capture attribution |
-| `agent/xgboost_baseline.py` | 83% | Includes "the model actually loads" |
-| `orchestrator.py` | 82% | Write-ahead ordering, guardrail rejection, chase pipeline |
-| `scheduler.py` | 74% | Deferred fire, re-validation, event + risk reconciliation, chase sweep |
+| `receivables/ladder.py` | 100% | The five rungs, the contact window, the escalation ratchet |
+| `receivables/statement.py` | 100% | One consolidated statement per buyer per rung |
+| `ingestion/idempotency.py` | 100% | The double-charge guard, including the constraint race |
+| `guardrail/gate.py` | 98% | Every rule runs; ALL violations reported |
+| `guardrail/rules.py` | 97% | The 11 rules themselves, incl. the true IST clock |
+| `cases.py` | 97% | Attribution, stopping rules, promises |
+| `orchestrator.py` | 86% | Write-ahead ordering, guardrail rejection, chase pipeline, the four `chase_case` guards |
+| `voice/pipeline.py` | 85% | The four gates, including abstention and injection refusal |
+| `scheduler.py` | 82% | Sweep order, deferred fire, re-validation, reconciliation |
+| `merchant/routes.py` | 76% | Console gating and every panel's query |
+
+**`tests/test_integration_seams.py` is the one to read first.** Every bug in it
+was invisible to a green suite: two modules individually right and
+individually tested, wired together by a third nobody exercised. They live in
+one file because the *class* of defect is the point.
 
 `dashboard/` is 0% — the pages are Streamlit scripts whose bodies execute on
 import. `dashboard/auth.py` is the exception, split out precisely so the password
 gate is testable without a Streamlit runtime.
 
+**The suite is clock-independent, and was not always.** `chase_case` consults
+two wall clocks (the Mon–Fri 09:30–18:30 IST B2B window and the 23:00–07:00
+IST blackout) and both *defer* rather than reject, so forgetting one never
+raises — the case comes back untouched and some later assertion fails without
+naming a clock. Nine tests were pinned for the weekday axis and none for the
+hour, so the suite was green all day and 16 tests across three modules went
+red at 23:00 IST. The `chaseable_clock` fixture in
+[tests/conftest.py](tests/conftest.py) now holds both open for every test,
+autouse so the next test written at noon cannot inherit the bug silently;
+tests that are *about* a timing rule restore it from the fixture's handback.
+
 ## 🧾 Recent Hardening
 
 The engine's first cut could decide; it could not always be trusted about what
-it had decided. The current wave, all CI-verified:
+it had decided. The current wave, all CI-verified.
+
+### The seam audit
+
+Seventeen defects, each verified load-bearing by reverting the fix in isolation
+and confirming exactly the intended test failed. **The three worst all lived in
+seams between individually-correct, individually-tested components** — which is
+precisely why a green 542-test suite never saw them: no test ran the pieces
+together.
+
+| Sev | Defect | Consequence |
+|---|---|---|
+| P0 | `tick()` consolidated accounts **after** chasing cases | The buyer got one message per invoice, the Mon–Fri window was skipped, and the AR ladder never fired at all. Every existing AR test called `chase_due_accounts` directly |
+| P0 | An open dispute did not freeze the per-case chase | The freeze was implemented in one of the two paths that contact people — the path that never sends anything |
+| P0 | The voice queue could dial an opted-out or already-recovered case | `record_opt_out` closes cases; nothing told the call queue |
+| P1 | A part-paid case was re-billed for its **opening** figure | A customer who had paid ₹600 of ₹1,000 was asked for ₹1,000 |
+| P1 | The voice agent quoted a stale promise amount | It read `amount_at_risk` where it needed the outstanding balance |
+| P1 | `stage_for_level()` off-by-one | Ran one rung past the end of the ladder |
+| P2 | The fire path reconstructed `action_type` from the rail preference | Relabelled a mandate collection as `switch_rail`, past guardrail rule 12 |
+| P2 | A guardrail rejection did not advance the ladder | A blocked rung repeated forever |
+| P2 | A mandate collection with no pre-debit notice was attempted | RBI e-mandate framework: it is now downgraded into the notice |
+| — | Four Postgres-only bugs the SQLite suite could not see | A nested aggregate `avg(...max(...))`, an `integer * boolean` compare, a receivables block querying a **closed session**, and raw `text()` SQL losing timestamp coercion |
+| — | Plans sized to the opening figure; `reconcile_plans` had `LIMIT` with no `ORDER BY` | A defaulted plan could go unreconciled indefinitely |
+
+**The recurring root cause was hand-written SQL strings behind swallowing
+`except` blocks.** A string is not schema-checked, not dialect-translated and
+not type-coerced; an `except` that logs and continues turns a broken query into
+a silently empty panel — the page renders, the suite passes, and the data is
+just gone. Every console query is now an ORM construct, which makes those
+failures either impossible or mypy-catchable.
+
+### Everything before it
 
 | Change | Why it mattered |
 |---|---|
+| Hoisted two wall-clock rules to module level | `chase_case` and `chase_due_accounts` imported `is_b2b_contact_time` *inside* the function, so the only patch point was the shared ladder module — which also rewires `next_b2b_window()` and broke the tests that exercise the rule directly. Both timing rules now sit at the same seam as `is_in_blackout` |
+| Test schema was a subset of production's | `create_all` builds only what has been imported, and `conftest` imported `src.models` alone — so `chase_case`'s dispute query hit a missing `case_disputes` table in any module that had not imported the AR models, passing only when some earlier test module happened to. Production never had this problem: `alembic upgrade head` creates every table unconditionally |
 | Chase sweep is bounded by the tick budget | The chase sweep had no time budget, unlike the fire sweep it shares the tick with: up to 200 agent decisions + Razorpay calls per tick could run one tick far past the interval on a slow day, and the per-type loop let the first type in the dict eat the whole batch while invoices starved. It now shares the tick's deadline with the fire sweep, fetches all four types in ONE oldest-first query (longest-waiting customer served first), and the due-case report filters in SQL instead of Python so a chaser backlog cannot push payment-failure rows out of the heartbeat |
 | Risk-case pages ignore colliding payment ids | The recovery page looked up a `PaymentFailure` by `subject_ref` for EVERY case — but for risk cases that reference is merchant-chosen, and one colliding with a real payment id would have rendered the payment rail's story for a cart. The lookup now runs only for the payment rail |
 | Four chasers for non-payment revenue | Abandoned carts, halted subscriptions, overdue invoices and failed mandate debits never reach a gateway, so nothing announced them and nothing chased them. Merchants now POST them to `/risks` (HMAC, deduped, fail-closed on an empty secret), and the engine chases the opened cases through the same agent → guardrail → payment-link pipeline with per-type budgets, consent windows and rails. The recovery page tells the truth per type — a cart that never paid is never told its "payment failed" — and self-serve pay mints a case-driven link with the same write-ahead discipline |
@@ -601,4 +786,3 @@ it had decided. The current wave, all CI-verified:
 | Honest contact tallies | Guardrail vetoes no longer burn the customer's contact quota on outreach that never happened |
 | Transient LLM retry | One 429 no longer degrades a decidable case to XGBoost |
 | Anthropic nudge fix | `temperature=0.7` returns HTTP 400 on current Claude models — every LLM nudge silently became a template |
-# growth

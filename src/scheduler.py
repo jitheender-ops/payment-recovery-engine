@@ -72,6 +72,7 @@ from src.orchestrator import (
     process_payment_failure,
     process_risk_event,
 )
+from src.receivables.ladder import is_b2b_contact_time
 from src.receivables.models import CaseDispute
 
 logger = logging.getLogger(__name__)
@@ -1047,8 +1048,11 @@ async def chase_due_accounts(
     resolves it). Stage 3 (urgent) also raises the human call task —
     merchant-side work that never touches the customer's contact budget.
     """
+    # is_b2b_contact_time is imported at module level (see the import block at
+    # the top): it is the one name here that is a wall-clock RULE rather than a
+    # helper, and a function-local import gives tests no seam to hold it open
+    # without rewiring next_b2b_window() for everyone else.
     from src.receivables.ladder import (
-        is_b2b_contact_time,
         next_b2b_window,
         next_stage_gap_hours,
         stage_for_aging,
