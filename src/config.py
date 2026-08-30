@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # max_tokens, so 1024 risked truncating the JSON mid-object.
     llm_max_tokens: int = 2048
     llm_timeout_seconds: float = 30.0
+    # Off by default. The classifier (src/classifier/mapper.py) is
+    # deterministic and stays that way for anything it can match — this only
+    # ever fires for the tail it already gave up on (FailureClass.UNKNOWN),
+    # and only when explicitly turned on. See src/classifier/llm_tail.py.
+    classifier_llm_tail_enabled: bool = False
 
     # ── Database ─────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://recovery:recovery@localhost:5432/payment_recovery"

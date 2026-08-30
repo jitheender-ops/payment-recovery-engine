@@ -93,8 +93,38 @@ never:
   - "Contact a customer who has opted out, on any risk type, until they opt back in."
   - "Report a recovered-money number that isn't a real payment the engine's own link (or the customer's own payment) actually settled."
 
+# ── Where the LLM is allowed near diagnosis, and how narrowly ──────────────
+diagnosis:
+  default: >
+    Deterministic lookup (src/classifier/mapper.py) against Razorpay's error
+    fields. Handles every failure the rule table has a match for — no LLM,
+    no exceptions.
+  ambiguous_tail:
+    enabled_by_default: false
+    setting: CLASSIFIER_LLM_TAIL_ENABLED
+    rule: >
+      Consulted ONLY when the deterministic mapper already returned UNKNOWN
+      (no rule matched) AND the flag is on. Constrained to the same
+      FailureClass enum, JSON-only output, never freeform. Never
+      second-guesses a confident deterministic match. Any LLM error, timeout
+      or unparseable reply falls back to UNKNOWN — this can only ever turn
+      an "I don't know" into a specific answer, never overwrite one.
+    enforced_in: "src/classifier/llm_tail.py:classify_tail"
+    wired_into_the_live_pipeline: false
+    note: >
+      Built and tested, opt-in by design. Not called from
+      orchestrator.py's ingestion path by default — turning this on for
+      live traffic is a deliberate call the project should make explicitly,
+      not something that changes by editing this file alone.
+
 # ── Where the numbers this file promises are actually verified ─────────────
 verification:
-  tests: "pytest — 400+ tests, guardrail rules and their rejections covered explicitly (tests/test_guardrail_properties.py, tests/test_audit_fixes.py)"
+  tests: >
+    pytest — 430+ tests, including guardrail rules and their rejections
+    (tests/test_guardrail.py, tests/test_guardrail_properties.py,
+    tests/test_audit_fixes.py), the audit hash chain and its tamper case
+    (tests/test_audit_chain.py), and the LLM tail classifier's fallback
+    behaviour (tests/test_classifier_llm_tail.py)
   ci: ".github/workflows — ruff + mypy --strict + pytest on 3.11 and 3.13, migration-chain check, eval reproduction"
   scoreboard: "merchant console (/console/live) reports actions_blocked and compliance_violations counts, sourced from RetryAttempt.result='rejected' rows — not a slide, a live query"
+  audit_chain: "python scripts/audit_chain.py --stamp / --verify — recomputes the whole case_events chain from raw rows, trusts nothing stored"
