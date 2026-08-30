@@ -23,6 +23,8 @@ global:
   amount_ceiling_inr: 250000          # retries above this need explicit consent, not automation
   consent_window_hours: 72            # default; chaser risk types override per type below
   retry_blackout_ist: "23:00-07:00"   # no retries fire in this window; bank success rates fall off a cliff
+  retry_attempt_cost_inr: 2           # priced into the expected-value stopping rule below
+  retry_annoyance_cost_inr: 0         # off by default — a real number is a product call, not ours
 
 # ── Hard rules (always on, no threshold to tune) ────────────────────────────
 hard_rules:
@@ -32,6 +34,15 @@ hard_rules:
     rule: "Every retry attempt must carry an idempotency key. Missing = refused, never defaulted."
   - id: retry_at_within_consent_window
     rule: "A deferred retry scheduled past the consent deadline is rejected outright, not silently retimed."
+  - id: expected_value
+    rule: >
+      Attempt only while confidence * amount > retry_cost + annoyance_cost.
+      Applies to retry_now and switch_rail — the two actions that spend an
+      actual attempt — and ONLY when the agent supplied a confidence score;
+      an agent giving no estimate is not asserting a false one, so this rule
+      stays silent rather than inventing a number to reject on. Additive
+      alongside every fixed cap above, never a replacement for one.
+    enforced_in: "src/guardrail/rules.py:check_expected_value"
   - id: mandate_predebit_notification   # RBI Digital Payments E-mandate Framework, 2026
     rule: >
       A mandate (autopay) retry that re-presents the charge is blocked unless

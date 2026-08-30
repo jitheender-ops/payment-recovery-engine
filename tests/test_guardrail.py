@@ -227,6 +227,50 @@ def test_self_serve_ignores_the_outreach_rules() -> None:
     assert result.passed is True
 
 
+# ── Expected-value stopping rule ─────────────────────────────────────────
+
+
+def test_ev_silent_without_a_confidence_score() -> None:
+    """No confidence supplied — the rule must not invent one to reject on."""
+    passed, _ = rules.check_expected_value("retry_now", None, 100_00)
+    assert passed is True
+
+
+def test_ev_rejects_when_non_positive() -> None:
+    # confidence 0.05 * ₹100 = ₹5, cost floor is ₹2 default — still positive,
+    # so push confidence low enough that EV drops under the ₹2 cost.
+    passed, reason = rules.check_expected_value("retry_now", 0.01, 100_00)
+    assert passed is False
+    assert reason is not None and "Expected value" in reason
+
+
+def test_ev_passes_when_clearly_positive() -> None:
+    passed, _ = rules.check_expected_value("retry_now", 0.8, 100_00)
+    assert passed is True
+
+
+def test_ev_ignores_actions_that_do_not_spend_a_charge_attempt() -> None:
+    passed, _ = rules.check_expected_value("nudge_customer", 0.01, 100_00)
+    assert passed is True
+    passed, _ = rules.check_expected_value("abandon", 0.01, 100_00)
+    assert passed is True
+
+
+def test_gate_rejects_a_low_confidence_low_value_retry() -> None:
+    action = RetryAction(action="retry_now", reason="Low-odds retry", confidence=0.01)
+    context = _make_context(amount=100_00)
+    result = gate.validate(action, context, "ev_key_1", 0)
+    assert result.passed is False
+    assert any("Expected value" in r for r in result.rejection_reasons)
+
+
+def test_gate_passes_a_confident_retry() -> None:
+    action = RetryAction(action="retry_now", reason="High-odds retry", confidence=0.9)
+    context = _make_context(amount=100_00)
+    result = gate.validate(action, context, "ev_key_2", 0)
+    assert result.passed is True
+
+
 # ── Mandate pre-debit notification (RBI e-mandate framework, 2026) ─────────
 
 

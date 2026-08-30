@@ -130,6 +130,14 @@ class Settings(BaseSettings):
     # — they complain about the fourth arriving as fast as the first.
     escalation_backoff_hours: int = 24
 
+    # Expected-value stopping rule: attempt only while
+    # confidence * amount > retry_cost + annoyance_cost. Only enforced when
+    # the agent supplies a confidence — an agent that gives no estimate is
+    # not asserting a false one, so the rule stays silent rather than
+    # inventing a number to reject on. See guardrail/rules.py:check_expected_value.
+    retry_attempt_cost_paise: int = 200  # ₹2 — matches the eval's default retry cost
+    retry_annoyance_cost_paise: int = 0  # off by default; a real cost is a product call, not ours
+
     # ── Customer recovery page ───────────────────────────────────────────
     # Trust X-Forwarded-For when identifying the client for the recovery
     # page's per-IP rate limits. Set ONLY behind a reverse proxy you control

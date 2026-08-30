@@ -183,6 +183,37 @@ class GuardrailRules:
             return False, "Missing idempotency key — every retry must be idempotent"
         return True, None
 
+    def check_expected_value(
+        self, action_type: str, confidence: float | None, amount_paise: int
+    ) -> tuple[bool, str | None]:
+        """
+        Stop while confidence * amount > cost_of_attempt + annoyance_cost.
+
+        Only applies to retry_now and switch_rail — the two actions that
+        actually attempt a charge; a nudge or a deferred retry does not spend
+        the same kind of money. Only enforced when the agent supplied a
+        confidence: RetryAction.confidence is optional, and an agent that
+        gave no estimate is not asserting a false one — silently defaulting
+        one in here would let this rule reject on a number the agent never
+        claimed. When present, this is an ADDITIVE check alongside the fixed
+        caps above, not a replacement for them: a well-funded attempt with
+        high confidence still has to clear every other rule too.
+        """
+        if action_type not in ("retry_now", "switch_rail"):
+            return True, None
+        if confidence is None:
+            return True, None
+
+        cost = self._settings.retry_attempt_cost_paise + self._settings.retry_annoyance_cost_paise
+        expected_value = confidence * amount_paise
+        if expected_value <= cost:
+            return False, (
+                f"Expected value non-positive: confidence {confidence:.2f} × "
+                f"₹{amount_paise / 100:,.2f} = ₹{expected_value / 100:,.2f} "
+                f"<= cost ₹{cost / 100:,.2f} — stop and escalate"
+            )
+        return True, None
+
     def check_mandate_predebit_notification(
         self,
         risk_type: str,

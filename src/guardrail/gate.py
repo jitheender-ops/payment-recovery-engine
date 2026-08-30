@@ -144,7 +144,15 @@ class GuardrailGate:
         if not passed:
             violations.append(reason or "unspecified guardrail violation")
 
-        # 11. Mandate pre-debit notification (RBI e-mandate framework, 2026)
+        # 11. Expected value (only when the agent supplied a confidence)
+        rules_checked += 1
+        passed, reason = self._rules.check_expected_value(
+            action.action, action.confidence, context.amount
+        )
+        if not passed:
+            violations.append(reason or "unspecified guardrail violation")
+
+        # 12. Mandate pre-debit notification (RBI e-mandate framework, 2026)
         rules_checked += 1
         passed, reason = self._rules.check_mandate_predebit_notification(
             context.risk_type, action.action,
