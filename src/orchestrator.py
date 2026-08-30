@@ -581,7 +581,7 @@ class PaymentRecoveryOrchestrator:
         previous_outcomes = [r for (r,) in prev_attempts.all() if r]
 
         # Only consulted by the mandate pre-debit notification rule
-        # (guardrail rule 11) — cheap to compute for every case, but only
+        # (guardrail rule 12) — cheap to compute for every case, but only
         # ever non-None for risk_type=mandate_failure.
         last_notification = await session.execute(
             select(RetryAttempt.executed_at)

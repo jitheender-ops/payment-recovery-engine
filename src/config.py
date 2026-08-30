@@ -98,6 +98,14 @@ class Settings(BaseSettings):
     # deliberately NOT covered by this: Razorpay cannot be told to send a custom
     # header, so that endpoint authenticates by HMAC over the raw body instead.
     api_key: SecretStr = SecretStr("")
+    # Keys the case_events hash chain (src/audit_chain.py) so that someone
+    # with database write access cannot silently re-stamp a rewritten chain:
+    # the algorithm is in the repo, but this key is not in the database.
+    # Empty means stamp/verify refuse rather than produce a forgeable chain.
+    # Rotating it invalidates every existing stamp — stamp the chain fresh
+    # after rotating (existing rows stay readable, their hashes just stop
+    # verifying until re-stamped).
+    audit_chain_secret: SecretStr = SecretStr("")
     # Gates the Streamlit dashboard. Empty means the dashboard refuses to render.
     # The dashboard itself reads DASHBOARD_PASSWORD straight from the
     # environment (dashboard/auth.py) — it is a separate process that holds no
@@ -142,6 +150,13 @@ class Settings(BaseSettings):
     # inventing a number to reject on. See guardrail/rules.py:check_expected_value.
     retry_attempt_cost_paise: int = 200  # ₹2 — matches the eval's default retry cost
     retry_annoyance_cost_paise: int = 0  # off by default; a real cost is a product call, not ours
+
+    # RBI e-mandate pre-debit notifications are valid between the 24h minimum
+    # notice and this ceiling. The framework's notice is per-debit: a
+    # notification from weeks ago says nothing about a charge presented today,
+    # so a stale one must be re-sent (nudge_customer) before retry_now is
+    # allowed again. 168h = 7 days, conservative by default.
+    mandate_predebit_notification_valid_hours: int = 168
 
     # ── Customer recovery page ───────────────────────────────────────────
     # Trust X-Forwarded-For when identifying the client for the recovery

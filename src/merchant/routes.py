@@ -274,16 +274,19 @@ _RECENT_SQL = text(
 )
 
 # "Blocked" is every guardrail rejection (budget, blackout, amount ceiling,
-# ...). "Compliance violations" is the subset citing a specific regulatory
-# clause (currently just the RBI e-mandate rule) — a narrower, stronger claim
-# than "blocked", so it is counted separately rather than inferred from the
-# total. Both read straight off RetryAttempt, no new table.
+# ...). "Compliance blocks" is the subset citing a specific regulatory clause
+# (currently just the RBI e-mandate rule) — a narrower, stronger claim than
+# "blocked", so it is counted separately rather than inferred from the
+# total. Named "blocks", not "violations": these are attempts the engine
+# PREVENTED before execution — a violation that reached a customer would be a
+# bug, and a counter that could read as "N violations happened" inverts what
+# the number proves. Both read straight off RetryAttempt, no new table.
 _GUARDRAIL_SQL = text(
     """
     SELECT
       COUNT(*) FILTER (WHERE result='rejected')                        AS actions_blocked,
       COUNT(*) FILTER (WHERE result='rejected'
-        AND guardrail_rejection_reason LIKE '%RBI%')                   AS compliance_violations
+        AND guardrail_rejection_reason LIKE '%RBI%')                   AS compliance_blocks
     FROM retry_attempts
     """
 )
@@ -393,10 +396,10 @@ async def _console_data() -> dict[str, Any] | None:
         "recent": recent,
         "has_data": cases > 0,
         # Scoreboard honesty: what the policy engine actually refused, not
-        # just what it approved. "0 compliance violations" only means
-        # something because this number is a live query, not a claim.
+        # just what it approved. "0 compliance blocks" only means something
+        # because this number is a live query, not a claim.
         "actions_blocked": int(guardrail["actions_blocked"]),
-        "compliance_violations": int(guardrail["compliance_violations"]),
+        "compliance_blocks": int(guardrail["compliance_blocks"]),
         "exceptions": exceptions,
     }
 

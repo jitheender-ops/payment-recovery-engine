@@ -106,9 +106,9 @@
             <span class="kpi-foot">proposed by the policy agent, rejected before execution</span>
           </div>
           <div class="kpi">
-            <span class="kpi-label">Compliance violations</span>
-            <span class="kpi-value{% if data.compliance_violations == 0 %} green{% else %} red{% endif %}" data-count="{{ data.compliance_violations }}" data-format="int">{{ data.compliance_violations }}</span>
-            <span class="kpi-foot">blocked specifically on a cited regulatory clause (RBI e-mandate)</span>
+            <span class="kpi-label">Compliance blocks</span>
+            <span class="kpi-value" data-count="{{ data.compliance_blocks }}" data-format="int">{{ data.compliance_blocks }}</span>
+            <span class="kpi-foot">charge attempts stopped on a cited regulatory clause (RBI e-mandate) — before they reached the customer</span>
           </div>
         </div>
       </section>

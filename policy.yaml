@@ -47,7 +47,10 @@ hard_rules:
     rule: >
       A mandate (autopay) retry that re-presents the charge is blocked unless
       a notification to the customer was confirmed sent at least 24 hours
-      before the retry. Applies only to risk_type=mandate_failure with
+      before the retry — and no more than 7 days before it
+      (MANDATE_PREDEBIT_NOTIFICATION_VALID_HOURS): the framework's notice is
+      per-debit, so a stale notification is treated as unsent and must be
+      re-sent. Applies only to risk_type=mandate_failure with
       action=retry_now — the one action that actually re-attempts a debit.
       Post-debit: a successful mandate capture logs a confirmation event.
       Opt-out is honoured immediately across every risk type, not just this one.
@@ -126,5 +129,67 @@ verification:
     (tests/test_audit_chain.py), and the LLM tail classifier's fallback
     behaviour (tests/test_classifier_llm_tail.py)
   ci: ".github/workflows — ruff + mypy --strict + pytest on 3.11 and 3.13, migration-chain check, eval reproduction"
-  scoreboard: "merchant console (/console/live) reports actions_blocked and compliance_violations counts, sourced from RetryAttempt.result='rejected' rows — not a slide, a live query"
+  scoreboard: "merchant console (/console/live) reports actions_blocked and compliance_blocks counts, sourced from RetryAttempt.result='rejected' rows — not a slide, a live query"
   audit_chain: "python scripts/audit_chain.py --stamp / --verify — recomputes the whole case_events chain from raw rows, trusts nothing stored"
+
+# ── Regulatory posture — what the code enforces vs what the deployer owes ───
+# Honest line: software cannot make a merchant compliant. This section
+# records which obligations are enforced in code (and where), and which are
+# deployment obligations the merchant must own. The lists exist so nobody
+# mistakes the engine's guardrails for the whole of the law.
+compliance:
+  enforced_in_code:
+    - rule: >
+        RBI Digital Payments E-mandate Framework (Master Direction on
+        Digital Payment Security Measures): pre-debit notification at least
+        24h before a mandate re-presentation, treated as per-debit — a
+        notification older than 7 days (MANDATE_PREDEBIT_NOTIFICATION_VALID_HOURS)
+        is stale and must be re-sent before retry_now is allowed.
+      enforced_in: "src/guardrail/rules.py:check_mandate_predebit_notification"
+      post_debit: "src/cases.py:mandate_post_debit_confirmation event on every mandate capture"
+    - rule: >
+        Quiet hours: no chase attempt inside 23:00–07:00 IST — deferred,
+        not burned (configurable RETRY_BLACKOUT_* settings).
+      enforced_in: "src/guardrail/rules.py:check_time_of_day_blackout"
+    - rule: >
+        Contact-frequency cap: max_retries_per_customer_24h bounds all
+        outreach per customer per day; opt-out closes every open case and
+        stops all future outreach for that customer.
+      enforced_in: "src/guardrail/gate.py, src/cases.py:record_opt_out"
+    - rule: >
+        DPDP Act, 2023 data-minimization posture: the merchant console
+        surfaces aggregates and the merchant's own references only — never
+        a customer email, phone or id; recovery links are PII-free tokens
+        (no email/phone/amount in the URL); customer contact data is used
+        solely to perform the recovery the merchant directs.
+      enforced_in: "src/merchant/routes.py (aggregate SQL), src/recovery_link.py"
+    - rule: >
+        Tamper-evident audit trail: every case action is recorded in a
+        hash-chained, append-only event log keyed by AUDIT_CHAIN_SECRET —
+        re-stamping a rewritten chain is impossible without the key, which
+        lives outside the database.
+      enforced_in: "src/audit_chain.py, scripts/audit_chain.py"
+  deployment_obligations:
+    - >
+      TRAI DLT registration: transactional SMS in India must be sent
+      through a DLT-registered template on a DLT-registered route, with a
+      registered Sender ID. The engine generates message content and the
+      merchant's SMS gateway sends it — template registration is the
+      deployer's duty before live traffic.
+    - >
+      Razorpay account must be live-mode (not test) with the recovery
+      webhook configured for the deployment's public URL; test mode does
+      not support UPI payment links.
+    - >
+      DPDP Act, 2023: as a Data Fiduciary for the customer data flowing
+      through recovery, the deploying merchant needs their own lawful basis
+      and consent records for recovery outreach, breach-response process,
+      and grievance-redressal contact. The engine's opt-out and
+      PII-minimization support this but do not substitute for it.
+    - >
+      SMS content must carry the merchant's identity and, for any charge
+      presented, an honest description; the engine enforces this in its
+      copy but the merchant's own templates must match.
+  note: >
+    This list is a posture statement, not legal advice. Verify against the
+    current RBI Master Direction text and TRAI DLT rules before production.
