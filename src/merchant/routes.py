@@ -273,6 +273,35 @@ _RECENT_SQL = text(
     """
 )
 
+# "Blocked" is every guardrail rejection (budget, blackout, amount ceiling,
+# ...). "Compliance violations" is the subset citing a specific regulatory
+# clause (currently just the RBI e-mandate rule) — a narrower, stronger claim
+# than "blocked", so it is counted separately rather than inferred from the
+# total. Both read straight off RetryAttempt, no new table.
+_GUARDRAIL_SQL = text(
+    """
+    SELECT
+      COUNT(*) FILTER (WHERE result='rejected')                        AS actions_blocked,
+      COUNT(*) FILTER (WHERE result='rejected'
+        AND guardrail_rejection_reason LIKE '%RBI%')                   AS compliance_violations
+    FROM retry_attempts
+    """
+)
+
+# Cases the engine has genuinely given up on — attempt budget spent, still
+# open, never recovered — surfaced honestly instead of quietly aging off the
+# dashboard. Mirrors cases.stop_reason()'s "attempt budget spent" branch.
+_EXCEPTIONS_SQL = text(
+    """
+    SELECT risk_type, subject_ref, amount_at_risk, attempts_used, max_attempts
+    FROM recovery_cases
+    WHERE state NOT IN ('recovered', 'exhausted', 'abandoned', 'expired', 'opted_out')
+      AND attempts_used >= max_attempts
+    ORDER BY opened_at DESC
+    LIMIT 10
+    """
+)
+
 
 def _label_icon(risk_type: str) -> tuple[str, str]:
     """Display label and icon for a risk type, falling back to the raw name."""
@@ -287,6 +316,8 @@ async def _console_data() -> dict[str, Any] | None:
             overview = (await session.execute(_OVERVIEW_SQL)).mappings().one()
             chaser_rows = (await session.execute(_CHASER_SQL)).mappings().all()
             recent_rows = (await session.execute(_RECENT_SQL)).mappings().all()
+            guardrail = (await session.execute(_GUARDRAIL_SQL)).mappings().one()
+            exception_rows = (await session.execute(_EXCEPTIONS_SQL)).mappings().all()
     except Exception:
         logger.exception("Merchant console data query failed")
         return None
@@ -331,6 +362,24 @@ async def _console_data() -> dict[str, Any] | None:
             }
         )
 
+    exceptions: list[dict[str, Any]] = []
+    for row in exception_rows:
+        label, icon = _label_icon(str(row["risk_type"]))
+        exceptions.append(
+            {
+                "label": label,
+                "icon": icon,
+                "subject_ref": row["subject_ref"],
+                "at_risk": _money(int(row["amount_at_risk"])),
+                "attempts_used": int(row["attempts_used"]),
+                "max_attempts": int(row["max_attempts"]),
+                "reason": (
+                    f"attempt budget spent "
+                    f"({row['attempts_used']}/{row['max_attempts']})"
+                ),
+            }
+        )
+
     return {
         "cases": cases,
         "recovered_cases": recovered_cases,
@@ -343,6 +392,12 @@ async def _console_data() -> dict[str, Any] | None:
         "chasers": chasers,
         "recent": recent,
         "has_data": cases > 0,
+        # Scoreboard honesty: what the policy engine actually refused, not
+        # just what it approved. "0 compliance violations" only means
+        # something because this number is a live query, not a claim.
+        "actions_blocked": int(guardrail["actions_blocked"]),
+        "compliance_violations": int(guardrail["compliance_violations"]),
+        "exceptions": exceptions,
     }
 
 

@@ -97,6 +97,49 @@
       </section>
 
       <section style="margin-top:3rem" data-reveal>
+        <h2 style="font-size:1.15rem;letter-spacing:-.02em">Policy engine</h2>
+        <p class="faint" style="font-size:.85rem;margin-top:.3rem">What the guardrail actually refused — a live query against every decision made, not a claim.</p>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-top:1rem">
+          <div class="kpi">
+            <span class="kpi-label">Actions blocked</span>
+            <span class="kpi-value" data-count="{{ data.actions_blocked }}" data-format="int">{{ data.actions_blocked }}</span>
+            <span class="kpi-foot">proposed by the policy agent, rejected before execution</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-label">Compliance violations</span>
+            <span class="kpi-value{% if data.compliance_violations == 0 %} green{% else %} red{% endif %}" data-count="{{ data.compliance_violations }}" data-format="int">{{ data.compliance_violations }}</span>
+            <span class="kpi-foot">blocked specifically on a cited regulatory clause (RBI e-mandate)</span>
+          </div>
+        </div>
+      </section>
+
+      {% if data.exceptions %}
+      <section style="margin-top:3rem" data-reveal>
+        <h2 style="font-size:1.15rem;letter-spacing:-.02em">Exception list</h2>
+        <p class="faint" style="font-size:.85rem;margin-top:.3rem">Cases the engine could not resolve — attempt budget spent, still open, never recovered. Shown, not hidden.</p>
+        <div class="card" style="margin-top:1rem">
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr><th>Chaser</th><th>Reference</th><th class="num">At risk</th><th>Why it stopped</th></tr>
+              </thead>
+              <tbody>
+                {% for e in data.exceptions %}
+                <tr>
+                  <td><span class="cell-icon">{{ icon(e.icon, 16) }} {{ e.label }}</span></td>
+                  <td class="mono" style="font-size:.8rem;color:var(--ink-3)">{{ e.subject_ref }}</td>
+                  <td class="num red">{{ e.at_risk }}</td>
+                  <td class="faint" style="font-size:.85rem">{{ e.reason }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+
+      <section style="margin-top:3rem" data-reveal>
         <h2 style="font-size:1.15rem;letter-spacing:-.02em">Recent recoveries</h2>
         <div class="card" style="margin-top:1rem">
           <div class="table-wrap">
