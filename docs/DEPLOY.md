@@ -34,8 +34,31 @@ lock only means anything while one transaction keeps one backend. Under
 transaction pooling two concurrent webhooks can both read "4 of 5 contacts
 used" and both send — silently, and only under load.
 
-**`DATABASE_URL_SYNC` must be direct.** Alembic runs DDL on boot; DDL does not
-go through a pooler.
+**`DATABASE_URL_SYNC` should be direct — but check Render can reach it.** Alembic
+runs DDL on boot. Prefer the direct connection so the app's metered pooler
+connections are spent on traffic rather than on a migration that runs once.
+
+On Supabase's free tier the direct connection is typically **IPv6-only** (an
+IPv4 address is a paid add-on) and Render's outbound is IPv4. If that is your
+project's state, the API boots, runs `alembic upgrade head`, and dies on a
+connection error before uvicorn ever starts.
+
+If it does: **point `DATABASE_URL_SYNC` at the session pooler too.** Session
+mode gives each client its own backend for the life of the connection, so DDL,
+transactions and locks all behave — "direct for DDL" is about not spending
+metered connections, not a correctness requirement. Nothing else reads this
+variable: `alembic/env.py` is its only consumer inside the app, and
+`DB_BEHIND_POOLER` shapes the async engine alone.
+
+What you must **not** do is fall back to the transaction pooler on 6543 for
+either variable.
+
+**Where to find these strings.** The `Connect` button in the project header —
+not Settings. The panel lists all three; the two pooler entries differ only by
+port, so read the port, not the label. The string arrives with a literal
+`[YOUR-PASSWORD]` placeholder you must substitute (Settings → Database →
+Database password → Reset if you no longer have it), and any of
+`@ : / ? # [ ] %` in that password has to be URL-encoded.
 
 **Turn the Data API off** (Settings → API). This app speaks Postgres directly
 through SQLAlchemy and never uses supabase-py, PostgREST or RLS. Leaving it

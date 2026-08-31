@@ -29,7 +29,18 @@
 # DATABASE_URL_SYNC → DIRECT connection, port 5432
 #     postgresql://postgres:<pw>@db.<ref>.supabase.co:5432/postgres
 #
-#   Alembic runs DDL on boot. DDL has no business behind a pooler.
+#   Alembic runs DDL on boot. Direct keeps the migration off the metered
+#   pooler connections that actually serve traffic.
+#
+#   CHECK THIS ONE REACHES. On Supabase's free tier the direct connection is
+#   typically IPv6-only (IPv4 is a paid add-on) and Render's outbound is IPv4 —
+#   in which case the API boots, runs `alembic upgrade head`, and dies on a
+#   connection error before uvicorn starts. The fix is to point this at the
+#   SESSION pooler as well: session mode holds one backend per client for the
+#   life of the connection, so DDL and transactions behave. "Direct for DDL"
+#   is a metering preference, not a correctness requirement — alembic/env.py
+#   is this variable's only consumer, and DB_BEHIND_POOLER shapes only the
+#   async engine. Never the transaction pooler on 6543, for either variable.
 #
 # DB_BEHIND_POOLER=true shrinks the async pool and disables asyncpg's
 # prepared-statement cache (src/database.py explains why that one matters).
