@@ -53,7 +53,7 @@ from src.customer.i18n import Translator, pick
 from src.database import get_session
 from src.formatting import ist as _ist
 from src.formatting import money as _money
-from src.models import PaymentFailure, RecoveryCase, RetryAttempt
+from src.models import PaymentFailure, PromiseToPay, RecoveryCase, RetryAttempt
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -111,6 +111,11 @@ def _format_expiry(expires_at: datetime, lang: str) -> str:
     if lang == "hi":
         return local.strftime("%a, %d %b · %I:%M %p")
     return local.strftime("%a, %d %b, %I:%M %p")
+
+
+def _format_promise_due(due_at: datetime) -> str:
+    """'28 Aug' in IST — honest short format for the promise line."""
+    return _ist(due_at).strftime("%d %b")
 
 # ── Rate limiting ───────────────────────────────────────────────────────────
 # This is the one public, unauthenticated surface in the product (the token in
@@ -432,6 +437,40 @@ async def recovery_page(
         failed_at=anchor, window_hours=window_hours,
     )
 
+    # Promise-to-pay tracker: a live pending promise, or (absent that) the
+    # transparent fact that the last one broke. Mutually exclusive — never
+    # both — so the page always shows exactly where things stand.
+    promise = (
+        await session.execute(
+            select(PromiseToPay)
+            .where(
+                PromiseToPay.recovery_case_id == case.id,
+                PromiseToPay.status == "pending",
+            )
+            .order_by(PromiseToPay.promised_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    broken_promise = None
+    if promise is None:
+        broken_promise = (
+            await session.execute(
+                select(PromiseToPay)
+                .where(
+                    PromiseToPay.recovery_case_id == case.id,
+                    PromiseToPay.status == "broken",
+                )
+                .order_by(PromiseToPay.resolved_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    promise_due_when = _format_promise_due(promise.due_at) if promise else None
+    promise_days_left = (
+        max(0, (promise.due_at.date() - datetime.now(UTC).date()).days) if promise else 0
+    )
+
     # Confirming resolves itself: one automatic re-check after a few seconds,
     # then the honest "we'll message you" instead of a spinner that can spin
     # for a minute. The ?r=1 flag stops the loop after the single re-check.
@@ -482,6 +521,9 @@ async def recovery_page(
             "is_payment": is_payment,
             "risk_timeline_key": risk_timeline_key,
             "cart_items": cart_items,
+            "promise_due_when": promise_due_when,
+            "promise_days_left": promise_days_left,
+            "last_promise_broken": broken_promise is not None,
             "promise_min_date": (datetime.now(UTC) + timedelta(days=1))
                 .astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
             "promise_max_date": (datetime.now(UTC) + timedelta(

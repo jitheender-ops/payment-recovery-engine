@@ -25,6 +25,7 @@ from src.cases import (
     customer_promise_score,
     open_case,
     record_promise,
+    resolve_promises,
     stop_reason,
 )
 from src.config import get_settings
@@ -168,6 +169,97 @@ async def test_a_page_promise_refuses_a_horizon_busting_date(
         f"/recover/{token}/promise", data={"due_date": far}, follow_redirects=False,
     )
     assert "promise=invalid" in r.headers["location"]
+
+
+# ── The persistent tracker (GET-time visibility, not just a flash) ────────
+
+
+async def test_the_page_remembers_a_pending_promise(
+    client: TestClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Reload the page days later — the promise is still visible, not forgotten.
+
+    Seeded directly (not via POST /promise, which is already covered by
+    test_a_page_promise_silences_the_case) so this test doesn't burn shared
+    rate-limit budget it doesn't need — that budget is process-global, not
+    per-test, and other tests in the suite depend on it staying available.
+    """
+    case, token = await _open_invoice(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        fresh = await s.get(RecoveryCase, case.id)
+        assert fresh is not None
+        await record_promise(
+            s, fresh, amount=250_000, due_at=datetime.now(UTC) + timedelta(days=5),
+            channel="payment_link", confidence="explicit",
+        )
+        await s.commit()
+
+    page = client.get(f"/recover/{token}")
+    assert "You said you" in page.text
+    assert ("days left" in page.text) or ("Due today" in page.text)
+
+
+async def test_a_promise_due_today_says_due_today_not_a_negative_number(
+    client: TestClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The edge case before the sweep runs: due later today, still pending."""
+    case, token = await _open_invoice(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        fresh = await s.get(RecoveryCase, case.id)
+        assert fresh is not None
+        await record_promise(
+            s, fresh, amount=250_000,
+            due_at=datetime.now(UTC) + timedelta(hours=1),
+            channel="payment_link", confidence="explicit",
+        )
+        await s.commit()
+
+    page = client.get(f"/recover/{token}")
+    assert "Due today" in page.text
+    assert "-1 days left" not in page.text
+
+
+async def test_a_kept_promise_leaves_no_stale_pending_note(
+    client: TestClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    case, token = await _open_invoice(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        fresh = await s.get(RecoveryCase, case.id)
+        assert fresh is not None
+        await record_promise(
+            s, fresh, amount=250_000, due_at=datetime.now(UTC) + timedelta(days=3),
+            channel="payment_link", confidence="explicit",
+        )
+        await resolve_promises(s, fresh, "kept", ref="pay_kept_1")
+        await s.commit()
+
+    page = client.get(f"/recover/{token}")
+    assert "You said you" not in page.text
+    assert "Your last promised date" not in page.text
+
+
+async def test_a_broken_promise_shows_the_transparency_note(
+    client: TestClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """No hiding: the last commitment broke, said plainly before the form again."""
+    case, token = await _open_invoice(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        fresh = await s.get(RecoveryCase, case.id)
+        assert fresh is not None
+        await record_promise(
+            s, fresh, amount=250_000, due_at=datetime.now(UTC) - timedelta(days=1),
+            channel="payment_link", confidence="explicit",
+        )
+        await resolve_promises(s, fresh, "broken")
+        await s.commit()
+
+    page = client.get(f"/recover/{token}")
+    assert "Your last promised date" in page.text
+    assert "You said you" not in page.text
 
 
 # ── The merchant API promise ──────────────────────────────────────────────

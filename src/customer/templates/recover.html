@@ -218,6 +218,22 @@
     {{ t('pay_note') }} {{ t('pay_other_methods') }}
   </p>
 
+  {% if promise_due_when %}
+  {# Persistent visibility into the case's own pending commitment — not just
+     a one-time flash right after submitting. States the real date only;
+     never a countdown, same discipline as expires_line below. #}
+  <div class="note">
+    <p>{{ t('promise_pending', when=promise_due_when) }}
+    {% if promise_days_left > 0 %}{{ t('promise_days_left', days=promise_days_left) }}{% else %}{{ t('promise_due_today') }}{% endif %}</p>
+  </div>
+  {% elif last_promise_broken %}
+  {# No hiding: the last commitment broke, said plainly before offering the
+     form again — same no-hiding rule as every other flash on this page. #}
+  <div class="note">
+    <p>{{ t('promise_broken') }}</p>
+  </div>
+  {% endif %}
+
   {# "Can't pay today?" — the promise affordance. A date promise buys real
      silence (the engine's never-rule for answered customers), so offering it
      beside the pay button is honest dunning, not a soft exit. Bounded by the

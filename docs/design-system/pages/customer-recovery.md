@@ -138,6 +138,17 @@ action → register → safety`. That is the reader's order of anxiety, not ours
 Section heads are ruled mono labels — statement vernacular, and true: this page
 is a record. **Not numbered.** Nothing here is a sequence.
 
+## Promise-to-pay tracker (2026-09-01)
+
+A pending promise is shown persistently, not just as a one-time flash right
+after submitting — a customer who returns to the link days later still sees
+"You said you'd pay by {date}." plus an honest, server-computed days-left
+(or "Due today.", never a negative number). Absent a live pending promise,
+if the last one broke, that's said plainly before the promise form is
+offered again — same no-hiding rule as every other flash on this page.
+Mutually exclusive: never show both at once. No countdown, no urgency
+language beyond the real date — same discipline as `expires_line`.
+
 ## Constraints inherited from the master prompt
 
 - Never display success from a client signal. `recovered` comes from the

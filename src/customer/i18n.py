@@ -97,6 +97,11 @@ CATALOGS: dict[str, dict[str, str]] = {
         "trust_never_stored": "Your card details are never seen or stored by us",
         # expiry (true deadline: the token dies with the consent window)
         "expires_line": "This link works until {when}.",
+        # promise persistence (server-computed, never fabricated)
+        "promise_pending": "You said you'd pay by {when}.",
+        "promise_days_left": "{days} days left.",
+        "promise_due_today": "Due today.",
+        "promise_broken": "Your last promised date passed without payment.",
         # confirming / unknown
         "check_again": "Check again",
         "confirming_auto": "This page will check again by itself in a few seconds.",
@@ -162,6 +167,10 @@ CATALOGS: dict[str, dict[str, str]] = {
         "trust_secured": "भुगतान Razorpay के ज़रिए सुरक्षित है",
         "trust_never_stored": "आपके कार्ड की जानकारी हम कभी देखते या सेव नहीं करते",
         "expires_line": "यह लिंक {when} तक चलेगा।",
+        "promise_pending": "आपने {when} तक भुगतान करने का वादा किया था।",
+        "promise_days_left": "{days} दिन बाकी हैं।",
+        "promise_due_today": "आज आखिरी दिन है।",
+        "promise_broken": "आपकी पिछली वादा तारीख बिना भुगतान के निकल गई।",
         "check_again": "फिर जाँचें",
         "confirming_auto": "यह पेज कुछ सेकंड में खुद दोबारा जाँच लेगा।",
         "unknown_sms": "पक्का होते ही हम आपको संदेश भेज देंगे। आपको कुछ करने की ज़रूरत नहीं है।",
