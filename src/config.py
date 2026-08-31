@@ -96,13 +96,19 @@ class Settings(BaseSettings):
     # intermittent and load-dependent ("prepared statement _asyncpg_stmt_N
     # does not exist"), which is exactly the kind that reaches production.
     #
-    # SUPABASE, specifically: point DATABASE_URL at the SESSION-mode pooler
-    # (port 5432), not transaction mode (6543). src/orchestrator._get_ledger
-    # takes a SELECT ... FOR UPDATE row lock to close the contact-limit TOCTOU,
-    # and a row lock is only meaningful for as long as one transaction holds
-    # one backend. DATABASE_URL_SYNC must be the DIRECT connection
-    # (db.<ref>.supabase.co): Alembic runs DDL, which has no business going
-    # through a pooler.
+    # False for the deployment in render.yaml, which uses a Render Postgres —
+    # a direct connection with nothing in front of it. Set this only when
+    # DATABASE_URL is repointed at a pooled provider.
+    #
+    # If you do: the pooler must be in SESSION mode, never TRANSACTION mode.
+    # src/orchestrator._get_ledger takes a SELECT ... FOR UPDATE row lock to
+    # close the contact-limit TOCTOU, and a row lock is only meaningful while
+    # one transaction holds one backend — transaction pooling hands the next
+    # statement a different one, and the damage is silent. On Supabase that is
+    # port 5432, not 6543. DATABASE_URL_SYNC is best pointed at the direct
+    # connection so a once-per-boot migration does not spend a metered pooler
+    # connection, but the session pooler works for DDL too — see the appendix
+    # in docs/DEPLOY.md for when that distinction matters.
     db_behind_pooler: bool = False
 
     # SQLAlchemy statement logging. Off by default: echo logs bound parameters,

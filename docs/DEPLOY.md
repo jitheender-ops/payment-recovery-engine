@@ -1,46 +1,57 @@
-# Deploying: Render + Supabase
+# Deploying: all of it on Render
 
-The app runs on **Render** (two web services from one Docker image) against
-**Supabase Postgres**. Modal is used only for the LLM eval harness
+The app runs entirely on **Render** — two web services from one Docker image,
+plus a Render Postgres. Modal is used only for the LLM eval harness
 (`eval/modal_llm_server.py`) and is not part of this path.
 
-The engine needs a resident process — the scheduler is an in-process asyncio
+The engine needs a resident process: the scheduler is an in-process asyncio
 loop that fires deferred retries, expires promises and runs the chase sweeps.
 That single fact drives most of what follows.
 
 ---
 
-## 1. Supabase
+## 1. The database
 
-Create the project, then collect **two different connection strings**. Getting
-these the right way round is the whole integration.
+There is nothing to do. `render.yaml` declares it:
 
-| Variable | Which string | Where |
-|---|---|---|
-| `DATABASE_URL` | **Session pooler**, port **5432** | Connect → Session pooler |
-| `DATABASE_URL_SYNC` | **Direct connection**, port 5432 | Connect → Direct connection |
-
-```
-DATABASE_URL      postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres
-DATABASE_URL_SYNC postgresql://postgres:<pw>@db.<ref>.supabase.co:5432/postgres
+```yaml
+databases:
+  - name: recovery-db
+    plan: free
+    databaseName: payment_recovery
+    user: recovery
 ```
 
-Paste them unedited — `src/config.py` normalises each to the driver it needs
-(`+asyncpg` for the app, plain for Alembic).
+Render provisions it with the blueprint and injects the connection string into
+both services. `DATABASE_URL` and `DATABASE_URL_SYNC` receive the **same**
+value on purpose — `src/config.py` gives each the driver it needs (`+asyncpg`
+for the app, plain for Alembic), which is what its `_ensure_sync_driver`
+validator exists for.
 
-**Not the transaction pooler on 6543.** `orchestrator._get_ledger` holds a
-`SELECT … FOR UPDATE` row lock to close the contact-limit TOCTOU, and a row
-lock only means anything while one transaction keeps one backend. Under
-transaction pooling two concurrent webhooks can both read "4 of 5 contacts
-used" and both send — silently, and only under load.
+No pooler is involved, so the `SELECT … FOR UPDATE` row lock in
+`orchestrator._get_ledger` behaves, and `DB_BEHIND_POOLER` stays at its default
+of `false` — a normal pool with asyncpg's prepared-statement cache left on.
 
-**`DATABASE_URL_SYNC` must be direct.** Alembic runs DDL on boot; DDL does not
-go through a pooler.
+`property: connectionString` is the **internal** address, which resolves only
+inside Render's network. The database needs no public endpoint. To reach it
+from your laptop, read `externalConnectionString` from the dashboard rather
+than changing the blueprint.
 
-**Turn the Data API off** (Settings → API). This app speaks Postgres directly
-through SQLAlchemy and never uses supabase-py, PostgREST or RLS. Leaving it
-off removes a public HTTP surface onto tables holding customer emails and
-phone numbers, and costs nothing.
+### The 30-day catch
+
+**Render's free Postgres is deleted 30 days after creation.** Render warns by
+email first, but on expiry the data is gone, not archived. That is the trade
+for everything above being automatic.
+
+For a prototype it is usually the right trade: the engine's state is
+reproducible (re-push risk events, re-run `scripts/simulate_webhooks.py`) and
+nothing here is a system of record yet. When it needs to outlive a month, pick
+one:
+
+* **`plan: basic-256mb`** on the database in `render.yaml`. One line, no code,
+  no migration, no new vendor.
+* **Managed Postgres elsewhere.** See the appendix at the end of this file for
+  the Supabase version — it is more setup, and the failure modes are quieter.
 
 ---
 
@@ -51,34 +62,37 @@ New → Blueprint → point at this repo. `render.yaml` defines:
 - **recovery-api** — FastAPI. This is the Razorpay webhook URL and the
   merchant console.
 - **recovery-dashboard** — the Streamlit ops console.
+- **recovery-db** — the Postgres from section 1.
 
 Migrations run in `docker-entrypoint.sh` before uvicorn starts, so
 `alembic upgrade head` happens on every boot. It is idempotent.
 
 ### Set these by hand (`sync: false`)
 
+Nine values, none of them a connection string.
+
 **recovery-api**
 
 | Key | Notes |
 |---|---|
-| `DATABASE_URL` | Supabase **session pooler** |
-| `DATABASE_URL_SYNC` | Supabase **direct** |
-| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | |
-| `RAZORPAY_WEBHOOK_SECRET` | must match the Razorpay dashboard |
-| `RISK_WEBHOOK_SECRET` | HMAC for `POST /risks`; shared with the merchant's systems |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Account & Settings → API Keys |
+| `RAZORPAY_WEBHOOK_SECRET` | you invent it; must match the Razorpay dashboard exactly |
+| `RISK_WEBHOOK_SECRET` | HMAC for `POST /risks`; shared with the merchant's systems. **Empty rejects everything** |
 | `OPENAI_API_KEY` | a Groq key — `LLM_BASE_URL` points at Groq's OpenAI-compatible endpoint |
 | `DASHBOARD_PASSWORD` | gates the console; **same value** on both services |
 | `MERCHANT_NAME` | the trust anchor in every SMS — an unnamed payment link reads as phishing |
 | `SUPPORT_WHATSAPP` | optional; empty hides the button |
 
+`openssl rand -hex 32` generates the two you invent.
+
 `API_KEY`, `RECOVERY_LINK_SECRET` and `PII_MASK_SECRET` are `generateValue` —
-Render mints them once and they never touch git.
+Render mints them once and they never touch git. `DATABASE_URL`,
+`DATABASE_URL_SYNC` and `PUBLIC_BASE_URL` are injected by the platform.
 
 **recovery-dashboard**
 
 | Key | Notes |
 |---|---|
-| `DATABASE_URL_SYNC` | the **session pooler** string, not the direct one — this service only reads, and Supabase meters direct connections |
 | `DASHBOARD_PASSWORD` | same value as the API |
 
 ### Free plan: what it costs you, and how to live with it
@@ -172,3 +186,50 @@ it exists. Override it with a custom domain when you have one: an
 
 **Rotating `DASHBOARD_PASSWORD`** invalidates every open console session — it
 is the cookie's signing key, not just a compared string.
+
+---
+
+## Appendix: managed Postgres elsewhere (Supabase)
+
+Only needed when the 30-day free database is not enough and you would rather
+not pay Render for one. It is more setup and the failure modes are quieter, so
+prefer `plan: basic-256mb` unless you have a reason.
+
+Delete the `databases:` block from `render.yaml`, change the three
+`fromDatabase:` entries to `sync: false`, add `DB_BEHIND_POOLER=true` to
+`recovery-api`, and set two strings by hand.
+
+**Finding them.** The `Connect` button in the Supabase project header — not
+Settings. The panel lists three connection strings; the two pooler entries are
+otherwise identical, so read the **port**, not the label.
+
+| Variable | Which string | Host | Port |
+|---|---|---|---|
+| `DATABASE_URL` | Session pooler | `…pooler.supabase.com` | **5432** |
+| `DATABASE_URL_SYNC` | Direct connection | `db.<ref>.supabase.co` | 5432 |
+| — | Transaction pooler | `…pooler.supabase.com` | **6543 — never** |
+
+Each arrives with a literal `[YOUR-PASSWORD]` placeholder to substitute
+(Settings → Database → Database password → Reset if you no longer have it).
+URL-encode any of `@ : / ? # [ ] %` in that password. Otherwise paste unedited —
+`src/config.py` normalises the driver.
+
+**Never the transaction pooler on 6543.** `orchestrator._get_ledger` holds a
+`SELECT … FOR UPDATE` row lock to close the contact-limit TOCTOU, and a row
+lock only means anything while one transaction keeps one backend. Under
+transaction pooling two concurrent webhooks can both read "4 of 5 contacts
+used" and both send — silently, and only under load.
+
+**Check the direct connection is reachable.** On Supabase's free tier it is
+typically IPv6-only (IPv4 is a paid add-on) while Render's outbound is IPv4, in
+which case the API boots, runs `alembic upgrade head`, and dies on a connection
+error before uvicorn starts. If so, point `DATABASE_URL_SYNC` at the **session
+pooler** as well: session mode holds one backend per client for the life of the
+connection, so DDL and transactions behave. `alembic/env.py` is that variable's
+only consumer inside the app, and `DB_BEHIND_POOLER` shapes only the async
+engine. "Direct for DDL" is a metering preference, not a correctness rule.
+
+**Turn the Data API off** (Settings → API). This app speaks Postgres directly
+through SQLAlchemy and never uses supabase-py, PostgREST or RLS. Leaving it off
+removes a public HTTP surface onto tables holding customer emails and phone
+numbers, and costs nothing.
