@@ -153,6 +153,25 @@
       <span class="when">{{ t('timeline_attempted_at', date=failed_at.strftime("%d %b, %H:%M")) if failed_at else '' }}</span>
       <p class="what">{{ t(risk_timeline_key) if risk_timeline_key else detail.headline }}</p>
     </li>
+    {# Subscription/mandate retry sequence: one row per collection touch
+       actually made, then (only when genuinely scheduled) one upcoming row
+       that states WHEN honestly and stays silent on WHAT — see routes.py. #}
+    {% for a in sequence_attempts %}
+    <li class="done">
+      <span class="when">{{ a.when }}</span>
+      <p class="what">
+        {%- if a.action_type in ("retry_now", "retry_at") %}{{ t('sequence_action_retry') }}
+        {%- elif a.action_type == "switch_rail" %}{{ t('sequence_action_switch_rail') }}
+        {%- else %}{{ t('sequence_action_nudge') }}{% endif -%}
+      </p>
+    </li>
+    {% endfor %}
+    {% if sequence_upcoming_when %}
+    <li class="upcoming">
+      <span class="when">&nbsp;</span>
+      <p class="what">{{ t('sequence_upcoming', when=sequence_upcoming_when) }}</p>
+    </li>
+    {% endif %}
     <li class="safe">
       <span class="when">&nbsp;</span>
       <p class="what">{{ t('timeline_safe') }}</p>

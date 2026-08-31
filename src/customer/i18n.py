@@ -83,6 +83,13 @@ CATALOGS: dict[str, dict[str, str]] = {
         # cart line (payable state, carts only): what the order contains.
         # Rendered only when the merchant's event actually named the items.
         "cart_items": "In your order: {items}",
+        # retry-sequence rows (subscription/mandate only) — one label per
+        # attempt's own action_type, honest about what happened, never what
+        # will happen next (the upcoming row deliberately says WHEN only).
+        "sequence_action_retry": "We tried to collect payment.",
+        "sequence_action_switch_rail": "We suggested a different way to pay.",
+        "sequence_action_nudge": "We sent you a reminder.",
+        "sequence_upcoming": "We'll be in touch again around {when}.",
         # register labels
         "register_attempted": "Attempted",
         "register_opened": "Opened",
@@ -157,6 +164,10 @@ CATALOGS: dict[str, dict[str, str]] = {
         "timeline_risk_invoice": "बिना भुगतान के डेट निकल गई",
         "timeline_risk_mandate": "ऑटोपे डेबिट नहीं हो पाया",
         "cart_items": "आपके ऑर्डर में: {items}",
+        "sequence_action_retry": "हमने भुगतान लेने की कोशिश की।",
+        "sequence_action_switch_rail": "हमने भुगतान का एक अलग तरीका सुझाया।",
+        "sequence_action_nudge": "हमने आपको याद दिलाया।",
+        "sequence_upcoming": "हम {when} के आसपास फिर संपर्क करेंगे।",
         "register_attempted": "कोशिश की गई",
         "register_opened": "खोला गया",
         "pay_securely": "{amount} सुरक्षित रूप से भुगतान करें",

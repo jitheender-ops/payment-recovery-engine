@@ -396,6 +396,7 @@ async def recovery_page(
         is_payment = True
         risk_timeline_key = None
         cart_items = None
+        sequence_attempts: list[dict[str, str]] = []
     else:
         # A chaser-driven risk type: no payment was (necessarily) attempted,
         # so the risk type names what happened, the window anchor is when WE
@@ -432,10 +433,55 @@ async def recovery_page(
             ).scalar_one_or_none()
             cart_items = cart_summary_from_meta(event_row)
 
+        # Subscription/mandate only: the retry sequence — past collection
+        # touches actually made, one row per executed attempt. Never a
+        # decision that was only made (rejected/pending/skipped never
+        # reached the customer) — executed_at is the one honest gate for
+        # "something actually happened here". Pre-formatted here (not raw
+        # ORM rows) so the template never has to reach for an IST converter
+        # of its own — same discipline as recovered_at below.
+        sequence_attempts = []
+        if case.risk_type in ("subscription_failure", "mandate_failure"):
+            rows = (
+                await session.execute(
+                    select(RetryAttempt)
+                    .where(
+                        RetryAttempt.recovery_case_id == case.id,
+                        RetryAttempt.executed_at.isnot(None),
+                    )
+                    .order_by(RetryAttempt.executed_at)
+                )
+            ).scalars()
+            sequence_attempts = [
+                {
+                    "when": _ist(a.executed_at).strftime("%d %b, %H:%M"),
+                    "action_type": a.action_type,
+                }
+                for a in rows
+                if a.executed_at is not None
+            ]
+
     state = _view_state(
         case, attempt, detail.retryable,
         failed_at=anchor, window_hours=window_hours,
     )
+
+    # Upcoming row for the retry sequence: only when a next touch is
+    # genuinely scheduled and budget remains. Deliberately silent on WHAT it
+    # will be — retry_now, switch_rail and nudge_customer are all decided
+    # live by the agent at that future moment (see e.g. the RBI pre-debit
+    # gate in src/guardrail/rules.py, which itself only knows the answer at
+    # execution time), never stored ahead of time. This page can honestly
+    # say WHEN it'll hear from us again; it cannot honestly say WHAT that
+    # contact will be, so it never claims to.
+    sequence_upcoming_when = None
+    if (
+        case.risk_type in ("subscription_failure", "mandate_failure")
+        and state == "payable"
+        and case.next_action_at is not None
+        and case.attempts_used < case.max_attempts
+    ):
+        sequence_upcoming_when = _format_promise_due(case.next_action_at)
 
     # Promise-to-pay tracker: a live pending promise, or (absent that) the
     # transparent fact that the last one broke. Mutually exclusive — never
@@ -521,6 +567,8 @@ async def recovery_page(
             "is_payment": is_payment,
             "risk_timeline_key": risk_timeline_key,
             "cart_items": cart_items,
+            "sequence_attempts": sequence_attempts,
+            "sequence_upcoming_when": sequence_upcoming_when,
             "promise_due_when": promise_due_when,
             "promise_days_left": promise_days_left,
             "last_promise_broken": broken_promise is not None,

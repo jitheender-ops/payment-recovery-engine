@@ -199,6 +199,11 @@
                        background:var(--quiet)}
   .timeline li.done::before{background:var(--ink)}
   .timeline li.safe::before{background:var(--settled)}
+  /* Upcoming: hollow, not solid — "scheduled" reads visually distinct from
+     "happened" at a glance, no colour-only signal (the label carries the
+     honesty too: WHEN only, never a claimed WHAT). */
+  .timeline li.upcoming::before{background:var(--field); border:1.5px solid var(--quiet)}
+  .timeline li.upcoming .what{color:var(--quiet)}
   .timeline .when{display:block; font-family:var(--mono); font-size:.68rem;
                   letter-spacing:.09em; text-transform:uppercase;
                   color:var(--quiet); margin-bottom:.1rem}

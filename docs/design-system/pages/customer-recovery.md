@@ -149,6 +149,26 @@ offered again — same no-hiding rule as every other flash on this page.
 Mutually exclusive: never show both at once. No countdown, no urgency
 language beyond the real date — same discipline as `expires_line`.
 
+## Retry-sequence panel (2026-09-01, subscription/mandate only)
+
+The "what happened" timeline gains a row per collection touch actually made
+(`RetryAttempt.executed_at is not null` — a decision that was only made,
+never executed, never renders), plus one hollow "upcoming" row when a next
+touch is genuinely scheduled and budget remains.
+
+**The upcoming row states WHEN, never WHAT.** It was tempting to label it
+"next attempt" vs "next reminder", but that turns out to be something this
+page cannot honestly know: `retry_now`, `retry_at`, `switch_rail` and
+`nudge_customer` are all decided live by the agent at the moment it next
+acts, not stored ahead of time — even the RBI pre-debit rule
+(`src/guardrail/rules.py::check_mandate_predebit_notification`) only
+evaluates at execution time, against whatever action the agent picked then.
+A page that predicted the verb would eventually be wrong and would have
+invented a claim, which is the one thing this page's rules never allow. So
+the honest, always-true sentence is "We'll be in touch again around
+{date}." — same discipline as `expires_line` and the promise tracker above:
+state the real date, claim nothing about content.
+
 ## Constraints inherited from the master prompt
 
 - Never display success from a client signal. `recovered` comes from the
