@@ -44,7 +44,7 @@
 # nothing here is a system of record yet.
 #
 # When it needs to outlive a month, ONE of:
-#   * `plan: basic-256mb` (or higher) on the database below — the smallest paid
+#   * `plan: 0.1c-256mb` (or higher) on the database below — the smallest paid
 #     tier, no code change, no migration;
 #   * or move to a managed Postgres elsewhere and set DATABASE_URL /
 #     DATABASE_URL_SYNC by hand (`sync: false`). Supabase works — use its
@@ -54,6 +54,16 @@
 #     cache goes off. docs/DEPLOY.md carries the full version of that path.
 # ─────────────────────────────────────────────────────────────────────────
 
+# PLAN NAMES ARE NOT FREE TEXT. Render rejects an unknown one at blueprint
+# parse time, so they are written down here rather than guessed at:
+#
+#   databases       free · 0.1c-256mb · 0.5c-1g · 1c-2g · 1c-4g · 2c-4g · ...
+#   web services    free · 0.5c-512mb · 1c-2g · 2c-4g · 2c-8g · 4c-8g · ...
+#
+# The old `starter` / `standard` / `basic-*` names are gone. Region is omitted
+# throughout, which defaults everything to `oregon` — services and the database
+# must share a region or `property: connectionString` (the INTERNAL address)
+# resolves to nothing.
 databases:
   - name: recovery-db
     plan: free
@@ -85,8 +95,8 @@ databases:
 # the free allowance is ~750 instance-hours against a 744-hour month, so let
 # recovery-dashboard sleep if you do that.
 #
-# When this stops being a prototype: `plan: starter` on recovery-api. One line,
-# no code. See docs/DEPLOY.md.
+# When this stops being a prototype: `plan: 0.5c-512mb` on recovery-api. One
+# line, no code. See docs/DEPLOY.md.
 # ─────────────────────────────────────────────────────────────────────────
 
 services:

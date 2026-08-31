@@ -48,7 +48,7 @@ reproducible (re-push risk events, re-run `scripts/simulate_webhooks.py`) and
 nothing here is a system of record yet. When it needs to outlive a month, pick
 one:
 
-* **`plan: basic-256mb`** on the database in `render.yaml`. One line, no code,
+* **`plan: 0.1c-256mb`** on the database in `render.yaml`. One line, no code,
   no migration, no new vendor.
 * **Managed Postgres elsewhere.** See the appendix at the end of this file for
   the Supabase version — it is more setup, and the failure modes are quieter.
@@ -127,8 +127,8 @@ run on the tick, so hit `/health` a minute beforehand. The console's heartbeat
 strip tells you whether the engine is actually ticking before you show
 anything that depends on it.
 
-**When this stops being a prototype:** put `recovery-api` on Starter
-(`plan: starter`). One line, no code — the scheduler is a core feature and a
+**When this stops being a prototype:** put `recovery-api` on the smallest paid
+instance (`plan: 0.5c-512mb`). One line, no code — the scheduler is a core feature and a
 service designed to sleep is the wrong host for it. Splitting the scheduler
 into its own Render worker is the step after that, and the seam already
 exists: `SCHEDULER_ENABLED` gates the in-process loop, and
@@ -215,7 +215,7 @@ is the cookie's signing key, not just a compared string.
 
 Only needed when the 30-day free database is not enough and you would rather
 not pay Render for one. It is more setup and the failure modes are quieter, so
-prefer `plan: basic-256mb` unless you have a reason.
+prefer `plan: 0.1c-256mb` unless you have a reason.
 
 Delete the `databases:` block from `render.yaml`, change the three
 `fromDatabase:` entries to `sync: false`, add `DB_BEHIND_POOLER=true` to

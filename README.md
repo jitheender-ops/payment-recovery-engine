@@ -526,7 +526,7 @@ of them a database URL.
 **The one catch: Render's free Postgres is deleted after 30 days.** Not
 archived — deleted, after an emailed warning. For a prototype that is usually
 the right trade, since the engine's state is reproducible by re-pushing risk
-events. When it needs to outlive a month, `plan: basic-256mb` on the database
+events. When it needs to outlive a month, `plan: 0.1c-256mb` on the database
 is a one-line change; the appendix in [docs/DEPLOY.md](docs/DEPLOY.md) covers
 moving to managed Postgres elsewhere, which is more setup and has quieter
 failure modes.
@@ -540,7 +540,7 @@ wakes the service. **Nothing is lost** — a scheduled attempt stays `scheduled`
 and fires late, a timed-out webhook is not a 200 so Razorpay re-sends it, and
 `reconcile_events` picks up anything stored but unprocessed. What is lost is
 punctuality. Hit `/health` a minute before demoing the chasers, and read the
-console's heartbeat strip. When it stops being a prototype: `plan: starter` on
+console's heartbeat strip. When it stops being a prototype: `plan: 0.5c-512mb` on
 `recovery-api`, one line, no code.
 
 Modal is used **only** for the LLM eval harness
