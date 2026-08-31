@@ -39,6 +39,7 @@ import random
 import sys
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -78,9 +79,22 @@ def sign(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+# A handful of buyer companies for the B2B events to belong to. Without an
+# account_ref every invoice opens unlinked, and the whole receivables layer —
+# consolidation, the escalation ladder, aging — has nothing to group. The batch
+# used to send neither this nor a due date, so those features could not be
+# demonstrated at all: the ladder showed every rung empty and aging reported
+# zero invoices while ten overdue cases sat in the table.
+B2B_ACCOUNTS = [
+    ("ACME-DISTRIBUTION", "Acme Distribution Pvt Ltd"),
+    ("NORTHWIND-TRADERS", "Northwind Traders"),
+    ("SUNRISE-RETAIL", "Sunrise Retail"),
+]
+
+
 def risk_payload(risk_type: str, idx: int, amount: int) -> dict[str, Any]:
     shape = RISK_SHAPES[risk_type]
-    return {
+    payload: dict[str, Any] = {
         "event_id": f"evt_{risk_type}_{idx:04d}_{uuid.uuid4().hex[:8]}",
         "risk_type": risk_type,
         "reference_id": f"{shape['prefix']}_{idx:04d}_{uuid.uuid4().hex[:6]}",
@@ -91,6 +105,25 @@ def risk_payload(risk_type: str, idx: int, amount: int) -> dict[str, Any]:
         "customer_contact": "+919876543210",
         "meta": dict(shape["meta"]),
     }
+
+    if risk_type == "invoice_overdue":
+        # Deliberately few accounts and many invoices: consolidation is the
+        # point of this layer, and it only shows up when one buyer owes
+        # several. Spread of days-overdue so the ladder reaches its later
+        # rungs and the aging buckets are not all one column.
+        account_ref, _ = B2B_ACCOUNTS[idx % len(B2B_ACCOUNTS)]
+        overdue_days = [2, 9, 16, 24, 33][idx % 5]
+        payload["account_ref"] = account_ref
+        payload["due_at"] = (
+            datetime.now(UTC) - timedelta(days=overdue_days)
+        ).isoformat()
+        payload["meta"] = {
+            **payload["meta"],
+            "days_overdue": overdue_days,
+            "invoice_number": f"INV-2026-{idx:04d}",
+        }
+
+    return payload
 
 
 def captured_payload(amount: int, idempotency_key: str) -> dict[str, Any]:
@@ -187,6 +220,56 @@ def summarise() -> None:
     print("─" * 74)
 
 
+
+
+def post_promises(
+    host: str, secret: str, refs: list[tuple[str, str, int]], timeout: float
+) -> int:
+    """
+    Record a promise against some open cases — the third thing a real deployment
+    accumulates and the batch never produced.
+
+    Without these the promise tracker, the payment plans panel and the "case is
+    deliberately quiet" half of the ladder are all empty, so three shipped
+    features look unbuilt. A promise is also the cheapest recovery there is, so
+    a demo with none of them understates the engine.
+
+    Dates straddle now deliberately: some already due (they will break on the
+    expiry sweep and hand the case back), some ahead (the case stays quiet).
+    """
+    sent = 0
+    with httpx.Client(timeout=timeout) as client:
+        for n, (risk_type, reference_id, amount) in enumerate(refs):
+            # Future dates only. A promise to pay in the PAST is refused with
+            # a 400, correctly — you cannot commit to a date that has gone.
+            # Broken promises arrive the honest way: these come due, the
+            # expiry sweep finds no money, and the case goes back to the
+            # chaser. Backdating to manufacture them just fails validation.
+            days = [1, 2, 4, 6, 9, 13][n % 6]
+            payload = {
+                "amount_paise": amount,
+                "due_at": (datetime.now(UTC) + timedelta(days=days)).isoformat(),
+                "channel": ["voice", "payment_link", "merchant"][n % 3],
+                "confidence": "explicit",
+                "language": "hinglish" if n % 3 == 0 else "en",
+            }
+            body = json.dumps(payload).encode()
+            resp = client.post(
+                f"{host}/risks/{risk_type}/{reference_id}/promise",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Risk-Signature": sign(body, secret),
+                },
+            )
+            ok = resp.status_code == 200
+            sent += ok
+            print(f"  promise  {reference_id:<28} "
+                  f"{'ok' if ok else f'HTTP {resp.status_code}'}")
+            time.sleep(0.12)
+    return sent
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Drive the four chasers with synthetic merchant risk traffic"
@@ -199,6 +282,15 @@ def main() -> None:
     p.add_argument("--capture-rate", type=float, default=0.35,
                    help="Share of open case links that get paid.")
     p.add_argument("--no-captures", action="store_true", help="Phase 1 only.")
+    p.add_argument("--promise-rate", type=float, default=0.35,
+                   help="Share of open cases a promise is recorded against. "
+                        "0 skips the phase.")
+    # 15s was fine against localhost and far too tight for a free-tier
+    # host that sleeps: the first request pays a cold start of tens of
+    # seconds, and --host is a documented remote workflow.
+    p.add_argument("--timeout", type=float, default=90.0,
+                   help="Per-request timeout, seconds. Generous by default "
+                        "because a sleeping free-tier host wakes slowly.")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args()
 
@@ -215,7 +307,12 @@ def main() -> None:
     total = per_type * len(types)
     print(f"Phase 1 — {total} risk events ({per_type} per type) → {args.host}/risks\n")
     ok = 0
-    with httpx.Client(timeout=15) as client:
+    # What phase 1 actually got a 200 for. The promise phase below works from
+    # THIS list rather than querying a database: --host may point at a remote
+    # deployment, and the local database would then hand back references that
+    # exist only here. summarise() has that flaw and says so; this does not.
+    accepted: list[tuple[str, str, int]] = []
+    with httpx.Client(timeout=args.timeout) as client:
         i = 0
         for risk_type in types:
             shape = RISK_SHAPES[risk_type]
@@ -230,13 +327,32 @@ def main() -> None:
                         "X-Risk-Signature": sign(body, secret),
                     },
                 )
-                ok += resp.status_code == 200
+                if resp.status_code == 200:
+                    ok += 1
+                    accepted.append(
+                        (risk_type, payload["reference_id"], payload["amount_paise"])
+                    )
                 print(f"  [{i + 1:3d}/{total}] {risk_type:<24} "
                       f"{payload['reference_id']:<28} "
                       f"{'ok' if resp.status_code == 200 else f'HTTP {resp.status_code}'}")
                 i += 1
                 time.sleep(0.15)
     print(f"\n  {ok}/{total} accepted")
+
+    # ── Promises ──────────────────────────────────────────────────────
+    # Before captures on purpose: a promise made and then kept is the sequence
+    # the tracker exists to measure, and doing it the other way round would
+    # record promises against cases that had already closed.
+    if args.promise_rate > 0:
+        print("\n  waiting for cases to open before recording promises...")
+        time.sleep(6)
+        take = int(len(accepted) * args.promise_rate)
+        if take:
+            print(f"\nPhase 1b — {take} promises on open cases\n")
+            sent = post_promises(args.host, secret, accepted[:take], args.timeout)
+            print(f"\n  {sent}/{take} promises recorded")
+        else:
+            print("\n  no open cases yet to promise against")
 
     if args.no_captures:
         summarise()
@@ -263,7 +379,7 @@ def main() -> None:
         summarise()
         return
 
-    with httpx.Client(timeout=15) as client:
+    with httpx.Client(timeout=args.timeout) as client:
         for key, amount, risk_type in candidates[:n_att]:
             body = json.dumps(captured_payload(amount, key)).encode()
             resp = client.post(

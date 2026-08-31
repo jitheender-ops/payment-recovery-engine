@@ -196,6 +196,12 @@ def main() -> None:
     p.add_argument("--self-pay-rate", type=float, default=0.10,
                    help="Share that the customer pays directly (revenue, but not ours).")
     p.add_argument("--no-captures", action="store_true", help="Phase 1 only.")
+    # 15s was fine against localhost and far too tight for a free-tier
+    # host that sleeps: the first request pays a cold start of tens of
+    # seconds, and --host is a documented remote workflow.
+    p.add_argument("--timeout", type=float, default=90.0,
+                   help="Per-request timeout, seconds. Generous by default "
+                        "because a sleeping free-tier host wakes slowly.")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args()
 
@@ -208,7 +214,7 @@ def main() -> None:
 
     print(f"Phase 1 — {args.count} payment.failed → {args.host}/webhooks/razorpay\n")
     ok = 0
-    with httpx.Client(timeout=15) as client:
+    with httpx.Client(timeout=args.timeout) as client:
         for i in range(args.count):
             failure = SAMPLE_FAILURES[i % len(SAMPLE_FAILURES)]
             code = post(client, args.host, failed_payload(failure, i, random.choice(AMOUNTS)),
@@ -239,7 +245,7 @@ def main() -> None:
     n_self = int(len(candidates) * args.self_pay_rate)
     print(f"\nPhase 2 — {n_att} captures on our links, {n_self} customer self-pays\n")
 
-    with httpx.Client(timeout=15) as client:
+    with httpx.Client(timeout=args.timeout) as client:
         for key, _order, amount in candidates[:n_att]:
             code = post(client, args.host, captured_payload(amount, idempotency_key=key), secret)
             print(f"  attributed   {key:<44} {'ok' if code == 200 else f'HTTP {code}'}")
