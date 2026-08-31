@@ -512,23 +512,24 @@ of where everything lives.
 docker compose -f docker-compose.prod.yml up -d --build   # any box you own
 ```
 
-**The deployed path is Render + Supabase.** [render.yaml](render.yaml) defines
-two services from one image — `recovery-api` (the Razorpay webhook URL and the
-merchant console) and `recovery-dashboard` (Streamlit). Postgres is Supabase,
-not a Render database, so there is deliberately no `databases:` block. Full
-runbook in **[docs/DEPLOY.md](docs/DEPLOY.md)**; the short version:
+**Everything runs on Render.** [render.yaml](render.yaml) defines two web
+services from one image — `recovery-api` (the Razorpay webhook URL and the
+merchant console) and `recovery-dashboard` (Streamlit) — plus a Render
+Postgres. Full runbook in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
-| Variable | Which Supabase string | Why |
-|---|---|---|
-| `DATABASE_URL` | **Session** pooler, port 5432 | `orchestrator._get_ledger` holds a `SELECT … FOR UPDATE` row lock to close the contact-limit TOCTOU, and a row lock only means anything while one transaction keeps one backend |
-| `DATABASE_URL_SYNC` | **Direct** connection, port 5432 | Alembic runs DDL on boot, and DDL has no business behind a pooler |
+**There are no connection strings to copy.** Render injects one into both
+services, and `DATABASE_URL` / `DATABASE_URL_SYNC` deliberately receive the
+*same* value: `src/config.py` gives each the driver it needs, which is what its
+`_ensure_sync_driver` validator exists for. Nine values are set by hand, none
+of them a database URL.
 
-**Not the transaction pooler on 6543.** Under transaction-mode pooling two
-concurrent webhooks can both read "4 of 5 contacts used" and both send —
-silently, and only under load. `DB_BEHIND_POOLER=true` shrinks the async pool
-and disables asyncpg's prepared-statement cache; **turn the Supabase Data API
-off**, since this app speaks Postgres directly through SQLAlchemy and never
-uses PostgREST or RLS.
+**The one catch: Render's free Postgres is deleted after 30 days.** Not
+archived — deleted, after an emailed warning. For a prototype that is usually
+the right trade, since the engine's state is reproducible by re-pushing risk
+events. When it needs to outlive a month, `plan: basic-256mb` on the database
+is a one-line change; the appendix in [docs/DEPLOY.md](docs/DEPLOY.md) covers
+moving to managed Postgres elsewhere, which is more setup and has quieter
+failure modes.
 
 **Serverless will not work.** Layer 6 is an in-process asyncio loop, and Vercel
 / Lambda kill the process between requests — deferred retries would never fire.
@@ -560,10 +561,12 @@ database that predates a model change it "succeeds" and then fails on the first
 write to the money path. `docker-entrypoint.sh` runs migrations before uvicorn
 on every boot; they are inspector-guarded, so repeat boots are no-ops.
 
-Paste both Supabase strings unedited — [src/config.py](src/config.py) normalises
-each to the driver it needs (`+asyncpg` for the app, plain for Alembic),
-including Heroku's legacy `postgres://` scheme. On a platform that injects one
-connection string for everything, both variables can point at it.
+**One connection string is enough.** [src/config.py](src/config.py) normalises
+whatever it is handed into the driver each variable needs — `+asyncpg` for the
+app, plain for Alembic — including Heroku's legacy `postgres://` scheme. That
+is why `render.yaml` can point both `DATABASE_URL` and `DATABASE_URL_SYNC` at
+the same injected value, and why pasting a provider's string unedited is always
+the right move.
 
 **Point Razorpay at it:** Settings → Webhooks → `https://<your-host>/webhooks/razorpay`,
 with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
@@ -585,6 +588,10 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 
 # Train the XGBoost baseline (run.sh does this automatically if no model exists)
 .venv/bin/python scripts/train_xgboost.py --n-samples 10000
+
+# Check a DEPLOYED instance is functioning. Read-only — writes nothing, so it
+# is safe to run against production. Exit 0 only if every required check passed.
+.venv/bin/python scripts/check_deployment.py --host https://<host> --password "$DASHBOARD_PASSWORD"
 
 # Simulate webhooks against the running API
 .venv/bin/python scripts/simulate_webhooks.py --count 20
@@ -631,7 +638,8 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   └── runner.py         # Runs all policies, produces results table
 ├── dashboard/            # Streamlit ops console (6 views under views/)
 ├── tests/                # Pytest suite — real schema over throwaway SQLite
-├── scripts/              # simulate_webhooks, run_risk_batch, train_xgboost, ...
+├── scripts/              # check_deployment (is a live host healthy?),
+│                         #   simulate_webhooks, run_risk_batch, train_xgboost, ...
 ├── alembic/versions/     # Schema migrations (create_all is not an upgrade path)
 ├── models/               # Trained XGBoost artefact (gitignored; run.sh builds it)
 ├── .github/workflows/    # CI: ruff + mypy strict + pytest on 3.11 & 3.13,
@@ -671,7 +679,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 - **Razorpay API** — test-mode webhooks + Payment Links
 - **Jinja2** — the merchant console and the customer recovery page, server-rendered
 - **asyncio** — the Layer 6 scheduler runs in-process; no broker, no second deployment. Swap in a real queue when there is more than one app process.
-- **Render + Supabase** — the deployed path (see [docs/DEPLOY.md](docs/DEPLOY.md)); Modal only for the eval harness
+- **Render** — web services and Postgres, the whole deployed path (see [docs/DEPLOY.md](docs/DEPLOY.md)); Modal only for the eval harness
 
 ## ✅ Test Coverage
 
