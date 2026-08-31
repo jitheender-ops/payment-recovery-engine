@@ -59,17 +59,22 @@ one:
 
 New → Blueprint → point at this repo. `render.yaml` defines:
 
-- **recovery-api** — FastAPI. This is the Razorpay webhook URL and the
-  merchant console.
-- **recovery-dashboard** — the Streamlit ops console.
+- **recovery-api** — FastAPI. The Razorpay webhook URL **and the whole
+  console**: ledger, pipeline, routing, cases, engine, evidence, all under
+  `/console/`.
 - **recovery-db** — the Postgres from section 1.
+
+There is no second service. The Streamlit dashboard used to be one; everything
+it showed now lives under `/console/`, so there is one host, one password and
+one cold start. `dashboard/` still runs locally for anyone who wants the plotly
+charts — it is simply not deployed.
 
 Migrations run in `docker-entrypoint.sh` before uvicorn starts, so
 `alembic upgrade head` happens on every boot. It is idempotent.
 
 ### Set these by hand (`sync: false`)
 
-Nine values, none of them a connection string.
+Eight values, none of them a connection string.
 
 **recovery-api**
 
@@ -79,7 +84,7 @@ Nine values, none of them a connection string.
 | `RAZORPAY_WEBHOOK_SECRET` | you invent it; must match the Razorpay dashboard exactly |
 | `RISK_WEBHOOK_SECRET` | HMAC for `POST /risks`; shared with the merchant's systems. **Empty rejects everything** |
 | `OPENAI_API_KEY` | a Groq key — `LLM_BASE_URL` points at Groq's OpenAI-compatible endpoint |
-| `DASHBOARD_PASSWORD` | gates the console; **same value** on both services |
+| `DASHBOARD_PASSWORD` | gates the whole console. One service now, so one value |
 | `MERCHANT_NAME` | the trust anchor in every SMS — an unnamed payment link reads as phishing |
 | `SUPPORT_WHATSAPP` | optional; empty hides the button |
 
@@ -88,12 +93,6 @@ Nine values, none of them a connection string.
 `API_KEY`, `RECOVERY_LINK_SECRET` and `PII_MASK_SECRET` are `generateValue` —
 Render mints them once and they never touch git. `DATABASE_URL`,
 `DATABASE_URL_SYNC` and `PUBLIC_BASE_URL` are injected by the platform.
-
-**recovery-dashboard**
-
-| Key | Notes |
-|---|---|
-| `DASHBOARD_PASSWORD` | same value as the API |
 
 ### Free plan: what it costs you, and how to live with it
 
@@ -118,9 +117,9 @@ someone next visits".
 **Keeping it awake (optional, zero code).** Point a free external cron
 (cron-job.org, UptimeRobot) at `GET /health` every 10 minutes. Two caveats:
 the free tier is ~750 instance-hours a month and a month is 744, so one
-always-on service consumes essentially the whole allowance — let
-`recovery-dashboard` sleep. And it is keeping a service awake by pretending to
-be traffic, which is fine for a prototype and is not a deployment posture.
+always-on service consumes essentially the whole allowance — which is now the
+whole deployment, since there is only one service. And it is keeping a service
+awake by pretending to be traffic, which is fine for a prototype and is not a deployment posture.
 
 **Demoing the chasers.** Cart, subscription, invoice and mandate recovery all
 run on the tick, so hit `/health` a minute beforehand. The console's heartbeat

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, bar %}
+{% block title %}Evidence · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("evidence", merchant_name) }}
+<main class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Evidence</div>
+    <h1 class="ptitle">Does the agent beat the baseline</h1>
+    <p class="psub">Recovery rate alone makes brute force optimal: if attempts were free,
+    “retry everything, always” would win. So the headline is <b>net of retry cost</b>, and
+    every policy runs on the same scenarios under common random numbers.</p>
+  </header>
+
+  {% if not data.eval.available %}
+    <div class="empty">
+      <b>No eval results yet.</b>
+      <p>These numbers are produced by the harness, never written by hand. Run it and this
+      page reads the file it leaves behind.</p>
+      <code>python -m eval.runner --scenarios 5000 --seeds 5 --skip-llm</code>
+    </div>
+  {% else %}
+    <div class="tw" style="margin-top:1.4rem">
+      <table class="ct">
+        <thead><tr>
+          <th>Policy</th>
+          <th style="text-align:right">Recovery rate</th>
+          <th style="text-align:right">Attempts (avg)</th>
+          <th style="text-align:right">False retries</th>
+          <th style="text-align:right">Net ₹ per ₹1Cr failed</th>
+        </tr></thead>
+        <tbody>
+        {% for p in data.eval.policies %}
+          <tr>
+            <td>{{ p.name }}{% if p.best %} <span class="pill pill-g">best</span>{% endif %}</td>
+            <td class="n">{{ p.recovery }}%{% if p.recovery_std %} <span style="color:var(--ink-3)">± {{ p.recovery_std }}</span>{% endif %}</td>
+            <td class="n">{{ p.attempts }}</td>
+            <td class="n">{{ p.false_retry }}%</td>
+            <td class="n">{{ p.net }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <section class="sec">
+      <h2 class="sec-t">Recovery rate</h2>
+      <p class="sec-s">Share of failed payments that came back, mean across seeds.</p>
+      {% set top = data.eval.max_recovery or 1 %}
+      <div style="margin-top:.9rem">
+      {% for p in data.eval.policies %}
+        {{ bar(p.name, p.recovery ~ "%", p.recovery_raw / top) }}
+      {% endfor %}
+      </div>
+    </section>
+
+    <p class="sec-s" style="margin-top:1.6rem">
+      Retry cost is priced at ₹{{ data.eval.retry_cost }} per attempt — a floor, since it
+      covers gateway and ops cost but not decline-ratio penalties or customer goodwill,
+      neither of which we can source honestly. No number on this page was typed by hand;
+      they come from <span class="mono">eval/results/eval_results.json</span>.</p>
+  {% endif %}
+</main>
+{% endblock %}

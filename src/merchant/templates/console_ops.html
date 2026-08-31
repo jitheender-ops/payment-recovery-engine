@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
+{% block title %}Engine · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("ops", merchant_name) }}
+<main class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Engine</div>
+    <h1 class="ptitle">Is the machinery running</h1>
+    <p class="psub">The ledger answers “how much came back”. This answers “why did that
+    retry not fire”, which is the question at 2am. Every figure reads a table one of the
+    scheduler's sweeps works on, so a stuck pipeline shows up as a number rather than as
+    silence.</p>
+  </header>
+
+  {% if not db_ok %}
+    <div class="empty">
+      <b>Can't reach the database.</b>
+      <p>This page shows nothing rather than something wrong. Every figure here is
+      read live, so there is no cached number to fall back on — check the database
+      and reload.</p>
+    </div>
+  {% else %}
+
+  <div class="stat" style="margin-top:1.4rem;
+       border-color:{{ 'var(--red-line)' if data.health.stale else 'var(--green-line)' }};
+       background:{{ 'var(--red-tint)' if data.health.stale else 'var(--green-tint)' }}">
+    <div class="stat-l">Scheduler</div>
+    <div class="stat-v {{ 'red' if data.health.stale else 'green' }}" style="font-size:1.2rem">
+      {{ "Stopped" if data.health.stale else "Running" }}</div>
+    <div class="stat-f">
+      {% if data.health.last_tick %}Last sweep {{ data.health.last_tick }} IST{% if data.health.counts %} · did {{ data.health.counts }}{% endif %}
+      {% else %}No sweep has run yet — check SCHEDULER_ENABLED.{% endif %}</div>
+  </div>
+
+  <div class="grid grid-4">
+    <div class="stat"><div class="stat-l">Scheduled</div>
+      <div class="stat-v">{{ "{:,}".format(data.ops.scheduled) }}</div>
+      <div class="stat-f">parked, fire when due</div></div>
+    <div class="stat"><div class="stat-l">Write-ahead pending</div>
+      <div class="stat-v">{{ "{:,}".format(data.ops.pending) }}</div>
+      <div class="stat-f">committed before the gateway call</div></div>
+    <div class="stat"><div class="stat-l">Stale &gt; 15 min</div>
+      <div class="stat-v {{ 'red' if data.ops.stale else '' }}">{{ "{:,}".format(data.ops.stale) }}</div>
+      <div class="stat-f">the reconciler resolves these</div></div>
+    <div class="stat"><div class="stat-l">Events unprocessed</div>
+      <div class="stat-v {{ 'red' if data.ops.events_unprocessed or data.ops.risk_unprocessed else '' }}">{{ "{:,}".format(data.ops.events_unprocessed + data.ops.risk_unprocessed) }}</div>
+      <div class="stat-f">webhook + risk, awaiting their task</div></div>
+  </div>
+
+  {% if data.ops.next_due %}
+  <section class="sec">
+    <h2 class="sec-t">What fires next</h2>
+    <p class="sec-s">The queue the scheduler works from, soonest first. The guardrail runs
+    again at fire time, not just at decision time.</p>
+    <div class="tw"><table class="ct">
+      <thead><tr><th>Due</th><th>Reference</th><th>Action</th><th>Decided by</th></tr></thead>
+      <tbody>{% for d in data.ops.next_due %}
+        <tr><td class="ref">{{ d.due }}</td><td class="ref">{{ d.case_ref }}</td>
+            <td>{{ d.action }}</td><td>{{ d.agent }}</td></tr>
+      {% endfor %}</tbody>
+    </table></div>
+  </section>
+  {% endif %}
+
+  {% if data.ops.decision_mix %}
+  <section class="sec">
+    <h2 class="sec-t">What the agent decided</h2>
+    <p class="sec-s">Action mix by decider. A collapse to one action is worth investigating
+    — it usually means a provider is down and everything fell back.</p>
+    <div class="tw"><table class="ct">
+      <thead><tr><th>Decided by</th><th>Action</th><th style="text-align:right">Count</th></tr></thead>
+      <tbody>{% for m in data.ops.decision_mix %}
+        <tr><td>{{ m.agent }}</td><td>{{ m.action }}</td>
+            <td class="n">{{ "{:,}".format(m.n) }}</td></tr>
+      {% endfor %}</tbody>
+    </table></div>
+  </section>
+  {% endif %}
+
+  {% if data.ops.promises_overdue %}
+  <p class="sec-s" style="margin-top:1.2rem">
+    <span class="pill pill-r">{{ data.ops.promises_overdue }} promise(s) overdue</span>
+    — due dates passed with no money. The expiry sweep hands these back to the chaser.</p>
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

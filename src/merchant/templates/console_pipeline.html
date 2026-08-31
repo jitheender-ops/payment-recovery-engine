@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, bar, funnel %}
+{% block title %}Pipeline · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("pipeline", merchant_name) }}
+<main class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Pipeline</div>
+    <h1 class="ptitle">Where the money leaves</h1>
+    <p class="psub">Two funnels, not one. A case can spend three attempts, so counting
+    payments and attempts on the same axis makes the middle bar taller than the first
+    and the whole chart read as broken.</p>
+  </header>
+
+  {% if not db_ok %}
+    <div class="empty">
+      <b>Can't reach the database.</b>
+      <p>This page shows nothing rather than something wrong. Every figure here is
+      read live, so there is no cached number to fall back on — check the database
+      and reload.</p>
+    </div>
+  {% else %}
+
+  {% if not data.funnel.has_data %}
+    <div class="empty">
+      <b>Nothing has come through yet.</b>
+      <p>Failed charges arrive by webhook; the other four types by a signed risk event.
+      This page counts what reached each stage, so it fills as soon as either does.</p>
+      <code>python scripts/simulate_webhooks.py --host &lt;your-host&gt; --count 24</code>
+    </div>
+  {% else %}
+    <div class="grid grid-2">
+      <section>
+        <h2 class="sec-t">Cases</h2>
+        <p class="sec-s">One row per unit of money at risk.</p>
+        {{ funnel(data.funnel.cases) }}
+      </section>
+      <section>
+        <h2 class="sec-t">Attempts</h2>
+        <p class="sec-s">One row per decision the engine made.</p>
+        {{ funnel(data.funnel.attempts) }}
+      </section>
+    </div>
+
+    {% if data.causes %}
+    <section class="sec">
+      <h2 class="sec-t">What is blocking payment</h2>
+      <p class="sec-s">The gateway's own reason, most common first. This decides whether
+      a retry is worth making at all — a hard decline is spend with no upside.</p>
+      {% set worst = data.causes[0].n %}
+      <div style="margin-top:.9rem">
+      {% for c in data.causes %}
+        {{ bar(c.cause, "{:,}".format(c.n), c.n / worst,
+               "green" if c.retryable else "red") }}
+      {% endfor %}
+      </div>
+      <p class="sec-s" style="margin-top:.9rem">
+        Red bars are hard declines — fraud blocks, stolen cards, permanent refusals.
+        They are abandoned before the agent is called.</p>
+    </section>
+    {% endif %}
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

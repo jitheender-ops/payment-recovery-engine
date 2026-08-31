@@ -639,3 +639,266 @@ def attention_items(
 def _aware(ts: datetime) -> datetime:
     """UTC-aware before meeting datetime.now(UTC) — SQLite returns naive."""
     return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
+# ── Folded in from the Streamlit dashboard ──────────────────────────────────
+# These five sections used to live in a SECOND deployed service. Two consoles
+# meant two URLs, two passwords, two cold starts on the free plan, and one of
+# them silently broken for months because nobody looked at it. Everything the
+# operator console showed is now reachable from the same site, behind the same
+# gate, and every query below is an ORM construct for the reason at the top of
+# this file.
+#
+# The one deliberate difference: the operator console selected customer_id.
+# This one does not. The PII-free rule is the console's contract, and folding
+# a second page in is not a reason to relax it — case_ref (the merchant's own
+# invoice/cart reference) identifies a case perfectly well.
+
+
+async def pipeline_funnel(session: AsyncSession) -> dict[str, Any]:
+    """
+    Where money leaves the pipeline, as two funnels rather than one.
+
+    A single chart reads as one shrinking population, and this is not one:
+    a case can spend three attempts, so "attempts" was TALLER than "payments"
+    and the whole thing looked broken. Split by unit, each is monotonic.
+    """
+    from src.models import PaymentFailure
+
+    failed = await session.scalar(select(func.count()).select_from(PaymentFailure))
+    retryable = await session.scalar(
+        select(func.count()).select_from(PaymentFailure).where(
+            PaymentFailure.is_retryable.is_(True)
+        )
+    )
+    recovered = await session.scalar(
+        select(func.count()).select_from(RecoveryCase).where(
+            RecoveryCase.state == "recovered"
+        )
+    )
+    decided = await session.scalar(select(func.count()).select_from(RetryAttempt))
+    passed = await session.scalar(
+        select(func.count()).select_from(RetryAttempt).where(
+            RetryAttempt.guardrail_passed.is_(True)
+        )
+    )
+    executed = await session.scalar(
+        select(func.count()).select_from(RetryAttempt).where(
+            RetryAttempt.result.in_(["success", "failed", "pending"])
+        )
+    )
+    return {
+        "cases": [
+            {"label": "Failed", "n": failed or 0},
+            {"label": "Retryable", "n": retryable or 0},
+            {"label": "Recovered", "n": recovered or 0},
+        ],
+        "attempts": [
+            {"label": "Decided", "n": decided or 0},
+            {"label": "Guardrail passed", "n": passed or 0},
+            {"label": "Executed", "n": executed or 0},
+        ],
+        "has_data": bool(failed or decided),
+    }
+
+
+async def failure_causes(session: AsyncSession, *, limit: int = 12) -> list[dict[str, Any]]:
+    """Why the gateway said no, ranked. Drives whether a retry is worth making."""
+    from src.models import PaymentFailure
+
+    rows = (
+        await session.execute(
+            select(
+                PaymentFailure.failure_class,
+                func.count().label("n"),
+                func.count().filter(PaymentFailure.is_retryable.is_(True)).label("retryable"),
+            )
+            .group_by(PaymentFailure.failure_class)
+            .order_by(func.count().desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        {"cause": r.failure_class or "unclassified", "n": r.n, "retryable": r.retryable}
+        for r in rows
+    ]
+
+
+async def routing_panel(session: AsyncSession) -> dict[str, Any]:
+    """
+    Which bank, on which rail — the routing quality the switch_rail action
+    depends on. Aggregate only: a bank name is the merchant's counterparty,
+    never a customer identifier.
+    """
+    from src.models import PaymentFailure
+
+    by_bank = (
+        await session.execute(
+            select(
+                PaymentFailure.bank,
+                func.count().label("failures"),
+                func.count().filter(PaymentFailure.is_retryable.is_(True)).label("retryable"),
+            )
+            .where(PaymentFailure.bank.is_not(None))
+            .group_by(PaymentFailure.bank)
+            .order_by(func.count().desc())
+            .limit(12)
+        )
+    ).all()
+
+    by_method = (
+        await session.execute(
+            select(PaymentFailure.method, func.count().label("failures"))
+            .group_by(PaymentFailure.method)
+            .order_by(func.count().desc())
+        )
+    ).all()
+
+    by_rail = (
+        await session.execute(
+            select(RetryAttempt.target_rail, func.count().label("n"))
+            .where(RetryAttempt.target_rail.is_not(None))
+            .group_by(RetryAttempt.target_rail)
+            .order_by(func.count().desc())
+        )
+    ).all()
+
+    return {
+        "banks": [
+            {"bank": r.bank, "failures": r.failures, "retryable": r.retryable}
+            for r in by_bank
+        ],
+        "methods": [{"method": r.method or "unknown", "n": r.failures} for r in by_method],
+        "rails": [{"rail": r.target_rail, "n": r.n} for r in by_rail],
+        "has_data": bool(by_bank or by_method or by_rail),
+    }
+
+
+async def operations_panel(session: AsyncSession) -> dict[str, Any]:
+    """
+    Is the machinery running — the 2am question, not the boardroom one.
+
+    Every figure reads a table one of the scheduler's sweeps works on, so a
+    stuck pipeline shows up as a number instead of as silence.
+    """
+    now = datetime.now(UTC)
+    stale_cut = now - timedelta(minutes=15)
+
+    async def _count(*where: Any) -> int:
+        return await session.scalar(
+            select(func.count()).select_from(RetryAttempt).where(*where)
+        ) or 0
+
+    from src.models import RiskEvent, WebhookEvent
+
+    scheduled = await _count(RetryAttempt.result == "scheduled")
+    pending = await _count(RetryAttempt.result == "pending")
+    stale = await _count(RetryAttempt.result == "pending", RetryAttempt.created_at < stale_cut)
+    unprocessed = await session.scalar(
+        select(func.count()).select_from(WebhookEvent).where(
+            WebhookEvent.processed.is_(False)
+        )
+    ) or 0
+    risk_unprocessed = await session.scalar(
+        select(func.count()).select_from(RiskEvent).where(RiskEvent.processed.is_(False))
+    ) or 0
+    promises_overdue = await session.scalar(
+        select(func.count()).select_from(PromiseToPay).where(
+            PromiseToPay.status == "pending", PromiseToPay.due_at < now
+        )
+    ) or 0
+
+    mix = (
+        await session.execute(
+            select(RetryAttempt.agent_type, RetryAttempt.action_type, func.count().label("n"))
+            .group_by(RetryAttempt.agent_type, RetryAttempt.action_type)
+            .order_by(func.count().desc())
+            .limit(20)
+        )
+    ).all()
+
+    due = (
+        await session.execute(
+            select(RetryAttempt.scheduled_at, RetryAttempt.action_type,
+                   RetryAttempt.agent_type, RecoveryCase.subject_ref)
+            .join(RecoveryCase, RecoveryCase.id == RetryAttempt.recovery_case_id, isouter=True)
+            .where(RetryAttempt.result == "scheduled",
+                   RetryAttempt.scheduled_at.is_not(None))
+            .order_by(RetryAttempt.scheduled_at)
+            .limit(12)
+        )
+    ).all()
+
+    return {
+        "scheduled": scheduled,
+        "pending": pending,
+        "stale": stale,
+        "events_unprocessed": unprocessed,
+        "risk_unprocessed": risk_unprocessed,
+        "promises_overdue": promises_overdue,
+        "decision_mix": [
+            {"agent": r.agent_type or "—", "action": r.action_type, "n": r.n} for r in mix
+        ],
+        "next_due": [
+            {
+                "due": _ist(_aware(r.scheduled_at)).strftime("%d %b, %H:%M"),
+                "action": r.action_type,
+                "agent": r.agent_type or "—",
+                "case_ref": r.subject_ref or "—",
+            }
+            for r in due
+        ],
+        "has_data": bool(scheduled or pending or unprocessed or mix),
+    }
+
+
+async def case_list(
+    session: AsyncSession, *, state: str = "all", limit: int = 100
+) -> list[dict[str, Any]]:
+    """
+    Every case, filterable by state. PII-free: subject_ref, not customer_id.
+
+    The operator console selected customer_id here. Folding this page into the
+    merchant console does not get to relax that rule, so it selects the
+    merchant's own reference instead — which is what identifies a case to the
+    person reading it anyway.
+    """
+    stmt = select(
+        RecoveryCase.subject_ref, RecoveryCase.risk_type, RecoveryCase.state,
+        RecoveryCase.amount_at_risk, RecoveryCase.amount_recovered,
+        RecoveryCase.attempts_used, RecoveryCase.max_attempts,
+        RecoveryCase.escalation_level, RecoveryCase.next_action_at,
+        RecoveryCase.close_reason, RecoveryCase.opened_at,
+    ).order_by(RecoveryCase.opened_at.desc()).limit(limit)
+    if state != "all":
+        stmt = stmt.where(RecoveryCase.state == state)
+
+    rows = (await session.execute(stmt)).all()
+    return [
+        {
+            "case_ref": r.subject_ref,
+            "risk_type": r.risk_type,
+            "state": r.state,
+            "at_risk": _money(r.amount_at_risk),
+            "recovered": _money(r.amount_recovered) if r.amount_recovered else "—",
+            "attempts": f"{r.attempts_used}/{r.max_attempts}",
+            "escalation": r.escalation_level,
+            "next_action": _ist(_aware(r.next_action_at)).strftime("%d %b, %H:%M")
+            if r.next_action_at else "—",
+            "close_reason": r.close_reason or "—",
+            "opened": _ist(_aware(r.opened_at)).strftime("%d %b, %H:%M"),
+        }
+        for r in rows
+    ]
+
+
+async def case_states(session: AsyncSession) -> list[dict[str, Any]]:
+    """Case count per state — the filter's own legend."""
+    rows = (
+        await session.execute(
+            select(RecoveryCase.state, func.count().label("n"))
+            .group_by(RecoveryCase.state)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    return [{"state": r.state, "n": r.n} for r in rows]

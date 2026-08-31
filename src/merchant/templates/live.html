@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
 {% block title %}Live ledger · Recovery Console{% endblock %}
 
 {#
@@ -20,21 +22,7 @@
 #}
 
 {% block body %}
-<nav class="nav">
-  <div class="nav-in">
-    <a class="brand" href="/console">
-      <span class="brand-mark">₹</span>
-      <span class="brand-name">{{ merchant_name or "Recovery Engine" }}</span>
-    </a>
-    <div class="nav-links">
-      <a class="nav-link hide-sm" href="/console">Overview</a>
-      <span class="chip"><span class="dot {% if not db_ok %}off{% endif %}"></span>{{ "Connected" if db_ok else "Database unreachable" }}</span>
-      <form method="post" action="/console/logout" style="display:contents">
-        <button class="btn btn-ghost btn-sm" type="submit">{{ icon("logout", 14) }} Sign out</button>
-      </form>
-    </div>
-  </div>
-</nav>
+{{ console_nav("live", merchant_name) }}
 
 {% if db_ok and data.has_data %}
 {# The heartbeat sits above everything because it qualifies everything: a
@@ -375,6 +363,8 @@
   </div>
 </footer>
 {% endblock %}
+
+{% block head %}{{ console_styles() }}{% endblock %}
 
 {% block scripts %}
 <style>

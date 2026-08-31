@@ -1,0 +1,41 @@
+{#
+  The console's own navigation.
+
+  There used to be two consoles on two hosts: this one, and a separate
+  Streamlit service. Two URLs, two passwords, two cold starts on the free
+  plan — and one of them silently broken for months because nobody had a
+  reason to open it. Everything now lives on this site, and this strip is
+  what makes that navigable.
+
+  `active` is the slug of the current page.
+#}
+{% macro console_nav(active, merchant_name) %}
+<nav class="nav">
+  <div class="nav-in">
+    <a class="brand" href="/console">
+      <span class="brand-mark">₹</span>
+      <span class="brand-name">{{ merchant_name or "Recovery Engine" }}</span>
+    </a>
+    <div class="nav-links">
+      <form method="post" action="/console/logout" style="display:contents">
+        <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
+      </form>
+    </div>
+  </div>
+  <div class="subnav-wrap">
+    <div class="subnav">
+      {% for slug, label, blurb in [
+          ("live",     "Ledger",   "Money, worklist, ladder, promises"),
+          ("pipeline", "Pipeline", "Where the money leaves"),
+          ("routing",  "Routing",  "Which bank, on which rail"),
+          ("cases",    "Cases",    "Every unit of revenue at risk"),
+          ("ops",      "Engine",   "Is the machinery running"),
+          ("evidence", "Evidence", "Does the agent beat the baseline"),
+      ] %}
+      <a class="subnav-item {% if active == slug %}is-on{% endif %}"
+         href="/console/{{ slug }}" title="{{ blurb }}">{{ label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+</nav>
+{% endmacro %}

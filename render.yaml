@@ -1,10 +1,20 @@
 # Render blueprint. Create from the dashboard: New > Blueprint > point at this repo.
 #
 # What this wires up:
-#   recovery-api           the FastAPI service — this is the Razorpay webhook URL
-#   recovery-dashboard     the Streamlit dashboard, password-gated
+#   recovery-api           the FastAPI service — the Razorpay webhook URL AND
+#                          the whole console. ONE site: ledger, pipeline,
+#                          routing, cases, engine, evidence.
 #
 #   recovery-db            Render Postgres — see the 30-DAY note below
+#
+# There was a second service (recovery-dashboard, Streamlit) until everything
+# it showed moved under /console/. Two consoles meant two hosts, two passwords
+# and two cold starts on a plan where each service sleeps independently — and
+# the operator one sat silently broken for months because nobody had a reason
+# to open it. One site is fewer moving parts AND the only way a merchant sees
+# the whole picture without being told which URL to use. dashboard/ still runs
+# locally (`streamlit run dashboard/app.py`) for anyone who wants the plotly
+# charts; it is simply not deployed.
 #
 # Migrations are NOT a preDeployCommand (that is a paid-plan feature). They run
 # in docker-entrypoint.sh before uvicorn starts, so `alembic upgrade head`
@@ -211,24 +221,3 @@ services:
       # for money is not a link most people would trust.
       - key: PUBLIC_BASE_URL
         fromService: {type: web, name: recovery-api, property: host}
-
-  # ── Dashboard ─────────────────────────────────────────────────────────
-  - type: web
-    name: recovery-dashboard
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: free
-    dockerCommand: /app/docker-entrypoint.sh dashboard
-    envVars:
-      # Sync only, never async: the dashboard reads through pandas.read_sql.
-      # Same injected database as the API service; this one only ever reads.
-      - key: DATABASE_URL_SYNC
-        fromDatabase: {name: recovery-db, property: connectionString}
-      - key: APP_ENV
-        value: staging
-      # The only thing in front of live payment data. Empty means the dashboard
-      # refuses to render, which is the intended fail-closed behaviour — but it
-      # means a blank here looks like a broken deploy. Set the SAME value you
-      # gave recovery-api.
-      - key: DASHBOARD_PASSWORD
-        sync: false

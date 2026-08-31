@@ -512,10 +512,16 @@ of where everything lives.
 docker compose -f docker-compose.prod.yml up -d --build   # any box you own
 ```
 
-**Everything runs on Render.** [render.yaml](render.yaml) defines two web
-services from one image — `recovery-api` (the Razorpay webhook URL and the
-merchant console) and `recovery-dashboard` (Streamlit) — plus a Render
-Postgres. Full runbook in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+**Everything runs on Render, as one service.** [render.yaml](render.yaml)
+defines `recovery-api` (the Razorpay webhook URL **and the whole console**) plus
+a Render Postgres. Full runbook in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
+The console is one site with six pages under `/console/` — **Ledger** (money,
+worklist, ladder, promises, plans, disputes, voice), **Pipeline**, **Routing**,
+**Cases**, **Engine** and **Evidence**. A separate Streamlit service used to
+carry the last five; two consoles meant two hosts, two passwords and two cold
+starts, and the operator one sat silently broken for months because nobody had
+a reason to open it. `dashboard/` still runs locally for the plotly charts.
 
 **There are no connection strings to copy.** Render injects one into both
 services, and `DATABASE_URL` / `DATABASE_URL_SYNC` deliberately receive the

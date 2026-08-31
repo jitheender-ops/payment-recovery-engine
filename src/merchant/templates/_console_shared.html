@@ -1,0 +1,113 @@
+{#
+  Styles and small drawing macros shared by every console page except the
+  ledger (which carries its own, older, page-local CSS).
+
+  Charts are inline SVG rather than a charting library on purpose: the
+  Streamlit console these pages replace pulled Plotly for what are, in every
+  case here, a bar and a funnel. Inline SVG needs no CDN, survives the
+  console's CSP, prints correctly, and inherits the page's own tokens instead
+  of fighting a second theme.
+#}
+
+{% macro console_styles() %}
+<style>
+  .subnav-wrap{border-top:1px solid var(--line);background:var(--card)}
+  .subnav{max-width:1160px;margin:0 auto;padding:0 clamp(1.25rem,4vw,2.5rem);
+    display:flex;gap:.35rem;overflow-x:auto;scrollbar-width:none}
+  .subnav::-webkit-scrollbar{display:none}
+  .subnav-item{flex:none;padding:.7rem .85rem;font-size:.87rem;font-weight:500;
+    color:var(--ink-3);text-decoration:none;border-bottom:2px solid transparent;
+    white-space:nowrap;transition:color .15s ease}
+  .subnav-item:hover{color:var(--ink)}
+  .subnav-item.is-on{color:var(--green-deep);border-bottom-color:var(--green)}
+
+  .phead{padding:clamp(2rem,5vh,2.8rem) 0 .3rem}
+  .peyebrow{font-family:var(--mono);font-size:.7rem;font-weight:600;
+    letter-spacing:.14em;color:var(--ink-3);text-transform:uppercase}
+  .ptitle{font-size:clamp(1.7rem,4vw,2.3rem);margin-top:.45rem}
+  .psub{color:var(--ink-2);font-size:.95rem;margin-top:.6rem;max-width:64ch}
+
+  .grid{display:grid;gap:.9rem;margin-top:1.6rem}
+  .grid-4{grid-template-columns:repeat(4,1fr)}
+  .grid-3{grid-template-columns:repeat(3,1fr)}
+  .grid-2{grid-template-columns:repeat(2,1fr)}
+  @media (max-width:900px){.grid-4,.grid-3{grid-template-columns:repeat(2,1fr)}}
+  @media (max-width:620px){.grid-4,.grid-3,.grid-2{grid-template-columns:1fr}}
+
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:1.1rem 1.2rem;box-shadow:var(--shadow-sm)}
+  .stat-l{font-family:var(--mono);font-size:.66rem;font-weight:500;color:var(--ink-3);
+    text-transform:uppercase;letter-spacing:.1em}
+  .stat-v{font-family:var(--mono);font-weight:600;font-size:1.6rem;margin-top:.4rem;
+    letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
+  .stat-v.green{color:var(--green-deep)} .stat-v.red{color:var(--red)}
+  .stat-f{color:var(--ink-3);font-size:.76rem;margin-top:.3rem;line-height:1.4}
+
+  .sec{margin-top:clamp(2.2rem,5vw,3rem)}
+  .sec-t{font-size:1.15rem;letter-spacing:-.02em;margin:0}
+  .sec-s{color:var(--ink-2);font-size:.88rem;margin-top:.35rem;max-width:66ch}
+
+  .tw{overflow-x:auto;margin-top:1rem;border:1px solid var(--line);
+    border-radius:12px;background:var(--card)}
+  table.ct{border-collapse:collapse;width:100%;font-size:.87rem;min-width:32rem}
+  table.ct th,table.ct td{text-align:left;padding:.6rem .9rem;
+    border-bottom:1px solid var(--line)}
+  table.ct tr:last-child td{border-bottom:none}
+  table.ct th{font-family:var(--mono);font-size:.66rem;font-weight:600;
+    letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+    background:var(--well)}
+  table.ct td.n{text-align:right;font-family:var(--mono);
+    font-variant-numeric:tabular-nums}
+  table.ct td.ref{font-family:var(--mono);font-size:.8rem}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:.68rem;
+    padding:.15rem .5rem;border-radius:999px;border:1px solid var(--line-2);
+    color:var(--ink-2);background:var(--well);white-space:nowrap}
+  .pill-g{color:var(--green-deep);border-color:var(--green-line);background:var(--green-tint)}
+  .pill-r{color:var(--red);border-color:var(--red-line);background:var(--red-tint)}
+
+  .empty{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:2rem;margin-top:1.4rem;max-width:62ch}
+  .empty b{display:block;font-size:1.02rem;margin-bottom:.4rem}
+  .empty p{color:var(--ink-2);font-size:.9rem}
+  .empty code{display:block;margin-top:.9rem;padding:.6rem .8rem;background:var(--sunk,var(--well));
+    border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:.78rem;
+    overflow-x:auto}
+</style>
+{% endmacro %}
+
+{# A horizontal bar row: label, proportional bar, value. `frac` is 0..1. #}
+{% macro bar(label, value, frac, tone="green") %}
+<div style="display:grid;grid-template-columns:minmax(7rem,12rem) 1fr auto;gap:.8rem;
+            align-items:center;padding:.42rem 0;">
+  <span style="font-size:.86rem;color:var(--ink-2);overflow:hidden;
+               text-overflow:ellipsis;white-space:nowrap;">{{ label }}</span>
+  <span style="height:9px;border-radius:999px;background:var(--well);
+               border:1px solid var(--line);overflow:hidden;">
+    <span style="display:block;height:100%;width:{{ (frac * 100) | round(1) }}%;
+                 background:{{ 'var(--green)' if tone == 'green' else 'var(--red)' }};"></span>
+  </span>
+  <span class="mono" style="font-size:.83rem;min-width:3.5rem;text-align:right;">{{ value }}</span>
+</div>
+{% endmacro %}
+
+{# A funnel: stages drawn as nested bars, each a share of the first. #}
+{% macro funnel(stages) %}
+{% set top = stages[0].n if stages and stages[0].n else 1 %}
+<div style="margin-top:.9rem;">
+  {% for s in stages %}
+  <div style="display:grid;grid-template-columns:minmax(8rem,11rem) 1fr auto;gap:.8rem;
+              align-items:center;padding:.35rem 0;">
+    <span style="font-size:.87rem;color:var(--ink-2);">{{ s.label }}</span>
+    <span style="height:26px;border-radius:6px;background:var(--well);
+                 border:1px solid var(--line);overflow:hidden;">
+      <span style="display:block;height:100%;
+                   width:{{ ((s.n / top) * 100) | round(1) }}%;
+                   background:var(--green-tint);border-right:2px solid var(--green);"></span>
+    </span>
+    <span class="mono" style="font-size:.87rem;min-width:4rem;text-align:right;">
+      {{ "{:,}".format(s.n) }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
