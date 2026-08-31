@@ -1479,7 +1479,23 @@ class PaymentRecoveryOrchestrator:
 
         await session.commit()
 
-        if policy.first_action_hours <= 0:
+        # An account-linked case is NEVER chased inline, however overdue it is.
+        #
+        # invoice_overdue carries first_action_hours=0 ("already overdue when we
+        # hear about it"), so this used to chase every invoice the moment it
+        # arrived — one contact per invoice. A buyer pushing four overdue
+        # invoices in one batch got four separate messages, which is the exact
+        # harm src/receivables exists to prevent, and the consolidation sweep
+        # never saw them: by the time it ran, chase_case had already pushed
+        # every next_action_at forward.
+        #
+        # Leaving them for chase_due_accounts costs at most one tick (their
+        # next_action_at is already in the past, so the very next sweep picks
+        # them up) and buys the guarantee back: one carrier case per account,
+        # every other invoice deferred, one statement listing all of them.
+        # An invoice with no account_ref has nothing to consolidate with, so it
+        # keeps the immediate path.
+        if policy.first_action_hours <= 0 and case.account_id is None:
             await self.chase_case(case, session, actor="chaser")
 
     async def _execute_and_record(
