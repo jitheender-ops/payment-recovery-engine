@@ -4,9 +4,7 @@
 #   recovery-api           the FastAPI service — this is the Razorpay webhook URL
 #   recovery-dashboard     the Streamlit dashboard, password-gated
 #
-# Postgres is SUPABASE, not a Render database — there is deliberately no
-# `databases:` block here. See the connection notes on DATABASE_URL below;
-# getting those two URLs the right way round is the whole integration.
+#   recovery-db            Render Postgres — see the 30-DAY note below
 #
 # Migrations are NOT a preDeployCommand (that is a paid-plan feature). They run
 # in docker-entrypoint.sh before uvicorn starts, so `alembic upgrade head`
@@ -14,42 +12,53 @@
 # by an inspector check — so repeated boots are no-ops.
 #
 # ─────────────────────────────────────────────────────────────────────────
-# SUPABASE: TWO URLS, AND THEY ARE NOT INTERCHANGEABLE
+# ONE DATABASE, ZERO CONNECTION STRINGS TO COPY
 #
-# DATABASE_URL      → SESSION-mode pooler, port 5432
-#     postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres
+# Postgres is a RENDER database, provisioned by the `databases:` block below.
+# Render injects the connection string into both services; nothing about it is
+# typed by hand, so it cannot be typed wrong.
 #
-#   NOT the transaction pooler on 6543. src/orchestrator._get_ledger takes a
-#   SELECT ... FOR UPDATE row lock to close the contact-limit TOCTOU, and a row
-#   lock only means anything while one transaction holds one backend —
-#   transaction-mode pooling hands the next statement a different one. The
-#   damage would be silent: two concurrent webhooks each read "4 of 5 contacts
-#   used" and both send.
+# DATABASE_URL and DATABASE_URL_SYNC are deliberately the SAME injected value.
+# src/config.py normalises each to the driver it needs — `+asyncpg` for the
+# app, plain for Alembic — and its _ensure_sync_driver validator exists for
+# exactly this case. There is no pooler here: a Render database hands out real
+# connections, so the FOR UPDATE row lock in orchestrator._get_ledger behaves,
+# and DB_BEHIND_POOLER stays at its default of false (a normal pool, asyncpg's
+# prepared-statement cache left on).
 #
-# DATABASE_URL_SYNC → DIRECT connection, port 5432
-#     postgresql://postgres:<pw>@db.<ref>.supabase.co:5432/postgres
+# `property: connectionString` is the INTERNAL address. It resolves only inside
+# Render's network, which is what you want: the database never needs a public
+# endpoint, and internal traffic does not cross the internet. If you ever need
+# to reach it from your laptop, read externalConnectionString from the
+# dashboard rather than changing this.
 #
-#   Alembic runs DDL on boot. Direct keeps the migration off the metered
-#   pooler connections that actually serve traffic.
-#
-#   CHECK THIS ONE REACHES. On Supabase's free tier the direct connection is
-#   typically IPv6-only (IPv4 is a paid add-on) and Render's outbound is IPv4 —
-#   in which case the API boots, runs `alembic upgrade head`, and dies on a
-#   connection error before uvicorn starts. The fix is to point this at the
-#   SESSION pooler as well: session mode holds one backend per client for the
-#   life of the connection, so DDL and transactions behave. "Direct for DDL"
-#   is a metering preference, not a correctness requirement — alembic/env.py
-#   is this variable's only consumer, and DB_BEHIND_POOLER shapes only the
-#   async engine. Never the transaction pooler on 6543, for either variable.
-#
-# DB_BEHIND_POOLER=true shrinks the async pool and disables asyncpg's
-# prepared-statement cache (src/database.py explains why that one matters).
-#
-# The Supabase DATA API (PostgREST) can stay OFF. This app speaks Postgres
-# directly through SQLAlchemy and never uses supabase-py, PostgREST or RLS —
-# leaving the Data API disabled removes a public surface onto tables holding
-# customer emails and phone numbers, and costs nothing.
 # ─────────────────────────────────────────────────────────────────────────
+# THE 30-DAY CATCH — READ THIS ONE
+#
+# Render's FREE Postgres is DELETED 30 days after it is created. Render emails
+# a warning first, but when it expires the data is gone, not archived. That is
+# the trade for the simplicity above.
+#
+# For a prototype and a demo, this is usually the right trade — the engine's
+# state is recoverable (re-push risk events, re-run the webhook simulator) and
+# nothing here is a system of record yet.
+#
+# When it needs to outlive a month, ONE of:
+#   * `plan: basic-256mb` (or higher) on the database below — the smallest paid
+#     tier, no code change, no migration;
+#   * or move to a managed Postgres elsewhere and set DATABASE_URL /
+#     DATABASE_URL_SYNC by hand (`sync: false`). Supabase works — use its
+#     SESSION pooler on 5432 for DATABASE_URL, never the transaction pooler on
+#     6543, which would silently break that row lock; and set
+#     DB_BEHIND_POOLER=true so the async pool shrinks and asyncpg's statement
+#     cache goes off. docs/DEPLOY.md carries the full version of that path.
+# ─────────────────────────────────────────────────────────────────────────
+
+databases:
+  - name: recovery-db
+    plan: free
+    databaseName: payment_recovery
+    user: recovery
 
 # ─────────────────────────────────────────────────────────────────────────
 # BOTH SERVICES ARE ON THE FREE PLAN. WHAT THAT COSTS.
@@ -91,21 +100,15 @@ services:
     # The entrypoint's "api" mode: alembic upgrade head, then uvicorn.
     dockerCommand: /app/docker-entrypoint.sh api
     envVars:
-      # DIFFERENT Supabase URLs — see the block at the top of this file.
-      # sync: false = set by hand in the dashboard, never stored in git.
-      # Settings normalises each to the driver it needs (src/config.py), so
-      # paste Supabase's strings unedited.
-      #
-      # Session-mode POOLER (…pooler.supabase.com:5432).
+      # The SAME injected value twice, on purpose — src/config.py gives each
+      # the driver it needs. Nothing to copy, so nothing to copy wrong.
       - key: DATABASE_URL
-        sync: false
-      # DIRECT connection (db.<ref>.supabase.co:5432) — Alembic runs DDL here.
+        fromDatabase: {name: recovery-db, property: connectionString}
       - key: DATABASE_URL_SYNC
-        sync: false
-      # Small async pool, no asyncpg statement cache. Required whenever
-      # DATABASE_URL points at a pooler; harmless if it ever points direct.
-      - key: DB_BEHIND_POOLER
-        value: "true"
+        fromDatabase: {name: recovery-db, property: connectionString}
+      # DB_BEHIND_POOLER is deliberately absent: it defaults to false, and a
+      # Render database is a direct connection with no pooler in front. Set it
+      # to "true" only if DATABASE_URL is ever repointed at a pooled provider.
 
       # staging, not production: `production` is equally valid here, but either
       # closes /docs and /redoc and puts /openapi.json behind X-API-Key. Do not
@@ -208,14 +211,9 @@ services:
     dockerCommand: /app/docker-entrypoint.sh dashboard
     envVars:
       # Sync only, never async: the dashboard reads through pandas.read_sql.
-      #
-      # Use the SESSION-MODE POOLER string here, not the direct one the API
-      # service gets. This service only ever reads, and Supabase meters direct
-      # connections — spending them on a dashboard nobody has open would
-      # starve the pool that actually moves money. The pooler is what it is
-      # for.
+      # Same injected database as the API service; this one only ever reads.
       - key: DATABASE_URL_SYNC
-        sync: false
+        fromDatabase: {name: recovery-db, property: connectionString}
       - key: APP_ENV
         value: staging
       # The only thing in front of live payment data. Empty means the dashboard
