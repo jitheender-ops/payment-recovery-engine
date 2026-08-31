@@ -129,3 +129,14 @@ class FailureContext(BaseModel):
     # pre-debit notice at least 24h before a mandate is re-presented for
     # collection. None means no notification has gone out yet.
     last_notification_sent_at: datetime | None = None
+
+    # Promise-to-pay history for this customer: kept count, broken count,
+    # pending count. Defaults (all zero) keep every stored fixture and
+    # pre-existing caller behaving exactly as before — the same defaulting
+    # pattern risk_type uses. The agent reasons over it ("a customer who
+    # kept promises is worth one more gentle contact; two+ broken promises
+    # without new information → prefer abandon"); kept_rate itself is NOT
+    # sent, so the prompt cannot be fed a derived number we cannot audit.
+    promise_kept: int = 0
+    promise_broken: int = 0
+    promise_pending: int = 0

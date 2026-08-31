@@ -72,19 +72,39 @@ async def attribute_captured_payload(
         link_id=link_entity.get("id"),
         idempotency_key=notes.get("retry_idempotency_key"),
         order_ref=payment_entity.get("order_id"),
+        # The merchant's own reference, when they stamped it on their own
+        # payment object. The order_ref hop above resolves through
+        # payment_failures, so it can only ever reach the payment rail — an
+        # invoice, a cart, a subscription and a mandate have no row there, and
+        # a buyer paying one of those through the merchant's own Razorpay link
+        # was invisible while the case went on chasing them. attribute_capture
+        # validates the pair (known risk type, open case) before trusting it;
+        # these are merchant-controlled strings.
+        subject_ref=notes.get("subject_ref"),
+        risk_type=notes.get("risk_type"),
     )
 
 
-async def rearm_failed_event(session: AsyncSession, event_id: str) -> None:
+async def rearm(
+    session: AsyncSession,
+    *,
+    model: type[Any],
+    lookup_col: Any,
+    id_col: Any,
+    event_id: str,
+    label: str,
+    context: str = "Background processing",
+) -> None:
     """
-    Give a failed event another chance instead of burying it.
+    Give a failed event another chance instead of burying it — for either
+    store (WebhookEvent or RiskEvent), first-pass or reconcile sweep.
 
-    Marking a failed event processed=True made it invisible to
-    reconcile_events — a transient database blip on the first pass permanently
-    dropped a real payment failure, and (worse) a capture: money that arrived
-    and was never attributed, on a case that kept chasing a customer who had
-    already paid. Razorpay will not re-send after our 200, so the database is
-    the only retry mechanism there is.
+    Marking a failed event processed=True made it invisible to the reconcile
+    sweep — a transient database blip on the first pass permanently dropped
+    a real payment failure, and (worse) a capture: money that arrived and was
+    never attributed, on a case that kept chasing a customer who had already
+    paid. Razorpay will not re-send after our 200, so the database is the
+    only retry mechanism there is.
 
     The event is therefore RE-ARMED (processed=False) until it has failed
     EVENT_RECONCILE_MAX_ATTEMPTS times; only then does it rest with the error
@@ -95,44 +115,46 @@ async def rearm_failed_event(session: AsyncSession, event_id: str) -> None:
 
     try:
         result = await session.execute(
-            select(WebhookEvent).where(WebhookEvent.razorpay_event_id == event_id)
+            select(model).where(lookup_col == event_id)
         )
         event = result.scalar_one_or_none()
         if event is None:
             return
         attempts = (event.processing_attempts or 0) + 1
-        if attempts < EVENT_RECONCILE_MAX_ATTEMPTS:
-            await session.execute(
-                update(WebhookEvent)
-                .where(WebhookEvent.id == event.id)
-                .values(
-                    processed=False,
-                    processing_attempts=attempts,
-                    processing_error=(
-                        f"Background processing failed (attempt {attempts}); re-armed"
-                    ),
-                )
+        again = attempts < EVENT_RECONCILE_MAX_ATTEMPTS
+        await session.execute(
+            update(model)
+            .where(id_col == event.id)
+            .values(
+                processed=not again,
+                processing_attempts=attempts,
+                processing_error=(
+                    f"{context} failed (attempt {attempts}); re-armed"
+                    if again
+                    else f"{context} failed after retry cap"
+                ),
             )
-            logger.warning(
-                "Event %s re-armed after failure (%d/%d)",
-                event_id, attempts, EVENT_RECONCILE_MAX_ATTEMPTS,
-            )
-        else:
-            await session.execute(
-                update(WebhookEvent)
-                .where(WebhookEvent.id == event.id)
-                .values(
-                    processed=True,
-                    processing_attempts=attempts,
-                    processing_error="Background processing failed after retry cap",
-                )
-            )
-            logger.error(
-                "Event %s permanently failed after %d attempts", event_id, attempts
-            )
+        )
+        (logger.warning if again else logger.error)(
+            "%s %s %s after %d attempt(s)",
+            label, event_id, "re-armed" if again else "permanently failed",
+            attempts,
+        )
         await session.commit()
     except Exception:
-        logger.exception("Failed to re-arm event %s", event_id)
+        logger.exception("Failed to re-arm %s %s", label.lower(), event_id)
+
+
+async def rearm_failed_event(session: AsyncSession, event_id: str) -> None:
+    """Re-arm a failed webhook event (the shared rearm(), webhook flavour)."""
+    await rearm(
+        session,
+        model=WebhookEvent,
+        lookup_col=WebhookEvent.razorpay_event_id,
+        id_col=WebhookEvent.id,
+        event_id=event_id,
+        label="Event",
+    )
 
 
 async def _process_event_background(

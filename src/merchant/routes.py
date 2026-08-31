@@ -9,12 +9,13 @@ mandates.
 
 Two pages, two trust levels:
 
-* ``GET /console`` — PUBLIC landing. What the engine recovers, the four chasers
-  and the payment rail it wraps, how the architecture stays safe, and how to
-  feed it (``POST /risks``). It renders product facts only (chase bounds come
-  straight from ``src/chasers/policy.py``); it never touches the database and
-  never shows a live number, so it is safe to serve to anyone on a public
-  deployment.
+* ``GET /console`` — PUBLIC landing. What the engine recovers, the five chasers
+  and the payment rail it wraps, what it does once the customer answers, how
+  the architecture stays safe, and how to feed it (``POST /risks``). It renders
+  product facts only (chase bounds come straight from ``src/chasers/policy.py``,
+  escalation rungs from ``src/receivables/ladder.py``); it never touches the
+  database and never shows a live number, so it is safe to serve to anyone on a
+  public deployment.
 
 * ``GET /console/live`` — the GATED console. Recovered rupees, recovery rate,
   per-chaser activity and the most recent recoveries, read live from the
@@ -43,7 +44,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import text
+from sqlalchemy import func, select
 
 from src.auth import client_ip
 from src.chasers.policy import RISK_POLICIES
@@ -51,6 +52,10 @@ from src.config import get_settings, reveal
 from src.database import async_session_factory
 from src.formatting import ist as _ist
 from src.formatting import money as _money
+from src.merchant import console_data
+from src.models import RecoveryCase, RetryAttempt
+from src.receivables.ladder import INVOICE_LADDER
+from src.receivables.models import MerchantAlert
 from src.recovery_link import SEP, b64, sign, unb64
 
 logger = logging.getLogger(__name__)
@@ -118,6 +123,31 @@ _CHASER_COPY: dict[str, dict[str, str]] = {
             "or the bank to recover."
         ),
     },
+}
+
+
+def _ladder_rungs() -> list[dict[str, Any]]:
+    """The B2B escalation rungs, for the landing's 'after the link' section.
+
+    Read from INVOICE_LADDER for the same reason the chaser bounds are read
+    from RISK_POLICIES: the page states what the engine enforces, so it must
+    read the enforcing structure rather than restate it.
+    """
+    return [
+        {
+            "tone": stage.tone,
+            "days": stage.days_past_due,
+            "addresses": _ROLE_LABELS[stage.addresses[-1]],
+        }
+        for stage in INVOICE_LADDER
+    ]
+
+
+# Contact roles as a merchant would name them, not as the schema stores them.
+_ROLE_LABELS = {
+    "ap_clerk": "accounts payable",
+    "finance_manager": "the finance manager",
+    "escalation": "their escalation contact",
 }
 
 
@@ -232,74 +262,111 @@ def _record_login_failure(ip: str) -> None:
 # One read-only session opened and closed here, not the get_session dependency:
 # these are pure reads, and a console that cannot reach the database must
 # degrade to an honest "not connected" state rather than a 500.
-_OVERVIEW_SQL = text(
-    """
-    SELECT
-      (SELECT COUNT(*) FROM recovery_cases)                          AS cases,
-      (SELECT COUNT(*) FROM recovery_cases WHERE state='recovered')  AS recovered_cases,
-      (SELECT COALESCE(SUM(amount_at_risk), 0) FROM recovery_cases)  AS at_risk_paise,
-      (SELECT COALESCE(SUM(amount_recovered), 0) FROM recovery_cases) AS recovered_paise,
-      (SELECT COALESCE(SUM(amount_recovered), 0) FROM recovery_cases
-         WHERE recovered_via_attempt_id IS NOT NULL)                 AS attributed_paise,
-      (SELECT COUNT(*) FROM retry_attempts WHERE result='pending')   AS pending,
-      (SELECT COUNT(*) FROM retry_attempts WHERE result='scheduled') AS scheduled
-    """
+#
+# ORM CONSTRUCTS, NOT text() STRINGS. These were hand-written SQL, and the
+# three bugs that produced are all the same bug: a string is not checked
+# against the schema, not translated per dialect, and not type-coerced on the
+# way back.
+#
+#   * `WHERE delivered = 0` on a Boolean column — SQLite says 0/1, Postgres
+#     refuses `boolean = integer`. The alerts feed was empty in production.
+#   * `avg(... max(x) ...)` in the aging module — a nested aggregate no
+#     dialect accepts. It never returned a number anywhere.
+#   * `SELECT ... recovered_at` through text() comes back a STRING on SQLite,
+#     because a raw string carries no column type for SQLAlchemy to coerce
+#     against — so date formatting blew up on the test dialect only.
+#
+# Written as select(Model.col), each of those is either impossible or caught
+# by mypy. The FILTER clauses below render as FILTER on Postgres and a CASE on
+# SQLite; SQLAlchemy owns that difference so this module does not have to.
+_OVERVIEW = select(
+    func.count(RecoveryCase.id),
+    func.count(RecoveryCase.id).filter(RecoveryCase.state == "recovered"),
+    func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0),
+    func.coalesce(func.sum(RecoveryCase.amount_recovered), 0),
+    func.coalesce(
+        func.sum(RecoveryCase.amount_recovered).filter(
+            RecoveryCase.recovered_via_attempt_id.is_not(None)
+        ),
+        0,
+    ),
 )
 
-_CHASER_SQL = text(
-    """
-    SELECT risk_type,
-      COUNT(*)                                            AS cases,
-      COUNT(*) FILTER (WHERE state='recovered')           AS recovered,
-      COALESCE(SUM(amount_at_risk), 0)                    AS at_risk,
-      COALESCE(SUM(amount_recovered), 0)                  AS recovered_amt,
-      COALESCE(SUM(amount_recovered)
-        FILTER (WHERE recovered_via_attempt_id IS NOT NULL), 0) AS attributed
-    FROM recovery_cases
-    GROUP BY risk_type
-    ORDER BY risk_type
-    """
+_CHASERS = (
+    select(
+        RecoveryCase.risk_type,
+        func.count(RecoveryCase.id),
+        func.count(RecoveryCase.id).filter(RecoveryCase.state == "recovered"),
+        func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0),
+        func.coalesce(func.sum(RecoveryCase.amount_recovered), 0),
+        func.coalesce(
+            func.sum(RecoveryCase.amount_recovered).filter(
+                RecoveryCase.recovered_via_attempt_id.is_not(None)
+            ),
+            0,
+        ),
+    )
+    .group_by(RecoveryCase.risk_type)
+    .order_by(RecoveryCase.risk_type)
 )
 
 # Recent recoveries show the merchant's own reference and the amount, never the
 # customer's identity: this page is aggregate by design.
-_RECENT_SQL = text(
-    """
-    SELECT risk_type, subject_ref, amount_recovered, recovered_at
-    FROM recovery_cases
-    WHERE state='recovered' AND recovered_at IS NOT NULL
-    ORDER BY recovered_at DESC
-    LIMIT 8
-    """
+_RECENT = (
+    select(
+        RecoveryCase.risk_type,
+        RecoveryCase.subject_ref,
+        RecoveryCase.amount_recovered,
+        RecoveryCase.recovered_at,
+    )
+    .where(RecoveryCase.state == "recovered", RecoveryCase.recovered_at.is_not(None))
+    .order_by(RecoveryCase.recovered_at.desc())
+    .limit(8)
 )
 
 # "Blocked" is every guardrail rejection (budget, blackout, amount ceiling,
-# ...). "Compliance violations" is the subset citing a specific regulatory
-# clause (currently just the RBI e-mandate rule) — a narrower, stronger claim
-# than "blocked", so it is counted separately rather than inferred from the
-# total. Both read straight off RetryAttempt, no new table.
-_GUARDRAIL_SQL = text(
-    """
-    SELECT
-      COUNT(*) FILTER (WHERE result='rejected')                        AS actions_blocked,
-      COUNT(*) FILTER (WHERE result='rejected'
-        AND guardrail_rejection_reason LIKE '%RBI%')                   AS compliance_violations
-    FROM retry_attempts
-    """
+# ...). "Compliance blocks" is the subset citing a specific regulatory clause
+# (currently just the RBI e-mandate rule) — a narrower, stronger claim than
+# "blocked", so it is counted separately rather than inferred from the
+# total. Named "blocks", not "violations": these are attempts the engine
+# PREVENTED before execution — a violation that reached a customer would be a
+# bug, and a counter that could read as "N violations happened" inverts what
+# the number proves. Both read straight off RetryAttempt, no new table.
+_GUARDRAIL = select(
+    func.count(RetryAttempt.id).filter(RetryAttempt.result == "rejected"),
+    func.count(RetryAttempt.id).filter(
+        RetryAttempt.result == "rejected",
+        RetryAttempt.guardrail_rejection_reason.like("%RBI%"),
+    ),
 )
 
 # Cases the engine has genuinely given up on — attempt budget spent, still
 # open, never recovered — surfaced honestly instead of quietly aging off the
 # dashboard. Mirrors cases.stop_reason()'s "attempt budget spent" branch.
-_EXCEPTIONS_SQL = text(
-    """
-    SELECT risk_type, subject_ref, amount_at_risk, attempts_used, max_attempts
-    FROM recovery_cases
-    WHERE state NOT IN ('recovered', 'exhausted', 'abandoned', 'expired', 'opted_out')
-      AND attempts_used >= max_attempts
-    ORDER BY opened_at DESC
-    LIMIT 10
-    """
+_EXCEPTIONS = (
+    select(
+        RecoveryCase.risk_type,
+        RecoveryCase.subject_ref,
+        RecoveryCase.amount_at_risk,
+        RecoveryCase.attempts_used,
+        RecoveryCase.max_attempts,
+    )
+    .where(
+        RecoveryCase.state.not_in(
+            ["recovered", "exhausted", "abandoned", "expired", "opted_out"]
+        ),
+        RecoveryCase.attempts_used >= RecoveryCase.max_attempts,
+    )
+    .order_by(RecoveryCase.opened_at.desc())
+    .limit(10)
+)
+
+# In-flight attempt counts. Separate from _OVERVIEW because they read a
+# different table — the old single statement stitched both together with
+# scalar subqueries, which is what made it a string in the first place.
+_INFLIGHT = select(
+    func.count(RetryAttempt.id).filter(RetryAttempt.result == "pending"),
+    func.count(RetryAttempt.id).filter(RetryAttempt.result == "scheduled"),
 )
 
 
@@ -311,49 +378,132 @@ def _label_icon(risk_type: str) -> tuple[str, str]:
 
 async def _console_data() -> dict[str, Any] | None:
     """Aggregate console numbers, or None when the database is unreachable."""
+    # Every query runs inside ONE session block. The receivables reads used to
+    # sit after it, using `session` once the context manager had already closed
+    # it — each wrapped in its own try/except, so the panel degraded to empty
+    # instead of failing loudly. A console that silently renders zeros is worse
+    # than one that says "not connected": the merchant reads the zeros as their
+    # business, not as a bug.
+    ar_aging: list[dict[str, Any]] = []
+    days_to_pay: float | None = None
+    promise_stats: dict[str, Any] = {"kept_rate": None}
+    alerts: list[dict[str, Any]] = []
+
     try:
         async with async_session_factory() as session:
-            overview = (await session.execute(_OVERVIEW_SQL)).mappings().one()
-            chaser_rows = (await session.execute(_CHASER_SQL)).mappings().all()
-            recent_rows = (await session.execute(_RECENT_SQL)).mappings().all()
-            guardrail = (await session.execute(_GUARDRAIL_SQL)).mappings().one()
-            exception_rows = (await session.execute(_EXCEPTIONS_SQL)).mappings().all()
+            (
+                cases,
+                recovered_cases,
+                at_risk_paise,
+                recovered_paise,
+                attributed_paise,
+            ) = (await session.execute(_OVERVIEW)).one()
+            chaser_rows = (await session.execute(_CHASERS)).all()
+            recent_rows = (await session.execute(_RECENT)).all()
+            actions_blocked, compliance_blocks = (
+                await session.execute(_GUARDRAIL)
+            ).one()
+            exception_rows = (await session.execute(_EXCEPTIONS)).all()
+            pending, scheduled = (await session.execute(_INFLIGHT)).one()
+
+            # ── The receivables panel (B2B layer) ────────────────────────
+            # Aging buckets, days-to-pay and promise effectiveness from the
+            # receivables layer's analytics; the alerts feed is the merchant's
+            # undelivered writeback queue. Aggregate and PII-free throughout:
+            # refs and amounts, never a customer email or phone.
+            from src.receivables import aging as ar_aging_mod
+
+            for bucket in await ar_aging_mod.aging_buckets(session):
+                ar_aging.append(
+                    {
+                        "label": bucket["label"],
+                        "count": bucket["count"],
+                        "outstanding": _money(int(bucket["outstanding_paise"])),
+                    }
+                )
+            days_to_pay = await ar_aging_mod.avg_days_to_pay(session)
+            promise_stats = await ar_aging_mod.promise_effectiveness(session)
+
+            # The features that shipped and were never surfaced. Each is one
+            # indexed read; they run in this same session block so a database
+            # that goes away mid-page fails the whole console honestly rather
+            # than rendering half a truth.
+            promises = await console_data.promise_panel(session)
+            plans = await console_data.plan_panel(session)
+            disputes = await console_data.dispute_panel(session)
+            voice = await console_data.voice_panel(session)
+            ladder = await console_data.ladder_panel(session)
+            health = await console_data.engine_health(session)
+            outstanding = await console_data.outstanding_total(session)
+            flight = await console_data.in_flight(session)
+            activity = await console_data.activity_feed(session)
+
+            alert_rows = (
+                await session.execute(
+                    select(
+                        MerchantAlert.event_type,
+                        MerchantAlert.account_ref,
+                        MerchantAlert.case_ref,
+                        MerchantAlert.created_at,
+                    )
+                    # `delivered.is_(False)`, not raw `delivered = 0`. The
+                    # column is Boolean: SQLite accepts the integer compare and
+                    # Postgres refuses it outright ("operator does not exist:
+                    # boolean = integer"), so the alerts feed worked in tests
+                    # and was permanently empty in production — swallowed by
+                    # the old per-query except.
+                    .where(MerchantAlert.delivered.is_(False))
+                    .order_by(MerchantAlert.created_at.desc())
+                    .limit(10)
+                )
+            ).mappings().all()
+            for row in alert_rows:
+                alerts.append(
+                    {
+                        "event_type": row["event_type"],
+                        "account_ref": row["account_ref"],
+                        "case_ref": row["case_ref"],
+                        "when": (
+                            _ist(row["created_at"]).strftime("%d %b, %H:%M")
+                            if row["created_at"] is not None
+                            else ""
+                        ),
+                    }
+                )
     except Exception:
         logger.exception("Merchant console data query failed")
         return None
 
-    cases = int(overview["cases"])
-    recovered_cases = int(overview["recovered_cases"])
+    cases = int(cases)
+    recovered_cases = int(recovered_cases)
 
     chasers: list[dict[str, Any]] = []
-    for row in chaser_rows:
-        rc = int(row["cases"])
-        rec = int(row["recovered"])
-        label, icon = _label_icon(str(row["risk_type"]))
+    for risk_type, rc, rec, at_risk, recovered_amt, attributed in chaser_rows:
+        rc, rec = int(rc), int(rec)
+        label, icon = _label_icon(str(risk_type))
         chasers.append(
             {
-                "risk_type": row["risk_type"],
+                "risk_type": risk_type,
                 "label": label,
                 "icon": icon,
                 "cases": rc,
                 "recovered": rec,
                 "rate": round(rec / rc * 100, 1) if rc else 0.0,
-                "at_risk": _money(int(row["at_risk"])),
-                "recovered_amt": _money(int(row["recovered_amt"])),
-                "attributed": _money(int(row["attributed"])),
+                "at_risk": _money(int(at_risk)),
+                "recovered_amt": _money(int(recovered_amt)),
+                "attributed": _money(int(attributed)),
             }
         )
 
     recent: list[dict[str, Any]] = []
-    for row in recent_rows:
-        recovered_at = row["recovered_at"]
-        label, icon = _label_icon(str(row["risk_type"]))
+    for risk_type, subject_ref, amount, recovered_at in recent_rows:
+        label, icon = _label_icon(str(risk_type))
         recent.append(
             {
                 "label": label,
                 "icon": icon,
-                "subject_ref": row["subject_ref"],
-                "amount": _money(int(row["amount_recovered"])),
+                "subject_ref": subject_ref,
+                "amount": _money(int(amount)),
                 "when": (
                     _ist(recovered_at).strftime("%d %b, %H:%M")
                     if recovered_at is not None
@@ -363,20 +513,17 @@ async def _console_data() -> dict[str, Any] | None:
         )
 
     exceptions: list[dict[str, Any]] = []
-    for row in exception_rows:
-        label, icon = _label_icon(str(row["risk_type"]))
+    for risk_type, subject_ref, at_risk, used, allowed in exception_rows:
+        label, icon = _label_icon(str(risk_type))
         exceptions.append(
             {
                 "label": label,
                 "icon": icon,
-                "subject_ref": row["subject_ref"],
-                "at_risk": _money(int(row["amount_at_risk"])),
-                "attempts_used": int(row["attempts_used"]),
-                "max_attempts": int(row["max_attempts"]),
-                "reason": (
-                    f"attempt budget spent "
-                    f"({row['attempts_used']}/{row['max_attempts']})"
-                ),
+                "subject_ref": subject_ref,
+                "at_risk": _money(int(at_risk)),
+                "attempts_used": int(used),
+                "max_attempts": int(allowed),
+                "reason": f"attempt budget spent ({used}/{allowed})",
             }
         )
 
@@ -384,20 +531,54 @@ async def _console_data() -> dict[str, Any] | None:
         "cases": cases,
         "recovered_cases": recovered_cases,
         "recovery_rate": round(recovered_cases / cases * 100, 1) if cases else 0.0,
-        "at_risk": _money(int(overview["at_risk_paise"])),
-        "recovered": _money(int(overview["recovered_paise"])),
-        "attributed": _money(int(overview["attributed_paise"])),
-        "pending": int(overview["pending"]),
-        "scheduled": int(overview["scheduled"]),
+        "at_risk": _money(int(at_risk_paise)),
+        "recovered": _money(int(recovered_paise)),
+        "attributed": _money(int(attributed_paise)),
+        "pending": int(pending),
+        "scheduled": int(scheduled),
         "chasers": chasers,
         "recent": recent,
         "has_data": cases > 0,
         # Scoreboard honesty: what the policy engine actually refused, not
-        # just what it approved. "0 compliance violations" only means
-        # something because this number is a live query, not a claim.
-        "actions_blocked": int(guardrail["actions_blocked"]),
-        "compliance_violations": int(guardrail["compliance_violations"]),
+        # just what it approved. "0 compliance blocks" only means something
+        # because this number is a live query, not a claim.
+        "actions_blocked": int(actions_blocked),
+        "compliance_blocks": int(compliance_blocks),
         "exceptions": exceptions,
+        # The B2B receivables panel: aging, days-to-pay, promise
+        # effectiveness, and the merchant's undelivered alerts feed — all
+        # from the receivables layer, all PII-free (refs and amounts only).
+        "ar_aging": ar_aging,
+        "ar_days_to_pay": days_to_pay,
+        "ar_promise": promise_stats,
+        "ar_alerts": alerts,
+        # ── Previously invisible ─────────────────────────────────────────
+        # Promises, plans, disputes, the voice queue and the dunning ladder
+        # all shipped with tables, sweeps and tests, and none of them had a
+        # merchant-facing surface: the console read three tables out of a
+        # dozen. src/merchant/console_data.py is the read layer.
+        "promises": promises,
+        "plans": plans,
+        "disputes": disputes,
+        "voice": voice,
+        "ladder": ladder,
+        # Is the engine ticking at all — the question every number above
+        # silently assumes a "yes" to.
+        "health": health,
+        # The BALANCE, not the opening figure. See console_data.
+        "outstanding": outstanding,
+        "flight": flight,
+        "activity": activity,
+        # The worklist, assembled from the panels above rather than re-read:
+        # everything the engine deliberately stopped short of and cannot
+        # resolve without a person. Empty is a real answer the page states.
+        "attention": console_data.attention_items(
+            disputes=disputes,
+            voice=voice,
+            plans=plans,
+            exceptions=exceptions,
+            health=health,
+        ),
     }
 
 
@@ -412,6 +593,7 @@ async def landing(request: Request) -> Any:
         {
             "merchant_name": settings.merchant_name or None,
             "chasers": _chaser_cards(),
+            "ladder_rungs": _ladder_rungs(),
             "authed": _session_valid(request),
         },
     )

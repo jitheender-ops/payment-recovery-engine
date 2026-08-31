@@ -199,7 +199,8 @@ class RetryExecutor:
 
         Args:
             payment_failure: The original failed payment record.
-            action_type: The action to execute (retry_now, switch_rail, nudge_customer, abandon).
+            action_type: The action to execute (retry_now, retry_at,
+                switch_rail, nudge_customer, abandon).
             target_rail: Target rail for switch_rail actions.
             idempotency_key: Unique key for this attempt.
             nudge_message: Customer message for nudge actions.
@@ -250,6 +251,7 @@ class RetryExecutor:
         customer_contact: str | None = None,
         description: str | None = None,
         notify_customer: bool = True,
+        offer_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Execute a recovery action for a case with NO PaymentFailure behind it —
@@ -270,6 +272,12 @@ class RetryExecutor:
         All link actions therefore deliver the link, except the self-serve pay
         route, where the customer is already standing at the checkout (it
         passes notify_customer=False and redirects them itself).
+
+        offer_id: a Razorpay offer id in the merchant's account, applied at
+        link creation (options.order.offers). The caller owns the "which touch
+        may carry it" rule; Razorpay owns the offer's validity and amount
+        rules. A refused/expired offer fails the link call and the attempt
+        records the failure — honest, and the next rung mints without it.
         """
         if action_type == "abandon":
             logger.info("Abandon action — no API call: case=%s", case.id)
@@ -289,12 +297,14 @@ class RetryExecutor:
                         customer_contact=customer_contact,
                         description=description,
                         target_rail=target_rail,
+                        offer_id=offer_id,
                     )
                 return await self._create_case_payment_link(
                     case, target_rail, idempotency_key,
                     description=description or nudge_message,
                     customer_email=customer_email,
                     customer_contact=customer_contact,
+                    offer_id=offer_id,
                 )
             else:
                 logger.warning("Unknown action type: %s", action_type)
@@ -318,18 +328,38 @@ class RetryExecutor:
         description: str | None = None,
         customer_email: str | None = None,
         customer_contact: str | None = None,
+        offer_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a Payment Link from a case (no PaymentFailure). See
         _create_payment_link for the rail-enforcement and idempotency notes —
         both apply identically here."""
+        from src.cases import outstanding_paise
+
         customer: dict[str, str] = {}
         if customer_email:
             customer["email"] = customer_email
         if customer_contact:
             customer["contact"] = customer_contact
 
+        # The link is for what is STILL OWED, not what was owed when the case
+        # opened. Those differ the moment a part payment lands — normal on a
+        # B2B invoice — and the case stays open until the balance clears, so
+        # every later chase used to mint a link for the full original total
+        # and ask the customer a second time for money already paid.
+        outstanding = outstanding_paise(case)
+        if outstanding <= 0:
+            # Nothing left to collect. The stopping rules should have closed
+            # this case before we got here; minting a zero-amount link would
+            # be refused by Razorpay anyway, and refusing it here says why.
+            logger.warning(
+                "Refusing to mint a link on case %s — nothing outstanding "
+                "(at risk %s, recovered %s)",
+                case.id, case.amount_at_risk, case.amount_recovered,
+            )
+            return {"success": False, "error": "nothing outstanding on this case"}
+
         link_data: dict[str, Any] = {
-            "amount": case.amount_at_risk,
+            "amount": outstanding,
             "currency": case.currency,
             "description": (
                 description[:160]
@@ -350,6 +380,11 @@ class RetryExecutor:
         }
         if target_rail == "upi":
             link_data["upi_link"] = True
+        # The merchant's incentive, relayed not computed: Razorpay applies the
+        # offer's own discount/cashback rules at checkout. Rides at create
+        # time — the API has no attach-later path for links.
+        if offer_id:
+            link_data["options"] = {"order": {"offers": [offer_id]}}
 
         result = await self._create_link(link_data)
 
@@ -366,7 +401,35 @@ class RetryExecutor:
             "short_url": result.get("short_url"),
             "target_rail": target_rail,
             "rail_fallback": result.get("rail_fallback", False),
+            "offer_id": offer_id,
         }
+
+    async def _notify_link(
+        self, link_id: str | None, customer_email: str | None, customer_contact: str | None
+    ) -> list[str]:
+        """
+        Send Razorpay's SMS/email notification for a link and report which
+        channels actually reached the customer — the attempt row records the
+        channel that reached them, not the one we intended (contact limits
+        are per-channel, and a nudge logged as "sent" with no channel cannot
+        be counted against any of them).
+        """
+        channels: list[str] = []
+        if not link_id:
+            return channels
+        try:
+            # Off the event loop for the same reason as payment_link.create.
+            if customer_contact:
+                await self._off_thread(self._client.payment_link.notifyBy, link_id, "sms")
+                channels.append("sms")
+                logger.info("SMS notification sent for link %s", link_id)
+            if customer_email:
+                await self._off_thread(self._client.payment_link.notifyBy, link_id, "email")
+                channels.append("email")
+                logger.info("Email notification sent for link %s", link_id)
+        except Exception:
+            logger.warning("Failed to send notification for link %s", link_id)
+        return channels
 
     async def _send_case_nudge(
         self,
@@ -377,6 +440,7 @@ class RetryExecutor:
         customer_contact: str | None = None,
         description: str | None = None,
         target_rail: str | None = None,
+        offer_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a Payment Link and notify the customer, case-driven. Mirrors
         _send_nudge for the no-PaymentFailure risk types. target_rail rides
@@ -387,27 +451,15 @@ class RetryExecutor:
             description=description or message,
             customer_email=customer_email,
             customer_contact=customer_contact,
+            offer_id=offer_id,
         )
 
         if not link_result.get("success"):
             return link_result
 
-        link_id = link_result.get("payment_link_id")
-        channels: list[str] = []
-        if link_id:
-            try:
-                if customer_contact:
-                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "sms")
-                    channels.append("sms")
-                    logger.info("SMS notification sent for link %s", link_id)
-                if customer_email:
-                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "email")
-                    channels.append("email")
-                    logger.info("Email notification sent for link %s", link_id)
-            except Exception:
-                logger.warning("Failed to send notification for link %s", link_id)
-
-        link_result["channels"] = channels
+        link_result["channels"] = await self._notify_link(
+            link_result.get("payment_link_id"), customer_email, customer_contact
+        )
         link_result["nudge_sent"] = True
         link_result["nudge_message"] = message
         return link_result
@@ -509,28 +561,12 @@ class RetryExecutor:
         if not link_result.get("success"):
             return link_result
 
-        # Then send notification
-        link_id = link_result.get("payment_link_id")
-        # Reported back so the attempt row records which channel actually
-        # reached the customer, not which one we intended to use. Contact limits
-        # are per-channel, and a nudge logged as "sent" with no channel cannot
-        # be counted against any of them.
-        channels: list[str] = []
-        if link_id:
-            try:
-                # Off the event loop for the same reason as payment_link.create.
-                if failure.customer_contact:
-                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "sms")
-                    channels.append("sms")
-                    logger.info("SMS notification sent for link %s", link_id)
-                if failure.customer_email:
-                    await self._off_thread(self._client.payment_link.notifyBy, link_id, "email")
-                    channels.append("email")
-                    logger.info("Email notification sent for link %s", link_id)
-            except Exception:
-                logger.warning("Failed to send notification for link %s", link_id)
-
-        link_result["channels"] = channels
+        # Then send notification — which channels actually reached them.
+        link_result["channels"] = await self._notify_link(
+            link_result.get("payment_link_id"),
+            failure.customer_email,
+            failure.customer_contact,
+        )
         link_result["nudge_sent"] = True
         link_result["nudge_message"] = message
         return link_result

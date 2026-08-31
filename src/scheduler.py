@@ -1,7 +1,7 @@
 """
 Background worker — the thing that makes deferred decisions actually happen.
 
-Eight sweeps, one tick:
+Nine sweeps, one tick:
 
     fire_due_retries()            an agent said "retry in 4 hours"; four hours have passed
     reconcile_events()            a webhook was stored but its background task never ran
@@ -9,9 +9,13 @@ Eight sweeps, one tick:
     reconcile_stale_attempts()    a write-ahead attempt was committed but its outcome never landed
     cancel_links_for_closed_cases()  links of finished cases die with them
     cancel_superseded_links()        an open case keeps only its newest link
-    expire_promises()             a promise-to-pay came due with no money (src/cases.py)
+    expire_promises()             a promise-to-pay came due (+grace) with no money (src/cases.py)
+    remind_promises()             a pending promise inside the 48h pre-due window gets its one
+                                  reminder — a real, budgeted contact through the chase pipeline
     chase_due_cases()             a chaser-driven case whose wait elapsed (cart, subscription,
                                   invoice, mandate — the risk types with no inbound webhook)
+    chase_due_accounts()          the B2B layer: one consolidated statement per buyer
+                                  account, staged by aging, inside the same bounds
     report_due_cases()            payment-failure cases whose wait elapsed with nothing to do
 
 Why this exists at all: `retry_at` was an advertised action that never took
@@ -34,19 +38,26 @@ import asyncio
 import contextlib
 import logging
 import time
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.actions import RetryAction
-from src.cases import due_cases, expire_promises, log_event
+from src.cases import (
+    due_cases,
+    expire_promises,
+    log_event,
+    promises_due_for_reminder,
+)
 from src.chasers.policy import RISK_POLICIES
 from src.config import get_settings
 from src.database import async_session_factory
-from src.ingestion.router import EVENT_RECONCILE_MAX_ATTEMPTS, attribute_captured_payload
+from src.ingestion.router import attribute_captured_payload, rearm
 from src.models import (
     PaymentFailure,
     RecoveryCase,
@@ -61,6 +72,8 @@ from src.orchestrator import (
     process_payment_failure,
     process_risk_event,
 )
+from src.receivables.ladder import is_b2b_contact_time
+from src.receivables.models import CaseDispute
 
 logger = logging.getLogger(__name__)
 
@@ -220,9 +233,7 @@ async def _fire_one(
 
     context = await orchestrator._build_failure_context(failure, session)
     action = RetryAction(
-        # Fires as a plain retry: the wait it asked for is over, and re-sending
-        # retry_at would park the row right back where it came from.
-        action="switch_rail" if attempt.target_rail else "retry_now",
+        action=_fired_action_type(attempt),  # type: ignore[arg-type]
         rail=attempt.target_rail,  # type: ignore[arg-type]
         reason=attempt.agent_reasoning or "scheduled retry",
         confidence=attempt.agent_confidence,
@@ -269,6 +280,28 @@ async def _fire_one(
     return True
 
 
+def _fired_action_type(attempt: RetryAttempt) -> str:
+    """
+    The action a parked attempt fires as — read from the row, not inferred.
+
+    Both fire paths used to reconstruct this as
+    ``"switch_rail" if attempt.target_rail else "retry_now"``, which couples
+    two unrelated facts: what the action IS, and whether it happens to carry
+    a rail preference. `retry_attempts.action_type` records the first one
+    directly and was simply ignored.
+
+    The coupling is not cosmetic — the guardrail keys several rules on the
+    action type. `check_mandate_predebit_notification` guards `retry_now`
+    only, so stamping a rail onto a mandate's parked retry re-labelled it
+    `switch_rail` and walked it straight past the RBI pre-debit notice. Rules
+    that must fire have to see the real action.
+
+    `retry_at` maps to `retry_now` because the wait it asked for is over —
+    re-sending `retry_at` would park the row right back where it came from.
+    """
+    return "retry_now" if attempt.action_type == "retry_at" else attempt.action_type
+
+
 async def _mark(
     session: AsyncSession, attempt: RetryAttempt, result: str, reason: str
 ) -> None:
@@ -276,6 +309,46 @@ async def _mark(
     attempt.executed_at = datetime.now(UTC)
     attempt.result_details = {"scheduler": reason}
     session.add(attempt)
+
+
+def _advance_ladder(
+    session: AsyncSession,
+    case: RecoveryCase,
+    policy: Any,
+    *,
+    now: datetime,
+    actor: str,
+) -> None:
+    """
+    Move a chaser case to its next rung after a fired attempt resolves.
+
+    Same floor as chase_case's own tail — a re_chase_hours gap so the due-case
+    sweep does not re-chase immediately, and a spent budget closes the case
+    rather than leaving it open with a stale next_action_at for the sweep to
+    knock on forever.
+
+    Its own function because BOTH outcomes need it. It used to sit inline
+    after the execute call, so every early return above it — a guardrail
+    rejection most of all — left the case due at an instant already in the
+    past, and the next tick chased it again with no gap at all.
+    """
+    if case.state != "open":
+        return
+    if case.attempts_used >= case.max_attempts:
+        from src.cases import close_case
+
+        close_case(
+            case, "exhausted",
+            f"attempt budget spent ({case.attempts_used}/{case.max_attempts})",
+        )
+        log_event(
+            session, case, "closed", actor=actor,
+            state="exhausted", reason=case.close_reason,
+        )
+        return
+    next_at = case.next_action_at
+    if next_at is None or _aware(next_at) <= now:
+        case.next_action_at = now + timedelta(hours=policy.re_chase_hours)
 
 
 async def _fire_case_attempt(
@@ -332,7 +405,7 @@ async def _fire_case_attempt(
     context = await orchestrator._build_case_context(case, policy, session, now=now, meta=meta)
 
     action = RetryAction(
-        action="switch_rail" if attempt.target_rail else "retry_now",
+        action=_fired_action_type(attempt),  # type: ignore[arg-type]
         rail=attempt.target_rail,  # type: ignore[arg-type]
         reason=attempt.agent_reasoning or "scheduled case retry",
         confidence=attempt.agent_confidence,
@@ -344,6 +417,14 @@ async def _fire_case_attempt(
         reason = "; ".join(guardrail.rejection_reasons)
         await _mark(session, attempt, "rejected", reason)
         log_event(session, case, "stopped", reason=reason, at="fire_time", actor="scheduler")
+        # The ladder advances on a rejection too. Returning here without it
+        # left next_action_at at the fired instant — already in the past — so
+        # the due-case sweep re-chased the case on the very next tick and the
+        # policy's re_chase_hours floor was silently skipped. The slot the
+        # attempt spent is NOT refunded: chase_case counts guardrail
+        # rejections on purpose, so a case that keeps tripping the gate runs
+        # out of budget instead of looping through the agent forever.
+        _advance_ladder(session, case, policy, now=now, actor="scheduler")
         await session.commit()
         logger.info("Scheduled case retry rejected at fire time: %s — %s", attempt.id, reason)
         return False
@@ -362,24 +443,7 @@ async def _fire_case_attempt(
         customer_contact=event.customer_contact if event is not None else None,
     )
 
-    # The ladder's next rung: same floor as chase_case so the due-case sweep
-    # does not re-chase immediately, and a spent budget closes the case.
-    if case.state == "open":
-        if case.attempts_used >= case.max_attempts:
-            from src.cases import close_case
-
-            close_case(
-                case, "exhausted",
-                f"attempt budget spent ({case.attempts_used}/{case.max_attempts})",
-            )
-            log_event(
-                session, case, "closed", actor="scheduler",
-                state="exhausted", reason=case.close_reason,
-            )
-        else:
-            next_at = case.next_action_at
-            if next_at is None or _aware(next_at) <= now:
-                case.next_action_at = now + timedelta(hours=policy.re_chase_hours)
+    _advance_ladder(session, case, policy, now=now, actor="scheduler")
 
     await session.commit()
     logger.info(
@@ -387,6 +451,70 @@ async def _fire_case_attempt(
         case.id, attempt.idempotency_key, attempt.result,
     )
     return True
+
+
+async def _reconcile_sweep(
+    session: AsyncSession,
+    *,
+    model: type[Any],
+    lookup_col: Any,
+    stale_where: Sequence[Any],
+    handle: Any,
+    event_ref: Any,
+    label: str,
+    now: datetime,
+) -> int:
+    """
+    The shared body of both reconcile sweeps: find stale unprocessed rows,
+    claim each atomically (whoever flips processed owns it — with
+    WEB_CONCURRENCY > 1 two schedulers can select the same row in the same
+    second; the idempotency key makes duplicate processing safe but wasted),
+    run the handler, and on failure re-arm under the shared cap.
+
+    The age threshold is what keeps this from racing the in-flight background
+    task that is still legitimately running.
+    """
+    settings = get_settings()
+    cutoff = now - timedelta(seconds=settings.event_reconcile_after_seconds)
+
+    stale = await session.execute(
+        select(model)
+        .where(model.processed.is_(False), model.received_at <= cutoff, *stale_where)
+        .order_by(model.received_at)
+        .limit(settings.scheduler_batch_size)
+    )
+
+    recovered = 0
+    for event in stale.scalars().all():
+        claimed = await session.execute(
+            update(model)
+            .where(model.id == event.id, model.processed.is_(False))
+            .values(processed=True)
+        )
+        if claimed.rowcount != 1:  # type: ignore[attr-defined]
+            logger.debug("%s claimed by another worker", event_ref(event))
+            continue
+        await session.commit()
+
+        ref = event_ref(event)
+        try:
+            await handle(event, session)
+            await session.commit()
+            recovered += 1
+            logger.info("Reconciled dropped %s: %s", label, ref)
+        except Exception:
+            logger.exception("Reconcile failed for %s %s", label, ref)
+            await session.rollback()
+            await rearm(
+                session,
+                model=model,
+                lookup_col=lookup_col,
+                id_col=model.id,
+                event_id=ref,
+                label=label.capitalize(),
+                context="Reconcile attempt",
+            )
+    return recovered
 
 
 async def reconcile_events(session: AsyncSession, *, now: datetime | None = None) -> int:
@@ -406,98 +534,29 @@ async def reconcile_events(session: AsyncSession, *, now: datetime | None = None
     paid. The first-pass handler re-arms its failures under the same cap, so
     an event lands here only if that task died before it could even try.
 
-    The age threshold is what keeps this from racing the in-flight task that is
-    still legitimately running.
-
-    Transient failures no longer consume the event. The old sweep claimed the
-    row (processed=True) and gave up on the first exception — a database blip
-    permanently skipped a real payment failure. Now a failing event counts one
-    processing_attempt and is RE-ARMED (processed=False) until it has failed
-    EVENT_RECONCILE_MAX_ATTEMPTS times; only then does it rest with the error
-    recorded. A deterministically-broken payload still stops eating the batch.
+    Transient failures do not consume the event: it is RE-ARMED until the
+    shared cap, then rests with the error recorded — a database blip no
+    longer loses a payment, and a deterministically-broken payload stops
+    eating the batch.
     """
     now = now or datetime.now(UTC)
-    settings = get_settings()
-    cutoff = now - timedelta(seconds=settings.event_reconcile_after_seconds)
 
-    stale = await session.execute(
-        select(WebhookEvent)
-        .where(
-            WebhookEvent.processed.is_(False),
-            WebhookEvent.event_type.in_(["payment.failed", "payment.captured"]),
-            WebhookEvent.received_at <= cutoff,
-        )
-        .order_by(WebhookEvent.received_at)
-        .limit(settings.scheduler_batch_size)
+    async def handle(event: WebhookEvent, session: AsyncSession) -> None:
+        if event.event_type == "payment.failed":
+            await process_payment_failure(event, session)
+        else:
+            await attribute_captured_payload(session, event.payload)
+
+    return await _reconcile_sweep(
+        session,
+        model=WebhookEvent,
+        lookup_col=WebhookEvent.razorpay_event_id,
+        stale_where=[WebhookEvent.event_type.in_(["payment.failed", "payment.captured"])],
+        handle=handle,
+        event_ref=lambda e: e.razorpay_event_id,
+        label="event",
+        now=now,
     )
-
-    recovered = 0
-    for event in stale.scalars().all():
-        # Claim it the same way fire_due_retries claims an attempt. With
-        # WEB_CONCURRENCY > 1 every uvicorn worker runs its own scheduler, so
-        # two of them can select the same stale event in the same second.
-        # Duplicate processing is not a double charge — the idempotency key is
-        # UNIQUE and the orchestrator now exits cleanly when it loses that race
-        # — but it is wasted work and two contradictory log lines about the
-        # same payment. Whoever flips processed owns the event.
-        claimed = await session.execute(
-            update(WebhookEvent)
-            .where(WebhookEvent.id == event.id, WebhookEvent.processed.is_(False))
-            .values(processed=True)
-        )
-        if claimed.rowcount != 1:  # type: ignore[attr-defined]
-            logger.debug("Event %s claimed by another worker", event.razorpay_event_id)
-            continue
-        await session.commit()
-
-        try:
-            if event.event_type == "payment.failed":
-                await process_payment_failure(event, session)
-            else:
-                await attribute_captured_payload(session, event.payload)
-            await session.commit()
-            recovered += 1
-            logger.info("Reconciled dropped event: %s", event.razorpay_event_id)
-        except Exception:
-            logger.exception("Reconcile failed for %s", event.razorpay_event_id)
-            await session.rollback()
-            attempts = (event.processing_attempts or 0) + 1
-            if attempts < EVENT_RECONCILE_MAX_ATTEMPTS:
-                # Re-arm: a transient failure gets another try on a later tick.
-                await session.execute(
-                    update(WebhookEvent)
-                    .where(WebhookEvent.id == event.id)
-                    .values(
-                        processed=False,
-                        processing_attempts=attempts,
-                        processing_error=f"Reconcile attempt {attempts} failed; re-armed",
-                    )
-                )
-                logger.warning(
-                    "Reconcile failed for %s (attempt %d/%d) — re-armed for retry",
-                    event.razorpay_event_id,
-                    attempts,
-                    EVENT_RECONCILE_MAX_ATTEMPTS,
-                )
-            else:
-                # Give up with the error recorded — visible in the Operations
-                # view instead of looping forever.
-                await session.execute(
-                    update(WebhookEvent)
-                    .where(WebhookEvent.id == event.id)
-                    .values(
-                        processed=True,
-                        processing_attempts=attempts,
-                        processing_error="Reconciliation failed after retry cap",
-                    )
-                )
-                logger.error(
-                    "Reconcile permanently failed for %s after %d attempts",
-                    event.razorpay_event_id,
-                    attempts,
-                )
-            await session.commit()
-    return recovered
 
 
 async def reconcile_stale_attempts(
@@ -857,6 +916,65 @@ async def chase_due_cases(
     return chased
 
 
+async def remind_promises(
+    session: AsyncSession, *, now: datetime | None = None, limit: int | None = None
+) -> int:
+    """
+    Send the one pre-due reminder each pending promise is owed. Returns how
+    many were handled (sent or skipped-with-reason — both stamp reminded_at).
+
+    Memory decay is the top reason promises break, and the dunning research's
+    answer is a friendly reminder ~48h before the date with the payment link
+    repeated. The reminder is a REAL contact: orchestrator.send_promise_reminder
+    runs it through the guardrail and spends an attempt slot, because a promise
+    buys silence for the CHASE, not a free lane to remind from.
+
+    `reminded_at` is stamped on EVERY terminal outcome — sent, guardrail-
+    refused, no-policy — so no path re-fires next tick. The one case where
+    the marker is deliberately NOT stamped: an exception, because the promise
+    deserves its reminder when the blip clears.
+    """
+    now = now or datetime.now(UTC)
+    orchestrator = get_orchestrator()
+    batch = limit or get_settings().scheduler_batch_size
+
+    due = await promises_due_for_reminder(session, now=now, limit=batch)
+    if not due:
+        return 0
+
+    handled = 0
+    for promise in due:
+        case = await session.get(RecoveryCase, promise.recovery_case_id)
+        if case is None:  # pragma: no cover — orphan promise
+            promise.reminded_at = now
+            continue
+        try:
+            outcome = await orchestrator.send_promise_reminder(
+                case, promise, session, now=now
+            )
+            promise.reminded_at = now
+            await session.commit()
+            if outcome not in ("success", "already_sent"):
+                log_event(
+                    session,
+                    case,
+                    "promise_reminder_skipped",
+                    promise_id=str(promise.id),
+                    outcome=outcome,
+                )
+                await session.commit()
+            handled += 1
+        except Exception:
+            # No reminded_at stamp: the reminder deserves another chance once
+            # the blip clears. Rolled back so the promise's rows stay clean.
+            logger.exception(
+                "Promise reminder failed for %s — will retry next tick",
+                promise.id,
+            )
+            await session.rollback()
+    return handled
+
+
 async def reconcile_risk_events(
     session: AsyncSession, *, now: datetime | None = None
 ) -> int:
@@ -873,73 +991,271 @@ async def reconcile_risk_events(
     shared cap; only a deterministically-broken payload rests.
     """
     now = now or datetime.now(UTC)
-    settings = get_settings()
-    cutoff = now - timedelta(seconds=settings.event_reconcile_after_seconds)
-
-    stale = await session.execute(
-        select(RiskEvent)
-        .where(
-            RiskEvent.processed.is_(False),
-            RiskEvent.received_at <= cutoff,
-        )
-        .order_by(RiskEvent.received_at)
-        .limit(settings.scheduler_batch_size)
+    return await _reconcile_sweep(
+        session,
+        model=RiskEvent,
+        lookup_col=RiskEvent.event_id,
+        stale_where=[],
+        handle=process_risk_event,
+        event_ref=lambda e: e.event_id,
+        label="risk event",
+        now=now,
     )
 
-    recovered = 0
-    for event in stale.scalars().all():
-        # Claim it: whoever flips processed owns the event. With more than one
-        # worker, two schedulers can select the same stale event in the same
-        # second; the idempotency key makes duplicate processing safe, but it
-        # is still wasted work.
-        claimed = await session.execute(
-            update(RiskEvent)
-            .where(RiskEvent.id == event.id, RiskEvent.processed.is_(False))
-            .values(processed=True)
+
+# ── AR account consolidation (B2B receivables) ─────────────────────────────
+
+
+async def chase_due_accounts(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    limit: int = 50,
+) -> int:
+    """
+    The B2B receivables sweep: one contact per buyer account per dunning rung.
+
+    A buyer with four overdue invoices is one account with one AR balance, not
+    four independent chases to the same desk. This sweep enforces that by
+    SCHEDULING, not by sending:
+
+      * it places the account on the ladder rung its oldest invoice's aging
+        demands (stage_for_aging — the tone follows the most-injured invoice)
+      * it picks ONE carrier case (the least-contacted joiner, so link
+        minting and budget rotate across the account's invoices) and leaves
+        it due — chase_due_cases, running right after this sweep in the same
+        tick, chases it through the full existing pipeline: agent → guardrail
+        → write-ahead attempt → Razorpay link + notify. That chase IS the
+        rung's contact; the per-case pipeline stays the only path that spends
+        budget or mints links, so every money-safety property holds unchanged
+      * every OTHER joiner's next_action_at moves out to the next rung's gap,
+        which is what stops the same person getting four separate messages
+      * one ar_contact_log row records that this rung's single contact
+        covered exactly these invoices — the fact retry_attempts cannot
+        express, because it is per-case
+
+    Idempotency is the log: a rung already fired for the account (latest
+    log's stage matches what aging demands) means the only due work is the
+    carrier's 72h re_chase floor expiring mid-rung, and the answer is to
+        defer it to the next rung's gap — the ladder's 6-7 day rungs replace
+    the flat 72h cadence for account-linked invoices.
+
+    Honours the same bounds as everything else: the B2B contact window
+    (Mon–Fri 09:30–18:30 IST — outside it, every due invoice case is deferred
+    to the window's edge, spending nothing, the same defer-not-burn pattern
+    the IST blackout uses), the per-case 4-contact budget, and open disputes
+    (a disputed case is excluded from the statement entirely until a human
+    resolves it). Stage 3 (urgent) also raises the human call task —
+    merchant-side work that never touches the customer's contact budget.
+    """
+    # is_b2b_contact_time is imported at module level (see the import block at
+    # the top): it is the one name here that is a wall-clock RULE rather than a
+    # helper, and a function-local import gives tests no seam to hold it open
+    # without rewiring next_b2b_window() for everyone else.
+    from src.receivables.ladder import (
+        next_b2b_window,
+        next_stage_gap_hours,
+        stage_for_aging,
+    )
+    from src.receivables.models import ArAccount, ArContactLog
+    from src.receivables.statement import compose_stage_message
+
+    now = now or datetime.now(UTC)
+
+    # Every due open invoice case, account-linked or not. The window check
+    # below needs the ungrouped set; the account loop re-uses the rows.
+    due_invoices = (
+        (
+            await session.execute(
+                select(RecoveryCase)
+                .where(
+                    RecoveryCase.risk_type == "invoice_overdue",
+                    RecoveryCase.state == "open",
+                    RecoveryCase.next_action_at.isnot(None),
+                    RecoveryCase.next_action_at <= now,
+                )
+                .order_by(RecoveryCase.due_at)
+                .limit(limit * 5)
+            )
         )
-        if claimed.rowcount != 1:  # type: ignore[attr-defined]
+        .scalars()
+        .all()
+    )
+
+    # The B2B window is a timing rule, not a case verdict — and an invoice
+    # is a B2B contact whether or not the merchant supplied an account_ref.
+    # Defer to the window's edge rather than letting the per-case sweep burn
+    # a budget slot on a Sunday morning.
+    if not is_b2b_contact_time(now):
+        edge = next_b2b_window(now)
+        moved = 0
+        for case in due_invoices:
+            case.next_action_at = edge
+            moved += 1
+        if moved:
+            await session.commit()
+            logger.info(
+                "AR consolidation: %d invoice case(s) deferred to the B2B "
+                "window (%s)",
+                moved, edge.isoformat(),
+            )
+        return 0
+
+    # Only account-linked cases consolidate; the rest keep the per-case
+    # chase exactly as before this layer existed.
+    by_account: dict[uuid.UUID, list[RecoveryCase]] = {}
+    for case in due_invoices:
+        if case.account_id is not None:
+            by_account.setdefault(case.account_id, []).append(case)
+    if not by_account:
+        return 0
+
+    consolidated = 0
+    for account_id, cases in list(by_account.items())[:limit]:
+        account = await session.get(ArAccount, account_id)
+        if account is None:  # pragma: no cover — backfill guarantees presence
             continue
+
+        # Exclude disputed cases: the freeze is total until a human answers.
+        undisputed: list[RecoveryCase] = []
+        for case in cases:
+            dispute = await session.scalar(
+                select(CaseDispute).where(
+                    CaseDispute.case_id == case.id,
+                    CaseDispute.status == "open",
+                )
+            )
+            if dispute is None:
+                undisputed.append(case)
+        # Cases with budget left may join the statement; a spent case is
+        # chase_due_cases' to close as exhausted, not this sweep's.
+        joiners: list[RecoveryCase] = [
+            c for c in undisputed
+            if c.attempts_used < c.max_attempts and c.due_at is not None
+        ]
+        if not joiners:
+            continue
+
+        # Coerce every joiner's due_at to aware UTC once, up front — DB
+        # dialects disagree on awareness (Postgres returns aware, SQLite
+        # naive) and every rung decision below reads these.
+        aware_due: dict[uuid.UUID, datetime] = {}
+        for c in joiners:
+            due = c.due_at
+            assert due is not None  # narrowed by the joiners filter
+            aware_due[c.id] = due if due.tzinfo else due.replace(tzinfo=UTC)
+
+        # The aging clock places the account on its rung: the OLDEST joiner's
+        # days-past-due decides the tone, because a statement must match the
+        # most-injured invoice, not the average one.
+        oldest_due = min(aware_due.values())
+        stage = stage_for_aging(max(0, (now - oldest_due).days))
+        if stage is None:  # pragma: no cover — stage_for_aging is total ≥ 0
+            continue
+
+        # Idempotency: this rung already fired for the account. The only due
+        # work is a mid-rung backoff expiry — defer it to the next rung's
+        # gap and contact nobody. The comparison is exact (not >=) on
+        # purpose: if the oldest invoice was paid and the account's aging
+        # SOFTENED, the remaining balance deserves a statement at the tone
+        # its current aging demands, not silence until aging re-passes the
+        # old rung.
+        latest_log = await session.scalar(
+            select(ArContactLog)
+            .where(ArContactLog.account_id == account_id)
+            .order_by(ArContactLog.created_at.desc())
+            .limit(1)
+        )
+        if latest_log is not None and latest_log.stage_level == stage.level:
+            gap = timedelta(hours=next_stage_gap_hours(stage.level))
+            for case in joiners:
+                case.next_action_at = now + gap
+            await session.commit()
+            continue
+
+        # Compose the rung's statement — the record of what this single
+        # contact said and which invoices it covered.
+        statement_cases = [
+            {
+                "subject_ref": c.subject_ref,
+                "due_at": aware_due[c.id],
+                "amount_at_risk": c.amount_at_risk,
+                "amount_recovered": c.amount_recovered,
+                "pay_url": None,  # per-invoice links stay on the case pipeline
+            }
+            for c in joiners
+        ]
+        message = compose_stage_message(
+            statement_cases,
+            tone=stage.tone,
+            merchant_name=get_settings().merchant_name or "the merchant",
+            # The customer-facing link is the carrier case's recovery page,
+            # minted by the per-case chase this tick. The statement page for
+            # whole accounts is the named upgrade (docs/receivables-
+            # integration-plan.md); an empty link renders a plain reminder.
+            statement_link="",
+            now=now,
+        )
+        session.add(
+            ArContactLog(
+                account_id=account_id,
+                stage_level=stage.level,
+                case_refs=[
+                    {"ref": c.subject_ref, "case_id": str(c.id)} for c in joiners
+                ],
+                channels=list(stage.channels),
+                sms_copy=message["sms"],
+                email_subject=message["subject"],
+                planned_for=now,
+                # NULL on purpose: this layer schedules, it does not send.
+                # The delivery record is the carrier's retry_attempts row in
+                # this same tick; a reconcile pass can stamp sent_at later.
+                sent_at=None,
+            )
+        )
+
+        # The carrier: least-contacted joiner (then oldest) — budget and
+        # link minting rotate across the account's invoices over the ladder,
+        # so a multi-invoice buyer's every invoice eventually gets its link.
+        carrier = min(
+            joiners,
+            key=lambda c: (c.attempts_used, aware_due[c.id]),
+        )
+        gap = timedelta(hours=next_stage_gap_hours(stage.level))
+        for case in joiners:
+            if case is not carrier:
+                case.next_action_at = now + gap
+        # The carrier stays due: chase_due_cases runs after this sweep in
+        # the same tick and delivers the rung's contact through the full
+        # per-case pipeline.
+
+        # Stage 3 (urgent) raises the human call task — merchant-side work,
+        # never budget spend.
+        if "call_task" in stage.channels:
+            from src.receivables.tasks import raise_call_task
+
+            await raise_call_task(
+                session,
+                account_id=account_id,
+                account_ref=account.account_ref,
+                detail={
+                    "stage": stage.tone,
+                    "total_outstanding": message["statement"]["total_outstanding"],
+                    "oldest_days": message["statement"]["oldest_days"],
+                    "case_refs": [c.subject_ref for c in joiners],
+                },
+            )
+
+        consolidated += 1
+        logger.info(
+            "AR rung fired: account=%s stage=%d (%s) carrier=%s covering=%d "
+            "case(s) — carrier stays due for the per-case pipeline",
+            account.account_ref, stage.level, stage.tone,
+            carrier.subject_ref, len(joiners),
+        )
         await session.commit()
 
-        try:
-            await process_risk_event(event, session)
-            await session.commit()
-            recovered += 1
-            logger.info("Reconciled dropped risk event: %s", event.event_id)
-        except Exception:
-            logger.exception("Reconcile failed for risk event %s", event.event_id)
-            await session.rollback()
-            attempts = (event.processing_attempts or 0) + 1
-            if attempts < EVENT_RECONCILE_MAX_ATTEMPTS:
-                await session.execute(
-                    update(RiskEvent)
-                    .where(RiskEvent.id == event.id)
-                    .values(
-                        processed=False,
-                        processing_attempts=attempts,
-                        processing_error=f"Reconcile attempt {attempts} failed; re-armed",
-                    )
-                )
-                logger.warning(
-                    "Reconcile failed for risk event %s (attempt %d/%d) — re-armed",
-                    event.event_id, attempts, EVENT_RECONCILE_MAX_ATTEMPTS,
-                )
-            else:
-                await session.execute(
-                    update(RiskEvent)
-                    .where(RiskEvent.id == event.id)
-                    .values(
-                        processed=True,
-                        processing_attempts=attempts,
-                        processing_error="Reconciliation failed after retry cap",
-                    )
-                )
-                logger.error(
-                    "Reconcile permanently failed for risk event %s after %d attempts",
-                    event.event_id, attempts,
-                )
-            await session.commit()
-    return recovered
+    return consolidated
 
 
 async def report_due_cases(session: AsyncSession, *, now: datetime | None = None) -> int:
@@ -1003,6 +1319,30 @@ async def _stamp_heartbeat(session: AsyncSession, counts: dict[str, int], now: d
     await session.flush()
 
 
+async def _reconcile_plans(session: AsyncSession) -> int:
+    """Plan verdicts, wrapped so a bad pass cannot kill the tick."""
+    try:
+        from src.receivables.plans import reconcile_plans
+
+        return await reconcile_plans(session)
+    except Exception:
+        logger.exception("Plan reconcile failed — continuing")
+        await session.rollback()
+        return 0
+
+
+async def _deliver_alerts(session: AsyncSession) -> int:
+    """Merchant-alert writeback, wrapped so a bad endpoint cannot kill the tick."""
+    try:
+        from src.receivables.alerts import deliver_pending_alerts
+
+        return await deliver_pending_alerts(session)
+    except Exception:
+        logger.exception("Alert delivery failed — continuing")
+        await session.rollback()
+        return 0
+
+
 async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[str, int]:
     """One full pass. Returns what each sweep did, for logs and for tests."""
     now = now or datetime.now(UTC)
@@ -1030,10 +1370,31 @@ async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[st
             session, orchestrator, now=now
         ),
         "promises_expired": await expire_promises(session, now=now),
+        # The pre-due half of the promise lifecycle: the reminder fires
+        # BEFORE expire_promises could ever see the promise break.
+        "promises_reminded": await remind_promises(session, now=now),
+        # The receivables plan verdicts: defaulted/completed stamps and their
+        # merchant alerts. Runs after expire_promises so a missed instalment's
+        # promise is already broken — one clock, one authority.
+        "plans_reconciled": await _reconcile_plans(session),
+        # The B2B layer runs BEFORE the per-case sweep, and the order is a
+        # correctness property, not a preference. chase_due_accounts picks ONE
+        # carrier case per buyer account, defers every other joiner, and leaves
+        # the carrier due so the per-case sweep below delivers the rung's single
+        # contact. Run the other way round (as this dict once did) and all three
+        # of its guarantees break at once: every joiner is contacted separately
+        # (the buyer gets four messages, which is the exact harm this layer
+        # exists to prevent), the Mon–Fri B2B window is skipped because only
+        # this sweep enforces it, and the consolidation then finds nothing due —
+        # the per-case sweep has already pushed every next_action_at forward —
+        # so no ar_contact_log row is ever written and the ladder never fires.
+        "accounts_consolidated": await chase_due_accounts(session, now=now),
         # Chase BEFORE report: the report only counts what the chase left
         # behind (payment-failure cases waiting on their next webhook).
         "cases_chased": await chase_due_cases(session, now=now, deadline=tick_deadline),
         "due_cases_reported": await report_due_cases(session, now=now),
+        # The writeback drain: queued merchant alerts → HMAC-signed POSTs.
+        "alerts_delivered": await _deliver_alerts(session),
     }
     await _stamp_heartbeat(session, counts, now)
     await session.commit()

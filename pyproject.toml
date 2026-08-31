@@ -112,3 +112,21 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["pandas.*", "tabulate.*", "yaml.*", "joblib.*", "sklearn.*", "plotly.*", "razorpay.*", "requests.*", "streamlit.*", "xgboost.*"]
 ignore_missing_imports = true
+
+# `modal` is deliberately NOT a project dependency: eval/modal_llm_server.py is
+# a deploy script for the eval GPU server, imported by nothing and run only by
+# `modal deploy`. Installing modal (and, transitively, its client stack) into
+# CI to type-check one unreferenced file is the wrong trade — but CI runs
+# `mypy src scripts eval`, so without this the gate fails on every commit for a
+# missing import that is missing on purpose. It had been red on main for
+# several commits before anyone connected the two.
+[[tool.mypy.overrides]]
+module = ["modal.*"]
+ignore_missing_imports = true
+
+# With modal untyped, --strict's disallow_untyped_decorators fires on every
+# @app.function / @modal.concurrent / @modal.web_server. Scoped to this one
+# module so the flag keeps its teeth everywhere else.
+[[tool.mypy.overrides]]
+module = ["eval.modal_llm_server"]
+disallow_untyped_decorators = false

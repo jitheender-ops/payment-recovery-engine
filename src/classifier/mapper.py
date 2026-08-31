@@ -7,6 +7,7 @@ a panel will flag. This is pure lookup + rule matching against a YAML config.
 
 from __future__ import annotations
 
+import functools
 import logging
 from pathlib import Path
 from typing import Any
@@ -101,29 +102,27 @@ class ClassifierMapper:
         error_step: str | None,
         error_reason: str | None,
     ) -> bool:
-        """Check if all fields specified in a rule match the input."""
-        if "error_reason" in rule:
-            if not error_reason or rule["error_reason"] != error_reason:
+        """Check if all fields specified in a rule match the input.
+
+        Every rule field must be both present in the input and equal to the
+        rule's value; `error_code` is the one always-present field and so
+        has no extra presence check. The presence rules exist because a
+        rule keyed on a field the payload left empty would otherwise match
+        every payload whose field is empty too — a "error_reason: X" rule
+        must not fire on a payment with no reason at all.
+        """
+        actual = {
+            "error_reason": error_reason,
+            "error_step": error_step,
+            "error_source": error_source,
+        }
+        for field, value in actual.items():
+            if field in rule and (not value or rule[field] != value):
                 return False
-        if "error_step" in rule:
-            if not error_step or rule["error_step"] != error_step:
-                return False
-        if "error_source" in rule:
-            if not error_source or rule["error_source"] != error_source:
-                return False
-        if "error_code" in rule:
-            if rule["error_code"] != error_code:
-                return False
-        return True
+        return "error_code" not in rule or rule["error_code"] == error_code
 
 
-# Module-level singleton for convenience
-_mapper: ClassifierMapper | None = None
-
-
+@functools.cache
 def get_classifier() -> ClassifierMapper:
     """Return a cached ClassifierMapper instance."""
-    global _mapper
-    if _mapper is None:
-        _mapper = ClassifierMapper()
-    return _mapper
+    return ClassifierMapper()

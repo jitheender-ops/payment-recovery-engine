@@ -20,7 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.audit_chain import stamp_unhashed_events, verify_chain  # noqa: E402
+from src.audit_chain import (  # noqa: E402
+    AuditChainNotKeyedError,
+    stamp_unhashed_events,
+    verify_chain,
+)
 from src.database import async_session_factory  # noqa: E402
 
 
@@ -48,10 +52,14 @@ def main() -> None:
         parser.print_help()
         raise SystemExit(1)
 
-    if args.stamp:
-        asyncio.run(_stamp())
-    if args.verify:
-        asyncio.run(_verify())
+    try:
+        if args.stamp:
+            asyncio.run(_stamp())
+        if args.verify:
+            asyncio.run(_verify())
+    except AuditChainNotKeyedError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
 
 
 if __name__ == "__main__":

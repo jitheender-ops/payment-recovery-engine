@@ -144,6 +144,78 @@
   .r-back:hover{color:var(--r-ink)}
 
   @media (prefers-reduced-motion:reduce){ .replica *{transition:none!important} }
+
+  /* ── "Then it listens" ───────────────────────────────────────────────────
+     The reply column. Everything here is scoped under #listens so it cannot
+     collide with the .rung / .ledger classes the live console owns.        */
+
+  /* The voice line frames the section: these are things said ON a call. */
+  /* Icon | claim | bounds — the same three-part shape as the chaser rows
+     above, so the voice agent reads as one more thing with stated limits
+     rather than a feature callout. */
+  #listens .voiceline{display:grid;grid-template-columns:auto minmax(0,1fr) auto;
+    gap:1.1rem clamp(1.1rem,3vw,2.5rem);align-items:start;margin-top:2.6rem;
+    padding:1.6rem 1.7rem;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--r);box-shadow:var(--shadow-sm)}
+  #listens .voiceline-icon{width:44px;height:44px;border-radius:12px;flex:none;
+    display:grid;place-items:center;background:var(--green-tint);
+    color:var(--green-deep);border:1px solid var(--green-line)}
+  #listens .voiceline-title{font-size:1.08rem;font-weight:600;letter-spacing:-.015em}
+  #listens .voiceline-body{margin-top:.5rem;color:var(--ink-2);font-size:.92rem;
+    max-width:66ch}
+  #listens .voiceline-chips{display:flex;flex-direction:column;align-items:flex-end;
+    gap:.45rem;padding-top:.15rem}
+  @media (max-width:1040px){
+    #listens .voiceline{grid-template-columns:auto minmax(0,1fr)}
+    #listens .voiceline-chips{grid-column:2;flex-direction:row;flex-wrap:wrap;
+      align-items:flex-start;margin-top:.3rem}
+  }
+
+  /* The customer's words get the largest type in the section — deliberately
+     larger than the response beside them. */
+  #listens .replies{list-style:none;margin:2.4rem 0 0;padding:0;
+    border-top:1px solid var(--line)}
+  #listens .reply{display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);
+    gap:clamp(1.5rem,4vw,3.5rem);align-items:start;
+    padding:2.1rem .2rem;border-bottom:1px solid var(--line)}
+  #listens .reply-said{font-size:clamp(1.35rem,2.5vw,1.85rem);font-weight:600;
+    line-height:1.28;letter-spacing:-.025em;text-wrap:balance;color:var(--ink)}
+  #listens .reply-did h3{font-size:1.02rem;font-weight:600;letter-spacing:-.015em}
+  #listens .reply-did p{margin-top:.55rem;color:var(--ink-2);font-size:.92rem;
+    max-width:60ch}
+  #listens .reply-did .chip{margin-top:.95rem}
+
+  /* The B2B rail closes the section. Rungs indent because escalation climbs. */
+  #listens .rail{margin-top:2.6rem;padding:1.7rem;background:var(--well);
+    border:1px solid var(--line);border-radius:var(--r)}
+  #listens .rail-head{display:grid;grid-template-columns:auto minmax(0,1fr);
+    gap:.9rem;align-items:start}
+  #listens .rail-icon{width:36px;height:36px;border-radius:10px;flex:none;
+    display:grid;place-items:center;background:var(--card);color:var(--green-deep);
+    border:1px solid var(--line-2)}
+  #listens .rail-title{font-size:1.02rem;font-weight:600;letter-spacing:-.015em}
+  #listens .rail-sub{margin-top:.4rem;color:var(--ink-2);font-size:.9rem;max-width:62ch}
+  #listens .rungs{list-style:none;margin:1.4rem 0 0;padding:0;
+    display:flex;flex-direction:column;gap:.4rem}
+  #listens .rung{display:grid;grid-template-columns:6.5rem 5.5rem minmax(0,1fr);
+    gap:.9rem;align-items:baseline;padding:.65rem .9rem;background:var(--card);
+    border:1px solid var(--line);border-radius:var(--r-sm);font-size:.88rem}
+  /* Each rung steps right by its own index — the indent IS the escalation. */
+  #listens .rung:nth-child(2){margin-left:.9rem}
+  #listens .rung:nth-child(3){margin-left:1.8rem}
+  #listens .rung:nth-child(4){margin-left:2.7rem}
+  #listens .rung:nth-child(5){margin-left:3.6rem}
+  #listens .rung-tone{font-weight:600;letter-spacing:-.01em;text-transform:capitalize}
+  #listens .rung-day{font-size:.76rem;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  #listens .rung-who{color:var(--ink-2);font-size:.86rem}
+
+  @media (max-width:820px){
+    #listens .reply{grid-template-columns:1fr;gap:.9rem}
+    #listens .voiceline{grid-template-columns:1fr}
+    #listens .voiceline-chips{grid-column:1}
+    #listens .rung{grid-template-columns:1fr;gap:.15rem;margin-left:0!important}
+    #listens .rungs{gap:.5rem}
+  }
 </style>
 {% endblock %}
 
@@ -157,6 +229,7 @@
     <div class="nav-links">
       <a class="nav-link hide-sm" href="#chasers">The leak</a>
       <a class="nav-link hide-sm" href="#how">How it works</a>
+      <a class="nav-link hide-sm" href="#listens">When they reply</a>
       <a class="nav-link hide-sm" href="#integrate">Integrate</a>
       <a class="btn btn-primary btn-sm" href="/console/live">{{ icon("lock", 14) }} Open console</a>
     </div>
@@ -266,6 +339,115 @@
         A capture through that link is the only thing counted as recovered.</p>
       </div>
     </div>
+  </div>
+</section>
+
+{# ── Then it listens ──────────────────────────────────────────────────────
+   The page above this point tells a one-directional story: money leaks, the
+   engine chases, a link goes out. That was the whole product once. It is now
+   the easy half — what decides whether the money arrives is what happens when
+   the customer answers back, and the answer is rarely "yes".
+
+   The form is a reply column: the customer's own words on the left, in the
+   display face, at a size nothing else on the page gets. This is the only
+   place on a merchant-facing site where the customer speaks, which is exactly
+   the point of the features it describes.
+
+   Hinglish in Latin script, not Devanagari: it is what an Indian merchant
+   reads a WhatsApp reply in, it is what the voice transcript looks like, and
+   it stays in Schibsted Grotesk — Devanagari would drop to a system fallback
+   and break the one type treatment this section is built on. Translating it
+   to English would be the real misdescription.
+#}
+<section class="section" id="listens">
+  <div class="wrap">
+    <div class="measure" data-reveal>
+      <h2 class="h2">Then it listens.</h2>
+      <p class="lede" style="margin-top:1.1rem">
+        Sending the link is the easy half. What decides whether the money
+        arrives is what the engine does with the reply — and the reply comes at
+        8pm, in Hindi, and is usually not yes.
+      </p>
+    </div>
+
+    <div class="voiceline" data-reveal>
+      <span class="voiceline-icon">{{ icon("phone", 20) }}</span>
+      <div>
+        <h3 class="voiceline-title">It picks up the phone, in the language the customer uses.</h3>
+        <p class="voiceline-body">
+          A Hinglish voice agent answers what the customer asks about their own
+          case — the amount, the due date, why the charge failed. It answers
+          only from that case's facts. Ask it something it cannot ground and it
+          says it does not know and offers a human, because a confident invented
+          number on a call about money is worse than no answer.
+        </p>
+      </div>
+      <div class="voiceline-chips">
+        <span class="chip">Hinglish + English</span>
+        <span class="chip">Answers only from case facts</span>
+        <span class="chip chip-green">Abstains rather than invents</span>
+        <span class="chip">Opt-out ends the call</span>
+      </div>
+    </div>
+
+    <ol class="replies">
+      <li class="reply" data-reveal>
+        <p class="reply-said">“Paisa agle hafte aa jayega.”</p>
+        <div class="reply-did">
+          <h3>It takes the promise and goes quiet.</h3>
+          <p>The case stops chasing until that date — no retry, no reminder, no
+          contact budget spent on someone who already answered. One nudge the
+          morning it falls due. Miss the date and the promise breaks on its own
+          clock, with an audit event, and the chase resumes where it stopped.</p>
+          <span class="chip chip-green">promise → silence until the date</span>
+        </div>
+      </li>
+      <li class="reply" data-reveal style="--d:.06s">
+        <p class="reply-said">“Itna ek saath nahi ho payega.”</p>
+        <div class="reply-did">
+          <h3>It splits the amount into instalments.</h3>
+          <p>A plan is a group of promises, each with its own date and its own
+          silence. Missing one instalment breaks that instalment, not the plan.
+          Plans are sized against what is still owed, so a customer who has
+          already part-paid is never asked to schedule money they have sent.</p>
+          <span class="chip chip-green">plan → one promise per instalment</span>
+        </div>
+      </li>
+      <li class="reply" data-reveal style="--d:.12s">
+        <p class="reply-said">“Yeh invoice galat hai.”</p>
+        <div class="reply-did">
+          <h3>It stops and hands the case to you.</h3>
+          <p>A disputed invoice is a person's problem, not a chaser's. The case
+          freezes the moment a dispute is opened and appears at the top of your
+          console worklist. Nothing automated touches it again until you close
+          the dispute — a chaser that argues about an invoice is how a customer
+          is lost, not recovered.</p>
+          <span class="chip chip-green">dispute → frozen, escalated to you</span>
+        </div>
+      </li>
+    </ol>
+
+    {% if ladder_rungs %}
+    <div class="rail" data-reveal>
+      <div class="rail-head">
+        <span class="rail-icon">{{ icon("steps", 18) }}</span>
+        <div>
+          <h3 class="rail-title">And when the customer is a company, it escalates by person.</h3>
+          <p class="rail-sub">A buyer with four overdue invoices gets one statement, not four
+          messages — and each rung addresses someone further up than the last.</p>
+        </div>
+      </div>
+      <ol class="rungs">
+        {% for r in ladder_rungs %}
+        <li class="rung" style="--d:{{ loop.index0 * 0.05 }}s">
+          <span class="rung-tone">{{ r.tone }}</span>
+          <span class="rung-day mono">{% if r.days == 0 %}due date{% else %}day {{ r.days }}{% endif %}</span>
+          <span class="rung-who">{{ r.addresses }}</span>
+        </li>
+        {% endfor %}
+      </ol>
+    </div>
+    {% endif %}
   </div>
 </section>
 
@@ -433,7 +615,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
     screen: 'landing', mode: 'customer',
     phone: '', otp: '', signedVia: 'OTP',
     pay: 'none', method: 'card',
-    channels: { SMS: true, WhatsApp: false, Email: true }, lang: 'English'
+    channels: { SMS: true, Voice: true, WhatsApp: false, Email: true }, lang: 'English'
   };
   var timers = [];
   function clearTimers() { timers.forEach(clearTimeout); timers = []; }
@@ -560,7 +742,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
 
   function screenSettings() {
     var rows = Object.keys(S.channels).map(function (k) {
-      var notes = { SMS: 'Payment links and receipts', WhatsApp: 'Not shipped yet — coming', Email: 'Receipts and invoices' };
+      var notes = { SMS: 'Payment links and receipts', Voice: 'A call in Hindi or English about this payment', WhatsApp: 'Not shipped yet — coming', Email: 'Receipts and invoices' };
       var disabled = k === 'WhatsApp';
       return '<div class="r-toggle"><span>' + k + '<br><span class="rq" style="margin:0">' + notes[k] + '</span></span>' +
         '<button type="button" class="r-switch' + (S.channels[k] ? ' on' : '') + '" ' +

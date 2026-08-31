@@ -1,44 +1,73 @@
 # Render blueprint. Create from the dashboard: New > Blueprint > point at this repo.
 #
 # What this wires up:
-#   payment-recovery-db    managed Postgres
 #   recovery-api           the FastAPI service — this is the Razorpay webhook URL
 #   recovery-dashboard     the Streamlit dashboard, password-gated
+#
+# Postgres is SUPABASE, not a Render database — there is deliberately no
+# `databases:` block here. See the connection notes on DATABASE_URL below;
+# getting those two URLs the right way round is the whole integration.
 #
 # Migrations are NOT a preDeployCommand (that is a paid-plan feature). They run
 # in docker-entrypoint.sh before uvicorn starts, so `alembic upgrade head`
 # happens on every boot on any plan. It is idempotent — every step is guarded
 # by an inspector check — so repeated boots are no-ops.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# SUPABASE: TWO URLS, AND THEY ARE NOT INTERCHANGEABLE
+#
+# DATABASE_URL      → SESSION-mode pooler, port 5432
+#     postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres
+#
+#   NOT the transaction pooler on 6543. src/orchestrator._get_ledger takes a
+#   SELECT ... FOR UPDATE row lock to close the contact-limit TOCTOU, and a row
+#   lock only means anything while one transaction holds one backend —
+#   transaction-mode pooling hands the next statement a different one. The
+#   damage would be silent: two concurrent webhooks each read "4 of 5 contacts
+#   used" and both send.
+#
+# DATABASE_URL_SYNC → DIRECT connection, port 5432
+#     postgresql://postgres:<pw>@db.<ref>.supabase.co:5432/postgres
+#
+#   Alembic runs DDL on boot. DDL has no business behind a pooler.
+#
+# DB_BEHIND_POOLER=true shrinks the async pool and disables asyncpg's
+# prepared-statement cache (src/database.py explains why that one matters).
+#
+# The Supabase DATA API (PostgREST) can stay OFF. This app speaks Postgres
+# directly through SQLAlchemy and never uses supabase-py, PostgREST or RLS —
+# leaving the Data API disabled removes a public surface onto tables holding
+# customer emails and phone numbers, and costs nothing.
+# ─────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────
-# READ THIS BEFORE PICKING THE FREE PLAN
+# BOTH SERVICES ARE ON THE FREE PLAN. WHAT THAT COSTS.
 #
-# Render's free web services sleep after ~15 minutes with no inbound request.
-# That is fine for a normal API and NOT fine for this one, because Layer 6 is an
-# in-process asyncio loop:
+# This is a prototype deployment and the free plan is the deliberate choice.
+# Render's free web services sleep after ~15 minutes with no inbound request,
+# and Layer 6 is an in-process asyncio loop, so while asleep:
 #
-#   * a deferred `retry_at` scheduled for +4h does not fire while asleep — it
-#     fires whenever something next wakes the service, which may be much later;
-#   * `reconcile_events` and `expire_promises` stop on the same clock;
-#   * a cold start takes tens of seconds, and Razorpay's webhook delivery may
-#     time out and mark the endpoint failing before the container is up.
+#   * a deferred `retry_at` scheduled for +4h does not fire at +4h — it fires
+#     whenever something next wakes the service;
+#   * `reconcile_events`, `expire_promises` and the chase sweeps stop on the
+#     same clock;
+#   * a cold start takes tens of seconds and can outrun Razorpay's webhook
+#     delivery timeout.
 #
-# Nothing is lost — a scheduled attempt stays "scheduled" and fires late, and a
-# missed webhook is re-sent by Razorpay because a timeout is not a 200 — but
-# "retry in 4 hours" becomes "retry in 4 hours, or whenever someone visits".
+# Nothing is LOST. A scheduled attempt stays "scheduled" and fires late; a
+# timed-out webhook is not a 200, so Razorpay re-sends it, and reconcile_events
+# picks up anything stored but unprocessed. What is lost is punctuality.
 #
-# For a demo that is acceptable if you say so. For anything measured, put the
-# API service on a paid instance type so it stays resident. The dashboard can
-# stay free; it has no scheduler.
+# Demoing: hit /health a minute before you show the chasers, and read the
+# console's heartbeat strip — it says out loud whether the engine is ticking,
+# so a sleeping service never reads as a broken one. Optional and zero code: a
+# free external cron on GET /health every 10 min keeps recovery-api awake, but
+# the free allowance is ~750 instance-hours against a 744-hour month, so let
+# recovery-dashboard sleep if you do that.
+#
+# When this stops being a prototype: `plan: starter` on recovery-api. One line,
+# no code. See docs/DEPLOY.md.
 # ─────────────────────────────────────────────────────────────────────────
-
-databases:
-  - name: payment-recovery-db
-    databaseName: payment_recovery
-    user: recovery
-    # Free Postgres instances expire. Check Render's current policy before
-    # relying on this for anything you cannot rebuild from webhooks.
-    plan: free
 
 services:
   # ── API ───────────────────────────────────────────────────────────────
@@ -51,12 +80,21 @@ services:
     # The entrypoint's "api" mode: alembic upgrade head, then uvicorn.
     dockerCommand: /app/docker-entrypoint.sh api
     envVars:
-      # Both point at the SAME injected connection string. Settings normalises
-      # each to the driver it needs (src/config.py), so neither needs editing.
+      # DIFFERENT Supabase URLs — see the block at the top of this file.
+      # sync: false = set by hand in the dashboard, never stored in git.
+      # Settings normalises each to the driver it needs (src/config.py), so
+      # paste Supabase's strings unedited.
+      #
+      # Session-mode POOLER (…pooler.supabase.com:5432).
       - key: DATABASE_URL
-        fromDatabase: {name: payment-recovery-db, property: connectionString}
+        sync: false
+      # DIRECT connection (db.<ref>.supabase.co:5432) — Alembic runs DDL here.
       - key: DATABASE_URL_SYNC
-        fromDatabase: {name: payment-recovery-db, property: connectionString}
+        sync: false
+      # Small async pool, no asyncpg statement cache. Required whenever
+      # DATABASE_URL points at a pooler; harmless if it ever points direct.
+      - key: DB_BEHIND_POOLER
+        value: "true"
 
       # staging, not production: `production` is equally valid here, but either
       # closes /docs and /redoc and puts /openapi.json behind X-API-Key. Do not
@@ -159,8 +197,14 @@ services:
     dockerCommand: /app/docker-entrypoint.sh dashboard
     envVars:
       # Sync only, never async: the dashboard reads through pandas.read_sql.
+      #
+      # Use the SESSION-MODE POOLER string here, not the direct one the API
+      # service gets. This service only ever reads, and Supabase meters direct
+      # connections — spending them on a dashboard nobody has open would
+      # starve the pool that actually moves money. The pooler is what it is
+      # for.
       - key: DATABASE_URL_SYNC
-        fromDatabase: {name: payment-recovery-db, property: connectionString}
+        sync: false
       - key: APP_ENV
         value: staging
       # The only thing in front of live payment data. Empty means the dashboard

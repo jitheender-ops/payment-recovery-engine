@@ -153,15 +153,21 @@ def test_rendered_nudges_are_deterministic_and_self_contained(
     """
     The renderer's actual contract (the 160-char SMS cap lives one layer up,
     in NudgeGenerator.generate's truncation): same inputs → identical string,
-    the customer's name only ever appears as itself, and an unknown failure
-    class falls back to the generic wording rather than raising.
+    every VISIBLE character of the customer's name survives to the message,
+    and an unknown failure class falls back to the generic wording rather
+    than raising. (Invisible format/control characters are stripped by the
+    plain-text sanitizer — that is the bidi/zero-width defense, not a loss.)
     """
+    from src.messaging.templates import _sanitize_plain_text
+
     amount_display = f"{amount / 100:,.2f}"
     msg_a = render_fallback("insufficient_funds", amount_display, customer_name=name)
     msg_b = render_fallback("insufficient_funds", amount_display, customer_name=name)
     assert msg_a == msg_b
     if name:
-        assert name.strip() in msg_a or "&" in msg_a  # raw or entity-escaped
+        visible = _sanitize_plain_text(name)
+        if visible:
+            assert visible in msg_a
     fallback = render_fallback("totally_unknown_class", "10.00")
     assert "didn't go through" in fallback
 

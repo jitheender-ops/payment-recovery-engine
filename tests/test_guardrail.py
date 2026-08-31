@@ -298,6 +298,26 @@ def test_mandate_retry_notified_24h_ago_or_more_is_allowed() -> None:
     assert passed is True
 
 
+def test_mandate_retry_with_a_stale_notification_is_blocked() -> None:
+    """
+    The framework's notice is per-debit, not per-mandate: one notification
+    must not authorize unlimited re-presentations forever. Past the
+    validity window (7 days by default) it is treated as unsent.
+    """
+    passed, reason = rules.check_mandate_predebit_notification(
+        "mandate_failure", "retry_now", now - timedelta(days=30), now,
+    )
+    assert passed is False
+    assert reason is not None and "stale" in reason
+
+
+def test_mandate_notification_inside_the_validity_window_is_allowed() -> None:
+    passed, _ = rules.check_mandate_predebit_notification(
+        "mandate_failure", "retry_now", now - timedelta(days=6), now,
+    )
+    assert passed is True
+
+
 def test_non_mandate_risk_type_is_unaffected() -> None:
     """The rule only ever applies to risk_type=mandate_failure."""
     passed, _ = rules.check_mandate_predebit_notification(

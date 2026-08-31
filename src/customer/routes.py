@@ -390,6 +390,7 @@ async def recovery_page(
         hero_key = "hero_about"
         is_payment = True
         risk_timeline_key = None
+        cart_items = None
     else:
         # A chaser-driven risk type: no payment was (necessarily) attempted,
         # so the risk type names what happened, the window anchor is when WE
@@ -405,6 +406,26 @@ async def recovery_page(
         hero_key = _HERO_KEY_BY_RISK.get(case.risk_type, "hero_about")
         is_payment = False
         risk_timeline_key = _TIMELINE_KEY_BY_RISK.get(case.risk_type)
+        # Carts only: name what was left in it, from the merchant's own event.
+        # Same reduction discipline as the nudge path (orchestrator.
+        # cart_summary_from_meta) — the value renders on a money page.
+        cart_items = None
+        if case.risk_type == "checkout_abandonment":
+            from src.models import RiskEvent as _RiskEvent
+            from src.orchestrator import cart_summary_from_meta
+
+            event_row = (
+                await session.execute(
+                    select(_RiskEvent.meta)
+                    .where(
+                        _RiskEvent.risk_type == case.risk_type,
+                        _RiskEvent.reference_id == case.subject_ref,
+                    )
+                    .order_by(_RiskEvent.received_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            cart_items = cart_summary_from_meta(event_row)
 
     state = _view_state(
         case, attempt, detail.retryable,
@@ -415,6 +436,19 @@ async def recovery_page(
     # then the honest "we'll message you" instead of a spinner that can spin
     # for a minute. The ?r=1 flag stops the loop after the single re-check.
     auto_refresh = state == "confirming" and not request.query_params.get("r")
+
+    # The click-through signal: one audit row per serve. Best-effort on
+    # purpose — a metrics write failing must never cost a customer their
+    # page. Not written on the 404 path (no case to attribute it to); the
+    # /pay path records its own attempt row instead.
+    try:
+        from src.cases import log_event
+
+        log_event(session, case, "page_viewed", actor="customer", state=state)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.warning("page_viewed event write failed for case %s", case.id)
 
     return templates.TemplateResponse(
         request,
@@ -447,6 +481,12 @@ async def recovery_page(
             "hero_key": hero_key,
             "is_payment": is_payment,
             "risk_timeline_key": risk_timeline_key,
+            "cart_items": cart_items,
+            "promise_min_date": (datetime.now(UTC) + timedelta(days=1))
+                .astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
+            "promise_max_date": (datetime.now(UTC) + timedelta(
+                days=get_settings().promise_max_horizon_days
+            )).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
         },
     )
 
@@ -569,52 +609,245 @@ async def start_payment(
     return await _start_payment_from_case(session, case, token)
 
 
-async def _start_payment_from_failure(
-    session: AsyncSession, case: Any, failure: Any, token: str
+@router.post("/recover/{token}/promise")
+async def promise_a_date(
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
 ) -> Any:
-    """Self-serve pay for the payment rail — a gateway failure row exists."""
-    from src.agent.actions import FailureContext, RetryAction
+    """
+    "I'll pay by Friday" — captured from the page, with the same silence
+    invariant a voice promise gets.
+
+    The token is the authority (same as /pay and /optout). The date is
+    validated server-side — inside the horizon cap, in the future — and the
+    amount defaults to the case's outstanding. record_promise refuses past
+    the per-case cap; the refusal is a redirect back with the page telling
+    the truth, not an error the customer has to interpret. No amount is
+    collected here: promising a date and choosing an amount are different
+    anxieties, and conflating them on a payment page drops both.
+    """
+    _check_rate_limit(request, kind="pay", limit=_PAY_LIMIT)
+    verified = recovery_link.verify_with_expiry(token)
+    if verified is None:
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    case_id, _ = verified
+    case = await session.get(RecoveryCase, case_id)
+    if case is None or case.state != "open":
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    settings = get_settings()
+    form = await request.form()
+
+    due_at: datetime | None = None
+    raw_date = str(form.get("due_date", "")).strip()
+    if raw_date:
+        try:
+            # A date input gives YYYY-MM-DD in the customer's wall clock;
+            # India is IST so the promise lands at midnight IST, coerced to
+            # UTC like every other wall-clock boundary here.
+            local = datetime.strptime(raw_date, "%Y-%m-%d")
+            due_at = local.replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(UTC)
+        except ValueError:
+            due_at = None
+    now = datetime.now(UTC)
+    horizon = timedelta(days=settings.promise_max_horizon_days)
+    if due_at is None or not (now + timedelta(hours=12) < due_at <= now + horizon):
+        # Unparseable, in the past, or beyond the horizon the kept-rate
+        # research supports. The page re-renders and says what a valid date
+        # is; a silent accept would record noise as a commitment.
+        logger.info("Promise date refused on case %s: %r", case.id, raw_date)
+        return RedirectResponse(f"/recover/{token}?promise=invalid", status_code=303)
+
+    from src.cases import outstanding_paise, record_promise
+
+    promise = await record_promise(
+        session,
+        case,
+        amount=outstanding_paise(case),
+        due_at=due_at,
+        channel="payment_link",
+        source_ref=f"recovery_page:{token[:8]}",
+        confidence="explicit",
+    )
+    if promise is None:
+        # Per-case promise cap: record_promise already audited the refusal.
+        return RedirectResponse(f"/recover/{token}?promise=refused", status_code=303)
+    await session.commit()
+    logger.info("Customer promised from recovery page: case=%s due=%s",
+                case.id, due_at.isoformat())
+    return RedirectResponse(f"/recover/{token}?promise=ok", status_code=303)
+
+
+@router.post("/recover/{token}/dispute")
+async def raise_a_dispute(
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
+) -> Any:
+    """
+    "This invoice is wrong" — the customer answer that quiets the chase.
+
+    Freezes all automated contact on THIS case (an open dispute excludes the
+    case from every consolidated statement and every per-case chase until a
+    human resolves it) and alerts the merchant the moment it opens. Chasing
+    an invoice the customer says is wrong is how a commercial relationship
+    ends up in a legal escalation; the freeze is total, the resolution is
+    the merchant's judgement.
+
+    Same discipline as /promise: token is the authority, the reason is
+    validated server-side (present, bounded), the refusal is a redirect with
+    the page telling the truth. Idempotent — a double-tap lands on the
+    already-open dispute, not a second one.
+    """
+    from src.receivables.disputes import open_dispute
+
+    _check_rate_limit(request, kind="pay", limit=_PAY_LIMIT)
+    verified = recovery_link.verify_with_expiry(token)
+    if verified is None:
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    case_id, _ = verified
+    case = await session.get(RecoveryCase, case_id)
+    if case is None or case.state != "open":
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    form = await request.form()
+    reason = str(form.get("reason", "")).strip()
+    dispute = await open_dispute(session, case, reason=reason)
+    if dispute is None:
+        # Empty reason, a terminal case, or a double-tap that found the
+        # existing open dispute — the page tells the truth either way.
+        return RedirectResponse(f"/recover/{token}?dispute=invalid", status_code=303)
+
+    await session.commit()
+    logger.info("Customer disputed from recovery page: case=%s", case.id)
+    return RedirectResponse(f"/recover/{token}?dispute=ok", status_code=303)
+
+
+@router.post("/recover/{token}/plan")
+async def request_a_plan(
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
+) -> Any:
+    """
+    "I can pay in parts" — an instalment plan over one case's outstanding.
+
+    Each instalment is a promise (the existing pause/break/audit machinery
+    runs on it unchanged), so a plan is quiet until an instalment is missed —
+    and a missed instalment is broken on the clock by the promise sweep, with
+    the ladder's ratchet resuming the chase at the next firmer rung.
+
+    The form posts instalment dates and amounts the customer chose; the
+    server validates the shape (sum, order, horizon) exactly as the merchant
+    API would — the page is a convenience for the same law, not a separate
+    one. A one-instalment "plan" is refused: that is a promise, and the
+    /promise form already exists for it.
+    """
+    from src.receivables.plans import create_plan
+
+    _check_rate_limit(request, kind="pay", limit=_PAY_LIMIT)
+    verified = recovery_link.verify_with_expiry(token)
+    if verified is None:
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    case_id, _ = verified
+    case = await session.get(RecoveryCase, case_id)
+    if case is None or case.state != "open":
+        return RedirectResponse(f"/recover/{token}", status_code=303)
+
+    form = await request.form()
+
+    # Parse up to MAX_INSTALMENTS (date, amount) pairs from the form. The
+    # page sends instalment_1_date / instalment_1_amount, ... — pairs with a
+    # missing half are refused rather than defaulted, because a plan is a
+    # commitment and half a commitment is noise.
+    from src.receivables.plans import MAX_INSTALMENTS
+
+    amounts: list[int] = []
+    dates: list[datetime] = []
+    for i in range(1, MAX_INSTALMENTS + 1):
+        raw_date = str(form.get(f"instalment_{i}_date", "")).strip()
+        raw_amount = str(form.get(f"instalment_{i}_amount", "")).strip()
+        if not raw_date and not raw_amount:
+            continue
+        if not raw_date or not raw_amount:
+            return RedirectResponse(
+                f"/recover/{token}?plan=invalid", status_code=303
+            )
+        try:
+            local = datetime.strptime(raw_date, "%Y-%m-%d")
+            due = local.replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(UTC)
+            rupees = float(raw_amount)
+            amount_paise = int(round(rupees * 100))
+        except ValueError:
+            return RedirectResponse(
+                f"/recover/{token}?plan=invalid", status_code=303
+            )
+        if amount_paise <= 0:
+            return RedirectResponse(
+                f"/recover/{token}?plan=invalid", status_code=303
+            )
+        amounts.append(amount_paise)
+        dates.append(due)
+
+    plan = await create_plan(
+        session, case, amounts_paise=amounts, due_dates=dates
+    )
+    if plan is None:
+        # Shape refused (sum ≠ outstanding, one instalment, out of horizon,
+        # duplicate active plan) or the case is terminal — validate the
+        # shape law is one law everywhere; the page re-renders the truth.
+        return RedirectResponse(f"/recover/{token}?plan=refused", status_code=303)
+
+    await session.commit()
+    logger.info(
+        "Customer plan from recovery page: case=%s instalments=%d",
+        case.id, len(amounts),
+    )
+    return RedirectResponse(f"/recover/{token}?plan=ok", status_code=303)
+
+
+async def _self_serve_mint(
+    session: AsyncSession,
+    case: Any,
+    token: str,
+    context: Any,
+    rail: Any,
+    execute: Any,
+    *,
+    payment_failure_id: Any = None,
+    payment_id: Any = None,
+) -> Any:
+    """
+    Shared self-serve pay pipeline — both rails walk the same steps, because
+    they are the same money-safety discipline:
+
+    1. Guardrail subset BEFORE writing anything (validate_self_serve: schema,
+       hard-decline blocklist, attempt budget, idempotency — customer-initiated
+       does not mean unvalidated, but the outreach rules are skipped because
+       this is the customer acting, not us chasing).
+    2. Deterministic idempotency key + WRITE-AHEAD attempt row, committed
+       BEFORE the Razorpay call — the UNIQUE constraint on idempotency_key is
+       what closes the double-tap race (two taps a second apart each finding
+       no live link and each minting one), and it needs a ROW to bite on.
+       Recording the attempt also makes attribution true and spends one unit
+       of the case's budget honestly.
+    3. Execute, then resolve the row: success bumps the customer's rolling
+       retry tally exactly as an engine-initiated retry does (the guardrail's
+       per-customer limit reads this ledger; a self-serve attempt it cannot
+       see is a slot the next webhook undercounts). A failed mint contacted
+       nobody, so only a success bumps it.
+
+    `execute(idem) -> dict` mints the link (payment rail or case rail);
+    `rail` is the enforced target recorded on the row. The payment rail
+    passes its failure/payment ids; the case rail leaves both NULL — there
+    is no payment behind it, and the columns are nullable for exactly this.
+    """
+    from src.agent.actions import RetryAction
     from src.cases import attach_attempt
-    from src.executor.retry_executor import RetryExecutor
     from src.guardrail.gate import GuardrailGate
     from src.models import RetryAttempt
 
-    detail = explain(failure.failure_class)
-
-    # The recommended rail is ENFORCED here, not just suggested: a card
-    # drop-off gets a UPI-ONLY link (upi_link=True in the executor), so the
-    # page's primary verb and the payment object agree. A generic link for
-    # everything else keeps every method available.
-    recommended = _recommended_rail(failure.failure_class)
-
-    # Run the self-serve guardrail subset BEFORE writing anything. Customer-
-    # initiated does not mean unvalidated: the previous code wrote
-    # guardrail_passed=True without consulting a single rule. The subset
-    # skips the outreach rules (blackout, contact limits — this is the
-    # customer acting, not us chasing) but keeps schema, hard-decline
-    # blocklist, attempt budget and idempotency. See validate_self_serve.
-    now = datetime.now(UTC)
-    local_now = now.astimezone(ZoneInfo("Asia/Kolkata"))
-    context = FailureContext(
-        payment_id=failure.payment_id,
-        order_id=failure.order_id,
-        failure_class=failure.failure_class,
-        error_code=failure.error_code or "UNKNOWN",
-        amount=failure.amount,
-        currency=failure.currency,
-        method=failure.method,
-        bank=failure.bank or failure.card_issuer,
-        customer_id=case.customer_id,
-        failed_at=failure.failed_at,
-        current_time=now,
-        hour_of_day=local_now.hour,
-        day_of_week=local_now.weekday(),
-        is_retryable=detail.retryable,
-        original_failure_id=str(failure.id),
-    )
     action = RetryAction(
         action="retry_now",
-        rail=recommended,
+        rail=rail,
         reason="Customer-initiated from the recovery page",
     )
     idem = f"selfserve_{case.subject_ref}_{case.attempts_used}"
@@ -628,22 +861,13 @@ async def _start_payment_from_failure(
         )
         return RedirectResponse(f"/recover/{token}?error=1", status_code=303)
 
-    # Deterministic key, WRITE-AHEAD of the Razorpay call — same discipline as
-    # the orchestrator's money block, and for the first version of this route
-    # the row was simply missing: two taps a second apart each found no
-    # "live link" (the check reads attempts, and there was none), each minted
-    # its own link, and the customer could pay both. The UNIQUE constraint on
-    # idempotency_key is what actually closes that race — but it needs a ROW
-    # to bite on. Recording the attempt also makes attribution true (a
-    # capture on this link credits the case instead of reading as
-    # self-recovery) and spends one unit of the case's budget honestly.
     attempt_row = RetryAttempt(
-        payment_failure_id=failure.id,
-        payment_id=failure.payment_id,
+        payment_failure_id=payment_failure_id,
+        payment_id=payment_id,
         idempotency_key=idem,
         attempt_number=case.attempts_used + 1,
         action_type="retry_now",
-        target_rail=recommended,
+        target_rail=rail,
         agent_type="customer",
         agent_reasoning="Customer-initiated from the recovery page",
         guardrail_passed=gate_result.passed,
@@ -665,12 +889,7 @@ async def _start_payment_from_failure(
     await session.commit()
 
     try:
-        result = await RetryExecutor().execute_retry(
-            payment_failure=failure,
-            action_type="retry_now",
-            target_rail=recommended,
-            idempotency_key=idem,
-        )
+        result = await execute(idem)
     except Exception:
         logger.exception("Self-serve link creation failed for case %s", case.id)
         attempt_row.result = "failed"
@@ -690,11 +909,6 @@ async def _start_payment_from_failure(
             "short_url": str(url),
             "self_serve": True,
         }
-        # Count against the customer's rolling retry tally exactly as an
-        # engine-initiated retry does: the guardrail's per-customer limit
-        # reads this ledger, and a self-serve attempt it cannot see is a
-        # slot the next webhook's count undercounts. A failed link mint
-        # contacted nobody, so only a success bumps it.
         if case.customer_id:
             from src.orchestrator import get_orchestrator
 
@@ -712,6 +926,56 @@ async def _start_payment_from_failure(
     return _payment_redirect(str(url), token)
 
 
+async def _start_payment_from_failure(
+    session: AsyncSession, case: Any, failure: Any, token: str
+) -> Any:
+    """Self-serve pay for the payment rail — a gateway failure row exists."""
+    from src.agent.actions import FailureContext
+    from src.executor.retry_executor import RetryExecutor
+
+    detail = explain(failure.failure_class)
+
+    # The recommended rail is ENFORCED here, not just suggested: a card
+    # drop-off gets a UPI-ONLY link (upi_link=True in the executor), so the
+    # page's primary verb and the payment object agree. A generic link for
+    # everything else keeps every method available.
+    recommended = _recommended_rail(failure.failure_class)
+
+    now = datetime.now(UTC)
+    local_now = now.astimezone(ZoneInfo("Asia/Kolkata"))
+    context = FailureContext(
+        payment_id=failure.payment_id,
+        order_id=failure.order_id,
+        failure_class=failure.failure_class,
+        error_code=failure.error_code or "UNKNOWN",
+        amount=failure.amount,
+        currency=failure.currency,
+        method=failure.method,
+        bank=failure.bank or failure.card_issuer,
+        customer_id=case.customer_id,
+        failed_at=failure.failed_at,
+        current_time=now,
+        hour_of_day=local_now.hour,
+        day_of_week=local_now.weekday(),
+        is_retryable=detail.retryable,
+        original_failure_id=str(failure.id),
+    )
+
+    async def execute(idem: str) -> Any:
+        return await RetryExecutor().execute_retry(
+            payment_failure=failure,
+            action_type="retry_now",
+            target_rail=recommended,
+            idempotency_key=idem,
+        )
+
+    return await _self_serve_mint(
+        session, case, token, context, recommended, execute,
+        payment_failure_id=failure.id,
+        payment_id=failure.payment_id,
+    )
+
+
 async def _start_payment_from_case(
     session: AsyncSession, case: Any, token: str
 ) -> Any:
@@ -719,15 +983,11 @@ async def _start_payment_from_case(
     Self-serve pay for a chaser-driven case — no payment was (necessarily)
     attempted, so there is no failure row: the amount, currency and customer
     come from the case, and the link is minted by the case-driven executor
-    path. Same safety discipline as the payment rail: guardrail subset before
-    writing, deterministic key, write-ahead row, reuse-never-remint, ledger
-    bump on success.
+    path.
     """
-    from src.agent.actions import FailureContext, RetryAction
-    from src.cases import attach_attempt
+    from src.agent.actions import FailureContext
     from src.chasers.policy import policy_for
-    from src.guardrail.gate import GuardrailGate
-    from src.models import RetryAttempt
+    from src.orchestrator import get_orchestrator
 
     policy = policy_for(case.risk_type)
     detail = explain(None, risk_type=case.risk_type)
@@ -753,61 +1013,15 @@ async def _start_payment_from_case(
         consent_window_hours=window_hours,
         is_retryable=detail.retryable,
     )
-    action = RetryAction(
-        action="retry_now",
-        rail=recommended,
-        reason="Customer-initiated from the recovery page",
-    )
-    idem = f"selfserve_{case.subject_ref}_{case.attempts_used}"
-    gate_result = GuardrailGate().validate_self_serve(
-        action, context, idem, case.attempts_used
-    )
-    if not gate_result.passed:
-        logger.warning(
-            "Self-serve pay rejected by guardrail for case %s: %s",
-            case.id, gate_result.rejection_reasons,
-        )
-        return RedirectResponse(f"/recover/{token}?error=1", status_code=303)
 
-    # Write-ahead row, same reasoning as the payment rail: the UNIQUE
-    # constraint on idempotency_key closes the double-tap race, but only if
-    # the row exists to bite on. payment_failure_id and payment_id stay NULL —
-    # there is no payment behind this case, and the columns are nullable for
-    # exactly this.
-    attempt_row = RetryAttempt(
-        payment_failure_id=None,
-        payment_id=None,
-        idempotency_key=idem,
-        attempt_number=case.attempts_used + 1,
-        action_type="retry_now",
-        target_rail=recommended,
-        agent_type="customer",
-        agent_reasoning="Customer-initiated from the recovery page",
-        guardrail_passed=gate_result.passed,
-        result="pending",
-        channel="payment_link",
-        created_at=datetime.now(UTC),
-    )
-    session.add(attempt_row)
-    try:
-        await session.flush()
-    except IntegrityError:
-        await session.rollback()
-        logger.info("Self-serve race lost on %s — the other tap owns it", idem)
-        return RedirectResponse(f"/recover/{token}", status_code=303)
-    attach_attempt(case, attempt_row)
-    await session.commit()
-
+    orchestrator = get_orchestrator()
     # The customer's email/contact for the link: the newest risk event that
     # fed this case. Without one the link is still minted — Razorpay only
     # needs the amount — it just carries no prefilled customer.
-    from src.orchestrator import get_orchestrator
-
-    orchestrator = get_orchestrator()
     event = await orchestrator._latest_risk_event(case, session)
 
-    try:
-        result = await orchestrator._executor.execute_case_action(
+    async def execute(idem: str) -> Any:
+        return await orchestrator._executor.execute_case_action(
             case=case,
             action_type="retry_now",
             target_rail=recommended,
@@ -819,35 +1033,7 @@ async def _start_payment_from_case(
             # they never asked for, from their own click.
             notify_customer=False,
         )
-    except Exception:
-        logger.exception("Self-serve link creation failed for case %s", case.id)
-        attempt_row.result = "failed"
-        attempt_row.result_details = {"error": "Self-serve link creation failed"}
-        attempt_row.executed_at = datetime.now(UTC)
-        session.add(attempt_row)
-        await session.commit()
-        return RedirectResponse(f"/recover/{token}?error=1", status_code=303)
 
-    url = result.get("short_url") if result.get("success") else None
-    attempt_row.executed_at = datetime.now(UTC)
-    if url:
-        attempt_row.result = "success"
-        attempt_row.external_ref = result.get("payment_link_id")
-        attempt_row.result_details = {
-            "success": True,
-            "short_url": str(url),
-            "self_serve": True,
-        }
-        if case.customer_id:
-            await orchestrator._update_retry_ledger(
-                case.customer_id, action, session
-            )
-    else:
-        attempt_row.result = "failed"
-        attempt_row.result_details = {"error": result.get("error", "link failed")}
-    session.add(attempt_row)
-    await session.commit()
-
-    if not url:
-        return RedirectResponse(f"/recover/{token}?error=1", status_code=303)
-    return _payment_redirect(str(url), token)
+    return await _self_serve_mint(
+        session, case, token, context, recommended, execute
+    )

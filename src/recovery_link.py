@@ -78,13 +78,12 @@ def mint(case_id: uuid.UUID, *, ttl_hours: int | None = None) -> str | None:
     secret = reveal(settings.recovery_link_secret)
     if not secret:
         return None
-    cap = settings.consent_window_hours
-    if ttl_hours is None:
-        ttl_hours = min(settings.recovery_link_ttl_hours, cap)
-    else:
-        # The cap applies to explicit callers too: a link must never outlive
-        # the engine's authority to act, whoever picks the number.
-        ttl_hours = min(ttl_hours, cap)
+    # The consent-window cap applies to explicit callers too: a link must
+    # never outlive the engine's authority to act, whoever picks the number.
+    ttl_hours = min(
+        ttl_hours if ttl_hours is not None else settings.recovery_link_ttl_hours,
+        settings.consent_window_hours,
+    )
     payload = f"{case_id.hex}{SEP}{int(time.time()) + ttl_hours * 3600}"
     return f"{b64(payload.encode())}{SEP}{sign(payload, secret)}"
 

@@ -10,7 +10,12 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.audit_chain import stamp_unhashed_events, verify_chain
+from src.audit_chain import (
+    AuditChainNotKeyedError,
+    stamp_unhashed_events,
+    verify_chain,
+)
+from src.config import get_settings
 from src.models import CaseEvent
 
 
@@ -29,6 +34,14 @@ async def session(
 ) -> AsyncIterator[AsyncSession]:
     async with db_sessionmaker() as s:
         yield s
+
+
+@pytest.fixture(autouse=True)
+def _keyed_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_CHAIN_SECRET", "audit-chain-test-secret")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 async def test_stamping_an_empty_table_is_a_noop(session: AsyncSession) -> None:
@@ -92,6 +105,86 @@ async def test_verify_catches_a_tampered_detail_field(session: AsyncSession) -> 
     result = await verify_chain(session)
     assert result.intact is False
     assert result.first_broken_id == row2.id
+
+
+async def test_cannot_restamp_a_tampered_row_silently(session: AsyncSession) -> None:
+    """
+    The attack the keyed chain exists to stop: edit a row, then re-run the
+    public stamping algorithm over it to make the rewrite look intact. With a
+    keyed hash, re-stamping does NOT repair the tampered row's stored hash
+    (stamping only touches NULL rows), and a fresh chain restamped under the
+    same key still names the tampered row — the attacker cannot forge the
+    chain without the key, which never lives in the database.
+    """
+    case_id = uuid.uuid4()
+    await _add_event(session, case_id, "opened")
+    row2 = await _add_event(session, case_id, "attributed", amount=500)
+    await _add_event(session, case_id, "closed", reason="recovered")
+    await session.commit()
+    await stamp_unhashed_events(session)
+    await session.commit()
+
+    row2.detail = {"amount": 999999}
+    await session.commit()
+
+    # Re-running the stamp pass cannot launder this: idempotent stamping only
+    # ever touches rows whose hash is NULL.
+    n = await stamp_unhashed_events(session)
+    await session.commit()
+    assert n == 0
+
+    result = await verify_chain(session)
+    assert result.intact is False
+    assert result.first_broken_id == row2.id
+
+
+async def test_stamping_without_a_secret_refuses(session: AsyncSession) -> None:
+    """Fail-closed: an unkeyed chain is a chain anyone could forge."""
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delenv("AUDIT_CHAIN_SECRET", raising=False)
+    get_settings.cache_clear()
+    try:
+        case_id = uuid.uuid4()
+        await _add_event(session, case_id, "opened")
+        await session.commit()
+
+        with pytest.raises(AuditChainNotKeyedError):
+            await stamp_unhashed_events(session)
+        with pytest.raises(AuditChainNotKeyedError):
+            await verify_chain(session)
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
+async def test_verify_after_a_key_rotation_fails_until_restamped(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Rotating AUDIT_CHAIN_SECRET invalidates every existing stamp by design —
+    the recomputation cannot tell an attacker's rewrite from an operator's
+    rotation, and that is deliberate. Clearing the stamps and re-stamping
+    under the new key restores a verifiable chain (an explicit, auditable
+    operator action — different from an attacker silently editing rows).
+    """
+    case_id = uuid.uuid4()
+    await _add_event(session, case_id, "opened")
+    await _add_event(session, case_id, "closed", reason="rotated")
+    await session.commit()
+    await stamp_unhashed_events(session)
+    await session.commit()
+    assert (await verify_chain(session)).intact is True
+
+    monkeypatch.setenv("AUDIT_CHAIN_SECRET", "rotated-secret")
+    get_settings.cache_clear()
+    assert (await verify_chain(session)).intact is False
+
+    # Operator path: explicitly clear and re-stamp under the new key.
+    await session.execute(sa.update(CaseEvent).values(event_hash=None, prev_event_hash=None))
+    await session.commit()
+    await stamp_unhashed_events(session)
+    await session.commit()
+    assert (await verify_chain(session)).intact is True
 
 
 async def test_stamping_is_idempotent_and_only_chains_new_rows(

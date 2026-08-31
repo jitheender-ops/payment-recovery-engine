@@ -25,6 +25,7 @@ from src.customer.routes import router as customer_router
 from src.database import close_db, init_db
 from src.ingestion.risk_router import router as risk_router
 from src.ingestion.router import router as webhook_router
+from src.merchant.receivables_api import router as receivables_api_router
 from src.merchant.routes import router as merchant_router
 
 settings = get_settings()
@@ -133,6 +134,14 @@ app.include_router(webhook_router, prefix="/webhooks", tags=["webhooks"])
 # surface is closed until configured on purpose.
 app.include_router(risk_router, prefix="/risks", tags=["risks"])
 
+# The receivables merchant API: closures and verdicts the engine cannot
+# decide for itself (external payments, dispute resolutions, call tasks).
+# Same HMAC surface as /risks — the signer is the same merchant system, so
+# the same secret and the same fail-closed rule.
+app.include_router(
+    receivables_api_router, prefix="/ar", tags=["receivables"]
+)
+
 # The customer-facing recovery page. Deliberately NOT behind require_api_key:
 # the reader is a member of the public who just had a payment fail, and cannot
 # hold an API key. Its authentication is the signed, expiring, single-case token
@@ -149,6 +158,15 @@ app.include_router(customer_router, tags=["customer"], include_in_schema=False)
 # authenticates with the DASHBOARD_PASSWORD session cookie and fails closed when
 # it is unset; the landing renders product facts only and no live numbers.
 app.include_router(merchant_router, tags=["merchant"], include_in_schema=False)
+
+# The voice surface: a provider-agnostic webhook (POST /voice/turn) that a
+# telephony provider calls with a transcript and reads back a grounded,
+# Hinglish reply. HMAC-signed like the other webhook surfaces — closed until
+# VOICE_WEBHOOK_SECRET is set. Not in the schema: its caller is a provider's
+# bridge, not a browsing human.
+from src.voice.webhook import router as voice_router  # noqa: E402
+
+app.include_router(voice_router, include_in_schema=False)
 
 if not _docs_public:
     # The schema itself stays useful outside development — client codegen and

@@ -104,7 +104,23 @@ jobs:
       - run: pip install semgrep
       # Inline nosemgrep suppressions carry written rationale; --error makes
       # any unsuppressed finding fail the build.
-      - run: semgrep scan --config p/default --metrics=off --error src scripts eval dashboard
+      #
+      # django-no-csrf-token is excluded at the RULE level, not per form: this
+      # is FastAPI + Jinja2 and there is no Django in the dependency tree, so
+      # the rule cannot ever be right here — it matches any `<form
+      # method="post">` in a .html file and asks for a `{% csrf_token %}` tag
+      # that does not exist outside Django. Suppressing it per form would mean
+      # re-arguing it on every form ever added.
+      #
+      # The underlying concern is separately handled: the console session
+      # cookie is httponly + samesite=lax + secure (src/merchant/routes.py), so
+      # a cross-site POST carries no session, and the customer forms
+      # authenticate by the signed token in their own URL rather than a cookie
+      # — nothing there is ambient authority for a CSRF to ride.
+      - run: >
+          semgrep scan --config p/default --metrics=off --error
+          --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
+          src scripts eval dashboard
 
   secrets:
     name: gitleaks (secret scan, full history)

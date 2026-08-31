@@ -2,6 +2,23 @@
 {% from "_icons.html" import icon %}
 {% block title %}Live ledger · Recovery Console{% endblock %}
 
+{#
+  The console, ordered by the questions a merchant actually asks, in order:
+
+    1. Is the engine running?        heartbeat strip — if not, nothing below is current
+    2. How much is still out there?  the money line
+    3. What needs me?                the worklist — the spine of this page
+    4. How is the chase going?       ladder, promises, plans, per-chaser
+    5. What has it been doing?       activity
+
+  The editorial claim is step 3. This console holds two kinds of content:
+  money state you READ, and work state you ACT on. A frozen dispute and a
+  vanity total used to sit at the same visual weight several screens apart.
+  Automation here is deliberately bounded — it refuses what only a person can
+  decide — so the things it refused are the page's most important content, not
+  a footnote.
+#}
+
 {% block body %}
 <nav class="nav">
   <div class="nav-in">
@@ -11,7 +28,7 @@
     </a>
     <div class="nav-links">
       <a class="nav-link hide-sm" href="/console">Overview</a>
-      <span class="chip" id="db-chip"><span class="dot {% if not db_ok %}off{% endif %}"></span>{{ "Connected" if db_ok else "Database unreachable" }}</span>
+      <span class="chip"><span class="dot {% if not db_ok %}off{% endif %}"></span>{{ "Connected" if db_ok else "Database unreachable" }}</span>
       <form method="post" action="/console/logout" style="display:contents">
         <button class="btn btn-ghost btn-sm" type="submit">{{ icon("logout", 14) }} Sign out</button>
       </form>
@@ -19,18 +36,35 @@
   </div>
 </nav>
 
-<main class="section" style="padding-top:clamp(2.5rem,6vh,4rem)">
+{% if db_ok and data.has_data %}
+{# The heartbeat sits above everything because it qualifies everything: a
+   stale scheduler means every figure below is a frozen snapshot. #}
+<div class="pulse {% if data.health.stale %}pulse-stale{% endif %}" data-stage>
+  <div class="wrap pulse-in">
+    <span class="pulse-dot"></span>
+    {% if data.health.stale %}
+      <strong>Engine stopped</strong>
+      <span class="pulse-detail">
+        {% if data.health.last_tick %}Last sweep {{ data.health.last_tick }} IST — no retries or reminders are firing.
+        {% else %}No sweep has run yet.{% endif %}
+      </span>
+    {% else %}
+      <strong>Engine running</strong>
+      <span class="pulse-detail">Last sweep {{ data.health.last_tick }} IST · {{ data.flight.scheduled }} retries parked · {{ data.flight.pending }} in flight</span>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<main class="section" style="padding-top:clamp(2rem,5vh,3rem)">
   <div class="wrap">
-    <div style="display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap" data-stage>
-      <h1 class="h2" style="font-size:clamp(1.9rem,3.4vw,2.6rem)">Live ledger</h1>
-      <span class="faint mono" style="font-size:.78rem" id="ist-now">Asia/Kolkata</span>
-    </div>
 
     {% if not db_ok %}
       <div class="card" style="margin-top:2rem;padding:2.5rem;text-align:center" data-stage="2">
         <p style="font-weight:600;font-size:1.05rem">Can't reach the database.</p>
         <p class="faint" style="margin-top:.4rem">The console shows nothing rather than something wrong. Check the database and reload.</p>
       </div>
+
     {% elif not data.has_data %}
       <div class="card" style="margin-top:2rem;padding:2.5rem;max-width:60ch" data-stage="2">
         <p style="font-weight:600;font-size:1.05rem">The ledger is empty.</p>
@@ -38,44 +72,196 @@
         <span class="mono" style="font-size:.8rem">POST /risks</span> — see the
         <a href="/console#integrate">integration guide</a>.</p>
       </div>
+
     {% else %}
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-top:2rem" id="kpi-grid" data-stage="2">
-        <div class="kpi">
-          <span class="kpi-label">Recovered</span>
-          <span class="kpi-value green" data-count="{{ data.recovered | replace('₹','') | replace(',','') }}">{{ data.recovered }}</span>
-          <span class="kpi-foot">{{ data.recovered_cases }} of {{ data.cases }} cases closed paid</span>
+
+      {# ── 2. The money line ──────────────────────────────────────────────
+         Two figures, not four tiles. STILL OWED is the balance (at-risk
+         minus what has come in), because at_risk never shrinks and a book
+         with heavy part-payment would otherwise read as if nothing had been
+         collected. BROUGHT BACK separates what our links earned from what
+         arrived anyway — the engine never takes credit for the control group. #}
+      <section class="money" data-stage="2">
+        <div class="money-half">
+          <span class="money-label">Still owed</span>
+          <span class="money-value red" data-count="{{ data.outstanding.outstanding | replace('₹','') | replace(',','') }}">{{ data.outstanding.outstanding }}</span>
+          <span class="money-foot">
+            across {{ data.outstanding.open_cases }} open case{{ "s" if data.outstanding.open_cases != 1 }}{% if data.outstanding.part_paid_cases %} · {{ data.outstanding.part_paid }} already part-paid on {{ data.outstanding.part_paid_cases }} of them{% endif %}
+          </span>
         </div>
-        <div class="kpi">
-          <span class="kpi-label">At risk</span>
-          <span class="kpi-value red" data-count="{{ data.at_risk | replace('₹','') | replace(',','') }}">{{ data.at_risk }}</span>
-          <span class="kpi-foot">{{ data.cases - data.recovered_cases }} cases still open</span>
+        <div class="money-rule" aria-hidden="true"></div>
+        <div class="money-half">
+          <span class="money-label">Brought back</span>
+          <span class="money-value green" data-count="{{ data.recovered | replace('₹','') | replace(',','') }}">{{ data.recovered }}</span>
+          <span class="money-foot">
+            {{ data.attributed }} through a link we sent · {{ data.recovered_cases }} of {{ data.cases }} cases closed paid
+          </span>
         </div>
-        <div class="kpi">
-          <span class="kpi-label">Recovery rate</span>
-          <span class="kpi-value" data-count="{{ data.recovery_rate }}" data-format="pct">{{ data.recovery_rate }}%</span>
-          <span class="kpi-foot">₹{{ data.attributed | replace('₹','') }} recovered through chases</span>
+      </section>
+
+      {# ── 3. The worklist ────────────────────────────────────────────────
+         The spine. Empty is a real answer and gets said out loud. #}
+      <section class="needs" data-stage="3">
+        <div class="needs-head">
+          <h2 class="needs-title">Needs you</h2>
+          {% if data.attention %}<span class="needs-count">{{ data.attention | length }}</span>{% endif %}
         </div>
-        <div class="kpi">
-          <span class="kpi-label">In flight</span>
-          <span class="kpi-value" data-count="{{ data.pending + data.scheduled }}" data-format="int">{{ data.pending + data.scheduled }}</span>
-          <span class="kpi-foot">{{ data.pending }} pending · {{ data.scheduled }} scheduled</span>
-        </div>
+        {% if data.attention %}
+          <ul class="needs-list">
+            {% for item in data.attention %}
+            <li class="needs-item needs-{{ item.kind }}">
+              <span class="needs-bar" aria-hidden="true"></span>
+              <div>
+                <p class="needs-item-title">{{ item.title }}</p>
+                <p class="needs-item-detail">{{ item.detail }}</p>
+              </div>
+            </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="needs-clear">Nothing needs you. Every case is either being chased or closed.</p>
+        {% endif %}
+      </section>
+
+      {# ── 4a. The ladder (signature) ─────────────────────────────────────
+         The B2B dunning ladder as a ladder. Rungs climb because escalation
+         climbs; the gap between them widens the way the real gaps do
+         (3 → 7 → 7 → 7 days); and who each rung addresses changes as it
+         hardens. The numbering is not decoration — days-past-due is a real
+         sequence and the order is the information. #}
+      {% if data.ladder.accounts %}
+      <section class="block" data-reveal>
+        <h2 class="block-title">The ladder</h2>
+        <p class="block-sub">Where each buyer account sits right now. One contact per account per rung — a buyer with four overdue invoices gets one statement, not four messages.</p>
+        <ol class="ladder">
+          {% for stage in data.ladder.stages | reverse %}
+          <li class="rung {% if stage.accounts %}rung-live{% endif %}">
+            <span class="rung-n">{{ stage.level }}</span>
+            <span class="rung-tone">{{ stage.tone }}</span>
+            <span class="rung-day">day {{ stage.days }}</span>
+            <span class="rung-who">{{ stage.addresses }}</span>
+            <span class="rung-count">
+              {% if stage.accounts %}{{ stage.accounts }} account{{ "s" if stage.accounts != 1 }}{% else %}—{% endif %}
+            </span>
+          </li>
+          {% endfor %}
+        </ol>
+        {% if data.ladder.open_call_tasks %}
+        <p class="block-note">{{ data.ladder.open_call_tasks }} call task{{ "s" if data.ladder.open_call_tasks != 1 }} raised for your team at the urgent rung. These never spend a customer's contact budget.</p>
+        {% endif %}
+      </section>
+      {% endif %}
+
+      {# ── 4b. Promises and plans ─────────────────────────────────────── #}
+      <div class="pair">
+        {% if data.promises.total %}
+        <section class="block" data-reveal>
+          <h2 class="block-title">Promises to pay</h2>
+          <p class="block-sub">
+            {% if data.promises.kept_rate is not none %}
+              {{ data.promises.kept_rate }}% of resolved promises were kept.
+            {% else %}
+              Nothing has resolved yet.
+            {% endif %}
+            A pending promise keeps the case quiet until its date.
+          </p>
+
+          {% set resolved = data.promises.kept + data.promises.broken %}
+          {% if resolved %}
+          <div class="split" role="img"
+               aria-label="{{ data.promises.kept }} kept, {{ data.promises.broken }} broken">
+            <span class="split-kept" style="flex:{{ data.promises.kept }}"></span>
+            <span class="split-broken" style="flex:{{ data.promises.broken }}"></span>
+          </div>
+          <div class="split-key">
+            <span><b class="green">{{ data.promises.kept }}</b> kept{% if data.promises.kept_late %} <span class="faint">({{ data.promises.kept_late }} inside the grace window)</span>{% endif %}</span>
+            <span><b class="red">{{ data.promises.broken }}</b> broken</span>
+          </div>
+          {% endif %}
+
+          {% if data.promises.upcoming %}
+          <table class="mini">
+            <caption class="mini-cap">{{ data.promises.pending }} pending · {{ data.promises.pending_amount }} promised</caption>
+            <tbody>
+              {% for p in data.promises.upcoming %}
+              <tr>
+                <td class="mono nowrap">{{ p.due }}</td>
+                <td class="mono ref">{{ p.subject_ref }}</td>
+                <td class="faint">{{ p.channel }}{% if p.reminded %} · reminded{% endif %}</td>
+                <td class="num">{{ p.amount }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+        </section>
+        {% endif %}
+
+        {% if data.plans.total %}
+        <section class="block" data-reveal>
+          <h2 class="block-title">Payment plans</h2>
+          <p class="block-sub">{{ data.plans.active }} active · {{ data.plans.completed }} completed · {{ data.plans.defaulted }} defaulted. Each instalment is a promise, so a missed one breaks on the clock and the chase resumes a rung firmer.</p>
+          {% if data.plans.plans %}
+          <table class="mini">
+            <tbody>
+              {% for pl in data.plans.plans %}
+              <tr>
+                <td class="mono ref">{{ pl.subject_ref }}</td>
+                <td>
+                  <span class="pips" role="img" aria-label="{{ pl.paid }} of {{ pl.instalments }} instalments paid">
+                    {% for i in range(pl.instalments) %}<b class="pip {% if i < pl.paid %}pip-on{% endif %}"></b>{% endfor %}
+                  </span>
+                </td>
+                <td class="faint nowrap">{{ pl.paid }}/{{ pl.instalments }}</td>
+                <td class="num">{{ pl.target }}{% if pl.settled %}<span class="faint"> settled</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+        </section>
+        {% endif %}
       </div>
 
-      <section style="margin-top:3rem" data-reveal>
-        <h2 style="font-size:1.15rem;letter-spacing:-.02em">By chaser</h2>
+      {# ── 4c. Open disputes, in full ─────────────────────────────────────
+         Summarised in the worklist above; the customer's own words belong
+         here, because the reason is what a person actually decides on. #}
+      {% if data.disputes.disputes %}
+      <section class="block" data-reveal>
+        <h2 class="block-title">Disputed invoices</h2>
+        <p class="block-sub">Chasing is frozen on these until you uphold or reject the dispute. Nothing in the engine resolves one — "this invoice is wrong" is a commercial judgement.</p>
+        <div class="card" style="margin-top:1rem">
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>Reference</th><th class="num">Outstanding</th><th>Raised</th><th>What they said</th></tr></thead>
+              <tbody>
+                {% for d in data.disputes.disputes %}
+                <tr>
+                  <td class="mono ref">{{ d.subject_ref }}</td>
+                  <td class="num red">{{ d.outstanding }}</td>
+                  <td class="faint nowrap">{{ d.opened }} · {{ d.days_open }}d</td>
+                  <td class="faint">{{ d.reason }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+
+      {# ── 4d. Per chaser ─────────────────────────────────────────────── #}
+      <section class="block" data-reveal>
+        <h2 class="block-title">By chaser</h2>
+        <p class="block-sub">Five ways revenue leaks, one bounded workflow each.</p>
         <div class="card" style="margin-top:1rem">
           <div class="table-wrap">
             <table class="table">
               <thead>
                 <tr>
-                  <th>Chaser</th>
-                  <th class="num">Cases</th>
-                  <th class="num">Recovered</th>
-                  <th class="num">Rate</th>
-                  <th class="num">At risk</th>
-                  <th class="num">Brought back</th>
-                  <th class="num">Attributed</th>
+                  <th>Chaser</th><th class="num">Cases</th><th class="num">Recovered</th>
+                  <th class="num">Rate</th><th class="num">At risk</th>
+                  <th class="num">Brought back</th><th class="num">Attributed</th>
                 </tr>
               </thead>
               <tbody>
@@ -96,40 +282,76 @@
         </div>
       </section>
 
-      <section style="margin-top:3rem" data-reveal>
-        <h2 style="font-size:1.15rem;letter-spacing:-.02em">Policy engine</h2>
-        <p class="faint" style="font-size:.85rem;margin-top:.3rem">What the guardrail actually refused — a live query against every decision made, not a claim.</p>
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin-top:1rem">
-          <div class="kpi">
-            <span class="kpi-label">Actions blocked</span>
-            <span class="kpi-value" data-count="{{ data.actions_blocked }}" data-format="int">{{ data.actions_blocked }}</span>
-            <span class="kpi-foot">proposed by the policy agent, rejected before execution</span>
+      {# ── 4e. What the guardrail refused, and receivables aging ──────── #}
+      <div class="pair">
+        <section class="block" data-reveal>
+          <h2 class="block-title">What the guardrail refused</h2>
+          <p class="block-sub">Actions the policy agent proposed and the deterministic gate stopped before execution. A live count, not a claim.</p>
+          <div class="duo">
+            <div class="kpi">
+              <span class="kpi-label">Actions blocked</span>
+              <span class="kpi-value" data-count="{{ data.actions_blocked }}" data-format="int">{{ data.actions_blocked }}</span>
+              <span class="kpi-foot">rejected before any money moved</span>
+            </div>
+            <div class="kpi">
+              <span class="kpi-label">Compliance blocks</span>
+              <span class="kpi-value" data-count="{{ data.compliance_blocks }}" data-format="int">{{ data.compliance_blocks }}</span>
+              <span class="kpi-foot">stopped on a cited clause (RBI e-mandate)</span>
+            </div>
           </div>
-          <div class="kpi">
-            <span class="kpi-label">Compliance violations</span>
-            <span class="kpi-value{% if data.compliance_violations == 0 %} green{% else %} red{% endif %}" data-count="{{ data.compliance_violations }}" data-format="int">{{ data.compliance_violations }}</span>
-            <span class="kpi-foot">blocked specifically on a cited regulatory clause (RBI e-mandate)</span>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      {% if data.exceptions %}
-      <section style="margin-top:3rem" data-reveal>
-        <h2 style="font-size:1.15rem;letter-spacing:-.02em">Exception list</h2>
-        <p class="faint" style="font-size:.85rem;margin-top:.3rem">Cases the engine could not resolve — attempt budget spent, still open, never recovered. Shown, not hidden.</p>
+        {% if data.ar_aging %}
+        <section class="block" data-reveal>
+          <h2 class="block-title">Receivables aging</h2>
+          <p class="block-sub">Open B2B invoices by days past due{% if data.ar_days_to_pay is not none %} · {{ data.ar_days_to_pay }} days from due to paid on average{% endif %}.</p>
+          <table class="mini">
+            <tbody>
+              {% for b in data.ar_aging %}
+              <tr>
+                <td>{{ b.label }}</td>
+                <td class="faint">{{ b.count }} invoice{{ "s" if b.count != 1 }}</td>
+                <td class="num">{{ b.outstanding }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+      </div>
+
+      {# ── 5. Activity ────────────────────────────────────────────────── #}
+      {% if data.activity %}
+      <section class="block" data-reveal>
+        <h2 class="block-title">Recent activity</h2>
+        <p class="block-sub">Every case keeps an append-only trail. This is the newest of it.</p>
+        <ul class="feed">
+          {% for a in data.activity %}
+          <li class="feed-row">
+            <span class="mono feed-when">{{ a.when }}</span>
+            <span class="feed-event">{{ a.event | replace("_", " ") }}</span>
+            <span class="mono ref">{{ a.subject_ref }}</span>
+            <span class="faint feed-actor">{{ a.actor }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if data.recent %}
+      <section class="block" data-reveal>
+        <h2 class="block-title">Recent recoveries</h2>
         <div class="card" style="margin-top:1rem">
           <div class="table-wrap">
             <table class="table">
-              <thead>
-                <tr><th>Chaser</th><th>Reference</th><th class="num">At risk</th><th>Why it stopped</th></tr>
-              </thead>
+              <thead><tr><th>When</th><th>Chaser</th><th>Reference</th><th class="num">Amount</th></tr></thead>
               <tbody>
-                {% for e in data.exceptions %}
+                {% for r in data.recent %}
                 <tr>
-                  <td><span class="cell-icon">{{ icon(e.icon, 16) }} {{ e.label }}</span></td>
-                  <td class="mono" style="font-size:.8rem;color:var(--ink-3)">{{ e.subject_ref }}</td>
-                  <td class="num red">{{ e.at_risk }}</td>
-                  <td class="faint" style="font-size:.85rem">{{ e.reason }}</td>
+                  <td class="mono nowrap faint">{{ r.when }}</td>
+                  <td><span class="cell-icon">{{ icon(r.icon, 16) }} {{ r.label }}</span></td>
+                  <td class="mono ref">{{ r.subject_ref }}</td>
+                  <td class="num green">{{ r.amount }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -139,31 +361,9 @@
       </section>
       {% endif %}
 
-      <section style="margin-top:3rem" data-reveal>
-        <h2 style="font-size:1.15rem;letter-spacing:-.02em">Recent recoveries</h2>
-        <div class="card" style="margin-top:1rem">
-          <div class="table-wrap">
-            <table class="table">
-              <thead>
-                <tr><th>When</th><th>Chaser</th><th>Reference</th><th class="num">Amount</th></tr>
-              </thead>
-              <tbody>
-                {% for r in data.recent %}
-                <tr>
-                  <td class="mono" style="font-size:.8rem;color:var(--ink-2);white-space:nowrap">{{ r.when }}</td>
-                  <td><span class="cell-icon">{{ icon(r.icon, 16) }} {{ r.label }}</span></td>
-                  <td class="mono" style="font-size:.8rem;color:var(--ink-3)">{{ r.subject_ref }}</td>
-                  <td class="num green">{{ r.amount }}</td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <p class="faint" style="font-size:.78rem;margin-top:.7rem">
-          Aggregates and your own references only — the console never shows customer emails, phones or ids.
-        </p>
-      </section>
+      <p class="faint" style="font-size:.78rem;margin-top:2rem">
+        Aggregates and your own references only — the console never shows customer emails, phones or ids.
+      </p>
     {% endif %}
   </div>
 </main>
@@ -178,20 +378,148 @@
 
 {% block scripts %}
 <style>
-  @media (max-width:960px){ #kpi-grid{grid-template-columns:repeat(2,1fr)!important} }
-  @media (max-width:540px){ #kpi-grid{grid-template-columns:1fr!important} }
-</style>
-<script>
-(function () {
-  var el = document.getElementById("ist-now");
-  if (el && window.Intl) {
-    try {
-      el.textContent = new Intl.DateTimeFormat("en-IN", {
-        timeZone: "Asia/Kolkata", day: "numeric", month: "short",
-        hour: "2-digit", minute: "2-digit", hour12: true
-      }).format(new Date()) + " IST";
-    } catch (e) { /* keep the static fallback */ }
+  /* Page-local. Every colour is a base.html token — the palette and type are
+     pinned by the design system and nothing here introduces a new one. */
+
+  /* ── Heartbeat strip ───────────────────────────────────────────────── */
+  .pulse{border-bottom:1px solid var(--line);background:var(--green-tint)}
+  .pulse-in{display:flex;align-items:center;gap:.6rem;
+            padding:.62rem 0;font-size:.83rem;color:var(--ink-2)}
+  .pulse strong{color:var(--green-deep);font-weight:600}
+  .pulse-dot{width:7px;height:7px;border-radius:50%;background:var(--green);
+             flex:none;box-shadow:0 0 0 3px var(--green-tint)}
+  .pulse-detail{color:var(--ink-3)}
+  .pulse-stale{background:var(--red-tint);border-bottom-color:rgba(179,38,30,.25)}
+  .pulse-stale strong{color:var(--red)}
+  .pulse-stale .pulse-dot{background:var(--red);box-shadow:0 0 0 3px var(--red-tint);
+                          animation:beat 1.8s var(--ease) infinite}
+  @keyframes beat{0%,100%{opacity:1}50%{opacity:.35}}
+
+  /* ── The money line ────────────────────────────────────────────────── */
+  .money{display:grid;grid-template-columns:1fr auto 1fr;gap:clamp(1.5rem,4vw,3.5rem);
+         align-items:start;margin-top:clamp(1.5rem,4vh,2.5rem)}
+  .money-rule{width:1px;align-self:stretch;background:var(--line-2)}
+  .money-half{display:flex;flex-direction:column;gap:.3rem;min-width:0}
+  .money-label{font-size:.76rem;letter-spacing:.09em;text-transform:uppercase;
+               color:var(--ink-3);font-weight:600}
+  .money-value{font-size:clamp(2.1rem,5.2vw,3.4rem);line-height:1;font-weight:600;
+               letter-spacing:-.035em;font-variant-numeric:tabular-nums}
+  .money-foot{font-size:.83rem;color:var(--ink-3);line-height:1.5;max-width:44ch}
+
+  /* ── Needs you ─────────────────────────────────────────────────────── */
+  .needs{margin-top:clamp(2.5rem,6vh,3.5rem)}
+  .needs-head{display:flex;align-items:center;gap:.6rem}
+  .needs-title{font-size:1.15rem;letter-spacing:-.02em;margin:0}
+  .needs-count{font-size:.75rem;font-weight:600;color:#fff;background:var(--red);
+               border-radius:999px;min-width:1.4rem;height:1.4rem;
+               display:grid;place-items:center;padding:0 .4rem}
+  .needs-list{list-style:none;margin:.9rem 0 0;padding:0;display:grid;gap:.55rem}
+  .needs-item{display:grid;grid-template-columns:3px 1fr;gap:.9rem;
+              background:var(--card);border:1px solid var(--line);
+              border-radius:var(--r-sm);padding:.85rem 1rem .85rem 0;
+              overflow:hidden;box-shadow:var(--shadow-sm)}
+  .needs-bar{background:var(--ink-3);border-radius:3px 0 0 3px}
+  .needs-dispute .needs-bar,.needs-engine .needs-bar{background:var(--red)}
+  .needs-voice .needs-bar,.needs-plan .needs-bar{background:#B8860B}
+  .needs-item-title{margin:0;font-weight:600;font-size:.95rem}
+  .needs-item-detail{margin:.2rem 0 0;font-size:.85rem;color:var(--ink-3);line-height:1.5}
+  .needs-clear{margin:.9rem 0 0;font-size:.9rem;color:var(--ink-3);
+               background:var(--green-tint);border:1px solid var(--green-line);
+               border-radius:var(--r-sm);padding:.85rem 1rem}
+
+  /* ── The ladder (signature) ────────────────────────────────────────── */
+  .ladder{list-style:none;margin:1.1rem 0 0;padding:0;
+          border-left:2px solid var(--line-2);margin-left:.7rem}
+  .rung{display:grid;
+        grid-template-columns:2.1rem 5.5rem 4.5rem 1fr auto;
+        align-items:center;gap:.9rem;
+        padding:.8rem 0 .8rem 1.1rem;position:relative;
+        border-bottom:1px solid var(--line);color:var(--ink-3)}
+  .rung:last-child{border-bottom:0}
+  /* The tick on the spine: hollow for a rung nobody is on, filled when
+     accounts are actually sitting there. */
+  .rung::before{content:"";position:absolute;left:-6px;top:50%;
+                width:10px;height:10px;margin-top:-5px;border-radius:50%;
+                background:var(--paper);border:2px solid var(--line-2)}
+  .rung-live::before{background:var(--green);border-color:var(--green)}
+  .rung-live{color:var(--ink)}
+  .rung-n{font-family:var(--mono);font-size:.78rem;color:var(--ink-3);
+          border:1px solid var(--line-2);border-radius:5px;
+          text-align:center;padding:.1rem 0}
+  .rung-live .rung-n{color:var(--green-deep);border-color:var(--green-line);
+                     background:var(--green-tint)}
+  .rung-tone{font-weight:600;font-size:.95rem;letter-spacing:-.01em;
+             text-transform:capitalize}
+  .rung-day{font-family:var(--mono);font-size:.78rem;color:var(--ink-3)}
+  .rung-who{font-size:.82rem;color:var(--ink-3);text-transform:capitalize}
+  .rung-count{font-size:.85rem;font-weight:600;white-space:nowrap}
+  .rung-live .rung-count{color:var(--green-deep)}
+
+  /* ── Shared block chrome ───────────────────────────────────────────── */
+  .block{margin-top:clamp(2.5rem,6vh,3.5rem)}
+  .block-title{font-size:1.15rem;letter-spacing:-.02em;margin:0}
+  .block-sub{font-size:.85rem;color:var(--ink-3);margin:.3rem 0 0;
+             line-height:1.55;max-width:68ch}
+  .block-note{font-size:.82rem;color:var(--ink-3);margin:.9rem 0 0}
+  .pair{display:grid;grid-template-columns:1fr 1fr;
+        gap:clamp(1.5rem,4vw,3rem);align-items:start}
+  .pair > .block{margin-top:clamp(2.5rem,6vh,3.5rem)}
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1rem}
+
+  /* ── Promise split bar ─────────────────────────────────────────────── */
+  .split{display:flex;height:8px;border-radius:999px;overflow:hidden;
+         margin-top:1.1rem;background:var(--well)}
+  .split-kept{background:var(--green)}
+  .split-broken{background:var(--red)}
+  .split-key{display:flex;gap:1.2rem;margin-top:.55rem;
+             font-size:.83rem;color:var(--ink-3)}
+
+  /* ── Plan instalment pips ──────────────────────────────────────────── */
+  .pips{display:inline-flex;gap:3px}
+  .pip{width:14px;height:6px;border-radius:2px;background:var(--line-2);display:block}
+  .pip-on{background:var(--green)}
+
+  /* ── Compact tables (inside a block, no card chrome) ───────────────── */
+  .mini{width:100%;border-collapse:collapse;margin-top:1rem;font-size:.85rem}
+  .mini-cap{caption-side:top;text-align:left;font-size:.8rem;
+            color:var(--ink-3);padding-bottom:.5rem}
+  .mini td{padding:.5rem 0;border-bottom:1px solid var(--line);vertical-align:middle}
+  .mini tr:last-child td{border-bottom:0}
+  .mini .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+
+  /* ── Activity feed ─────────────────────────────────────────────────── */
+  .feed{list-style:none;margin:1rem 0 0;padding:0}
+  .feed-row{display:grid;grid-template-columns:8.5rem 11rem 1fr auto;
+            gap:1rem;align-items:baseline;padding:.5rem 0;
+            border-bottom:1px solid var(--line);font-size:.85rem}
+  .feed-row:last-child{border-bottom:0}
+  .feed-when{font-size:.78rem;color:var(--ink-3);white-space:nowrap}
+  .feed-event{font-weight:600;text-transform:capitalize}
+  .feed-actor{font-size:.78rem;text-align:right}
+
+  .ref{font-size:.8rem;color:var(--ink-3)}
+  .nowrap{white-space:nowrap}
+
+  /* ── Responsive ────────────────────────────────────────────────────── */
+  @media (max-width:900px){
+    .pair,.duo{grid-template-columns:1fr}
+    .money{grid-template-columns:1fr;gap:1.75rem}
+    .money-rule{display:none}
+    .money-half + .money-half{border-top:1px solid var(--line-2);padding-top:1.5rem}
   }
-})();
-</script>
+  @media (max-width:680px){
+    .rung{grid-template-columns:2.1rem 1fr auto;row-gap:.25rem}
+    .rung-day{grid-column:2}
+    .rung-who{grid-column:2;grid-row:3}
+    .rung-count{grid-column:3;grid-row:1}
+    .feed-row{grid-template-columns:1fr auto;row-gap:.15rem}
+    .feed-when{grid-column:1}
+    .feed-actor{grid-column:2;grid-row:1}
+    .feed-event{grid-column:1;grid-row:2}
+    .feed-row .ref{grid-column:2;grid-row:2;text-align:right}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .pulse-stale .pulse-dot{animation:none}
+  }
+</style>
 {% endblock %}

@@ -41,10 +41,11 @@ def validate_action_schema(
     if action.action == "retry_at" and action.retry_at is None:
         return False, None, "retry_at action requires a retry_at timestamp"
 
-    if action.action == "retry_at" and action.retry_at is not None:
+    # Here action == "retry_at" implies retry_at is set (checked above).
+    if action.action == "retry_at":
         from datetime import datetime
         now = datetime.now(UTC)
-        if action.retry_at < now:
+        if action.retry_at is not None and action.retry_at < now:
             return False, None, f"retry_at timestamp is in the past: {action.retry_at}"
 
     return True, action, None

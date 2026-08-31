@@ -25,13 +25,17 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
+from sqlalchemy import case as sql_case
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.chasers.policy import policy_for
 from src.config import get_settings
 from src.models import (
     CaseEvent,
@@ -68,6 +72,13 @@ RiskType = Literal[
     "invoice_overdue",
     "mandate_failure",
 ]
+
+# The same set as a runtime membership test. Literals do not exist at runtime,
+# and attribute_capture has to reject a `risk_type` that arrived in a payment's
+# notes — merchant-controlled data addressing a case by natural key — before it
+# can look one up.
+RISK_TYPES: frozenset[str] = frozenset(get_args(RiskType))
+
 
 # Terminal unless "open". Every non-open state is a stopping rule that fired, and
 # the reason it fired is in `close_reason`.
@@ -111,6 +122,8 @@ CaseEventType = Literal[
     "promise_kept",
     "promise_broken",
     "promise_cancelled",
+    "promise_refused",
+    "promise_reminder_skipped",
     "attributed",
     "overpayment",
     "closed",
@@ -119,6 +132,7 @@ CaseEventType = Literal[
     "stopped",
     "reconciled",
     "mandate_post_debit_confirmation",
+    "page_viewed",
 ]
 
 _TERMINAL: frozenset[str] = frozenset(
@@ -240,6 +254,7 @@ async def open_case(
     max_attempts: int | None = None,
     due_at: datetime | None = None,
     next_action_at: datetime | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> RecoveryCase:
     """
     Get or create the case for this subject. Idempotent.
@@ -260,6 +275,10 @@ async def open_case(
         customer_id=customer_id,
         batch_id=batch_id,
         due_at=due_at,
+        # The AR account this case consolidates under (B2B receivables).
+        # NULL for every non-invoice case and any case with no derivable
+        # buyer — the chase is per-case, exactly as before the layer existed.
+        account_id=account_id,
         # Webhook-driven risk types leave this NULL: a payment.failed event is
         # itself the trigger, so nothing needs to go looking for the case. The
         # ones with no inbound event — an overdue invoice, a cold cart — must
@@ -362,9 +381,51 @@ def attach_attempt(
         # never about the first message — it is about the fourth one arriving as
         # fast as the first. `escalation_level` existed before this and decided
         # nothing; this is the line that makes it a bound rather than a counter.
-        case.next_action_at = datetime.now(UTC) + timedelta(
+        now = datetime.now(UTC)
+        backoff = now + timedelta(
             hours=get_settings().escalation_backoff_hours * case.escalation_level
         )
+        # A cart's LAST rung is a last call: when the contact just attached
+        # spends the second-to-last slot, the next (final) touch is positioned
+        # just before the consent window closes instead of at the flat gap —
+        # the honest real deadline is what speeds payment (Klaviyo/Loopwork).
+        # The quiet-gap floor still wins when the window is too close to
+        # honour it: max(), never a silent spam touch.
+        if (
+            case.risk_type == "checkout_abandonment"
+            and case.attempts_used + 1 >= case.max_attempts
+            and case.opened_at is not None
+        ):
+            policy = policy_for(case.risk_type)
+            if policy is not None:
+                opened = case.opened_at
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=UTC)
+                window_end = opened + timedelta(hours=policy.consent_window_hours)
+                last_call = window_end - timedelta(hours=2)
+                if last_call > backoff:
+                    backoff = last_call
+        case.next_action_at = backoff
+
+
+def outstanding_paise(case: RecoveryCase) -> int:
+    """
+    What is genuinely still owed on this case, in paise.
+
+    `amount_at_risk` is what the money was WHEN THE CASE OPENED; it never
+    shrinks. A case stays open until `amount_recovered >= amount_at_risk`, so
+    between a part payment and the close there is a window where the two
+    numbers disagree — and a B2B invoice paid in instalments lives in that
+    window for weeks by design.
+
+    Every surface that names a figure to a customer has to use this one, and
+    the ones that did not were asking for money already in the bank: the
+    minted Payment Link (full original amount), and the voice agent's promise
+    branch, whose own comment said to use the outstanding and then read the
+    at-risk label anyway. Clamped at zero — a case credited past its own total
+    (an overpayment mid-flight) owes nothing, it does not owe a negative.
+    """
+    return max(0, case.amount_at_risk - (case.amount_recovered or 0))
 
 
 def close_case(case: RecoveryCase, state: CaseState, reason: str) -> None:
@@ -384,6 +445,8 @@ async def attribute_capture(
     link_id: str | None = None,
     idempotency_key: str | None = None,
     order_ref: str | None = None,
+    subject_ref: str | None = None,
+    risk_type: str | None = None,
 ) -> RecoveryCase | None:
     """
     Credit a captured payment to the case that earned it.
@@ -400,6 +463,19 @@ async def attribute_capture(
                             `recovered_via_attempt_id` stays NULL. Closing the
                             case still matters — otherwise it keeps spending
                             attempt budget chasing money already in the bank.
+      4. `subject_ref`    — the merchant's own reference, off the payment's
+                            `notes`, paired with `risk_type`. Also self-
+                            recovery, and the ONLY one of these that can ever
+                            reach a chaser-driven case: step 3 hops through
+                            `payment_failures`, and an invoice, a cart, a
+                            subscription and a mandate have no row in that
+                            table, so a buyer paying an invoice through the
+                            merchant's own Razorpay object was invisible and
+                            the case kept chasing them. Requires the merchant
+                            to stamp the notes; money that never touches
+                            Razorpay at all (NEFT, a cheque) is genuinely
+                            undetectable here and belongs to
+                            POST /receivables/cases/paid.
 
     Returns the case credited, or None if the capture is unrelated to any case
     we opened — the common path, since most payments never fail. A capture
@@ -437,11 +513,24 @@ async def attribute_capture(
         )
 
     case: RecoveryCase | None = None
+    matched_on = "link_id" if link_id else "idempotency_key"
     if attempt is not None and attempt.recovery_case_id is not None:
         case = await session.get(RecoveryCase, attempt.recovery_case_id)
     elif order_ref:
         case = await _find_case_by_order(session, order_ref)
         attempt = None  # self-recovery: no attempt of ours earned this
+        matched_on = "order_ref"
+
+    # Weakest and last: the merchant's own reference off the payment's notes.
+    # Restricted to OPEN cases, exactly like the order_ref hop — a settled
+    # case must not be re-credited by a stray note — and to a known risk type,
+    # so an arbitrary notes value cannot address a case at all.
+    if case is None and subject_ref and risk_type in RISK_TYPES:
+        found = await find_case(session, risk_type=risk_type, subject_ref=subject_ref)
+        if found is not None and found.state == "open":
+            case = found
+            attempt = None  # self-recovery: no attempt of ours earned this
+            matched_on = "notes_subject_ref"
 
     if case is None:
         logger.info("Capture %s matched no recovery case", recovered_ref)
@@ -483,9 +572,7 @@ async def attribute_capture(
             amount=amount,
             recovered_ref=recovered_ref,
             attributed_to_attempt=str(attempt.id) if attempt is not None else None,
-            matched_on=(
-                "link_id" if link_id else "idempotency_key" if idempotency_key else "order_ref"
-            ),
+            matched_on=matched_on,
             reason=f"case already {case.state}: {case.close_reason or 'no reason recorded'}",
         )
         logger.warning(
@@ -508,9 +595,7 @@ async def attribute_capture(
         amount=amount,
         recovered_ref=recovered_ref,
         attributed_to_attempt=str(attempt.id) if attempt is not None else None,
-        matched_on=(
-            "link_id" if link_id else "idempotency_key" if idempotency_key else "order_ref"
-        ),
+        matched_on=matched_on,
     )
 
     # RBI e-mandate framework, 2026: a post-debit confirmation is required on
@@ -678,6 +763,86 @@ async def batch_summary(
     }
 
 
+async def chase_effectiveness(
+    session: AsyncSession, risk_type: str | None = None
+) -> list[dict[str, float | int | str]]:
+    """
+    Per-risk-type, per-touch recovery funnel, from tables the engine owns.
+
+    One row per (risk_type, attempt_number): cases contacted at that touch,
+    how many later recovered, and the page-view rate — the CTR proxy for the
+    nudge the research benchmarks (Klaviyo 2024) are stated against. Answers
+    "does touch 2 earn its slot" per type, which is the question the chase
+    policies are tuned by. No new tables: recovery_cases × retry_attempts ×
+    case_events, joined on keys that already exist.
+    """
+    where = [RecoveryCase.risk_type == risk_type] if risk_type else []
+    contacted_rows = (
+        (
+            await session.execute(
+                select(
+                    RecoveryCase.risk_type,
+                    RetryAttempt.attempt_number,
+                    func.count(func.distinct(RecoveryCase.id)),
+                    func.count(
+                        func.distinct(
+                            sql_case(
+                                (RecoveryCase.state == "recovered", RecoveryCase.id),
+                            )
+                        )
+                    ),
+                )
+                .join(RetryAttempt, RetryAttempt.recovery_case_id == RecoveryCase.id)
+                .where(RetryAttempt.result == "success", *where)
+                .group_by(RecoveryCase.risk_type, RetryAttempt.attempt_number)
+                .order_by(RecoveryCase.risk_type, RetryAttempt.attempt_number)
+            )
+        ).all()
+    )
+    # Cases whose page was served, per (risk_type, touch): a case that was
+    # successfully contacted at that touch AND has a page_viewed event. The
+    # event belongs to the case, so the join is "was contacted at this touch"
+    # — page views land after contact, which is the CTR the nudge earns.
+    viewed_rows = (
+        (
+            await session.execute(
+                select(
+                    RecoveryCase.risk_type,
+                    RetryAttempt.attempt_number,
+                    func.count(func.distinct(RecoveryCase.id)),
+                )
+                .join(RetryAttempt, RetryAttempt.recovery_case_id == RecoveryCase.id)
+                .join(CaseEvent, CaseEvent.recovery_case_id == RecoveryCase.id)
+                .where(
+                    RetryAttempt.result == "success",
+                    CaseEvent.event_type == "page_viewed",
+                    *where,
+                )
+                .group_by(RecoveryCase.risk_type, RetryAttempt.attempt_number)
+            )
+        ).all()
+    )
+    viewed = {(rt, num): n for rt, num, n in viewed_rows}
+    out: list[dict[str, float | int | str]] = []
+    for risk, touch, contacted, recovered in contacted_rows:
+        views = viewed.get((risk, touch), 0)
+        out.append(
+            {
+                "risk_type": risk,
+                "touch": touch,
+                "cases_contacted": contacted,
+                "recovered": recovered,
+                "recovery_rate_pct": (
+                    round(recovered / contacted * 100, 1) if contacted else 0.0
+                ),
+                "page_view_rate_pct": (
+                    round(views / contacted * 100, 1) if contacted else 0.0
+                ),
+            }
+        )
+    return out
+
+
 # ── Audit trail ──────────────────────────────────────────────────────────────
 
 
@@ -725,9 +890,13 @@ async def record_promise(
     language: str | None = None,
     source_ref: str | None = None,
     notes: str | None = None,
-) -> PromiseToPay:
+    is_partial: bool | None = None,
+    confidence: str | None = None,
+    condition_note: str | None = None,
+    promised_rail: str | None = None,
+) -> PromiseToPay | None:
     """
-    Log a commitment to pay by a date, and go quiet until then.
+    Log a commitment to pay by a date, and go quiet until then. None = refused.
 
     The only customer response that should make the workflow quieter. Chasing
     someone who answered and named a date is both the fastest way to lose the
@@ -737,7 +906,54 @@ async def record_promise(
     escalation ladder had already scheduled. The promise is permission to wait,
     not permission to contact sooner — a customer who says "tomorrow" an hour
     after a nudge does not reset the contact-frequency floor.
+
+    Refusal, not exception: a case that already broke `max_promises_per_case - 1`
+    promises gets this one refused (audited `promise_refused`) rather than
+    another silence window it has not earned. Words that stopped predicting
+    money must not be able to park a case forever — but the refusal is a
+    policy outcome the caller surfaces in its own channel, not a crash.
+
+    Payment plans are exempt (`channel="payment_plan"`): a plan is 2-6
+    instalment promises validated as a SET by src/receivables/plans.py, not
+    serial deferrals, and its 90-day horizon is the plan validator's rule,
+    not this cap's business.
     """
+    settings = get_settings()
+    is_plan = channel == "payment_plan"
+    prior = await session.execute(
+        select(
+            func.count(PromiseToPay.id),
+            func.count(PromiseToPay.id).filter(PromiseToPay.status == "broken"),
+        ).where(
+            PromiseToPay.recovery_case_id == case.id,
+            # Plan instalments never count toward the deferral cap — they
+            # are not a re-ask of the same question, they are the answer
+            # already accepted and scheduled.
+            PromiseToPay.channel != "payment_plan",
+        )
+    )
+    total, broken_before = (int(n) for n in prior.one())
+    if not is_plan and (
+        total >= settings.max_promises_per_case
+        or broken_before >= max(0, settings.max_promises_per_case - 1)
+    ):
+        log_event(
+            session,
+            case,
+            "promise_refused",
+            actor="system",
+            reason="promise cap for this case reached",
+            prior_promises=total,
+            prior_broken=broken_before,
+            amount=amount,
+            due_at=due_at.isoformat(),
+        )
+        logger.warning(
+            "Promise refused (cap %d/%d broken %d): case=%s",
+            total, settings.max_promises_per_case, broken_before, case.id,
+        )
+        return None
+
     promise = PromiseToPay(
         recovery_case_id=case.id,
         customer_id=case.customer_id,
@@ -747,6 +963,10 @@ async def record_promise(
         language=language,
         source_ref=source_ref,
         notes=notes,
+        is_partial=is_partial,
+        confidence=confidence,
+        condition_note=condition_note,
+        promised_rail=promised_rail,
         status="pending",
     )
     session.add(promise)
@@ -766,6 +986,10 @@ async def record_promise(
         amount=amount,
         due_at=due_at.isoformat(),
         channel=channel,
+        is_partial=is_partial,
+        confidence=confidence,
+        condition_note=condition_note,
+        promised_rail=promised_rail,
     )
     logger.info(
         "Promise recorded: case=%s amount=%s due=%s channel=%s",
@@ -800,6 +1024,13 @@ async def resolve_promises(
         promise.status = status
         promise.resolved_at = now
         promise.resolved_ref = ref
+        if status == "kept":
+            # The delta: days between the date the customer named and the
+            # payment that kept it. A kept-rate that counts five-days-late as
+            # on-time is a forecast input that lies; the metrics split on
+            # this column instead.
+            late = (_aware(promise.resolved_at) - _aware(promise.due_at)).total_seconds()
+            promise.kept_late_days = max(0, int(late // 86_400))
         log_event(
             session,
             case,
@@ -808,6 +1039,7 @@ async def resolve_promises(
             amount=promise.amount_promised,
             due_at=promise.due_at.isoformat(),
             resolved_ref=ref,
+            kept_late_days=promise.kept_late_days,
         )
         moved += 1
     return moved
@@ -817,11 +1049,17 @@ async def expire_promises(
     session: AsyncSession, *, now: datetime | None = None, limit: int = 500
 ) -> int:
     """
-    Mark promises broken once their date has passed with no money, and hand the
-    case back to the chaser. Returns how many broke.
+    Mark promises broken once their date (plus grace) has passed with no money,
+    and hand the case back to the chaser. Returns how many broke.
 
     A promise is broken on the clock, never on suspicion — this function is the
-    only thing that makes that transition, so nothing upstream has to guess. It
+    only thing that makes that transition, so nothing upstream has to guess.
+    The grace window is the honesty half of that rule: a payment initiated on
+    the due date can post a day late (bank settlement, UPI pending), and
+    breaking a kept promise is the one lie this ledger must never tell. A
+    capture that lands inside grace keeps the promise instead — attribution
+    resolves it before this sweep can.
+
     It also pulls `next_action_at` back to now, which is the half that matters
     operationally: without it the case stays deferred to the promise date and
     the silence the promise bought becomes permanent. Note "now" and not NULL —
@@ -833,14 +1071,26 @@ async def expire_promises(
     case must not be made chaseable again.
     """
     now = now or datetime.now(UTC)
+    grace = timedelta(hours=get_settings().promise_grace_hours)
+    # The grace filter is applied in Python, not SQL: the SQLite test harness
+    # stores naive wall clocks and `due_at + <interval> <= <aware now>`
+    # compares a naive string against an offset-annotated one — the same
+    # naive/aware seam _aware() exists for, and here it silently breaks the
+    # wrong direction (breaking promises a day early). The fetch is the
+    # superset (due_at <= now) and bounded by `limit`, so the Python pass is
+    # one comparison per already-due row.
     result = await session.execute(
         select(PromiseToPay)
         .where(PromiseToPay.status == "pending", PromiseToPay.due_at <= now)
         .order_by(PromiseToPay.due_at)
         .limit(limit)
     )
+    expired_view = [
+        p for p in result.scalars()
+        if _aware(p.due_at) + grace <= now
+    ]
     broken = 0
-    for promise in result.scalars():
+    for promise in expired_view:
         promise.status = "broken"
         promise.resolved_at = now
         case = await session.get(RecoveryCase, promise.recovery_case_id)
@@ -848,6 +1098,17 @@ async def expire_promises(
             continue
         if case.state == "open":
             case.next_action_at = now
+            # The receivables ratchet (invoice cases only): a broken promise
+            # resumes at the NEXT firmer dunning stage, never back at
+            # friendly. Resuming at the old rung teaches every buyer that a
+            # promise is a free pause button — the exact behaviour the
+            # promise system must not teach. Non-invoice types keep their
+            # existing behaviour byte-for-byte: their ladders are flat and
+            # escalation_level already counts contacts.
+            if case.risk_type == "invoice_overdue":
+                from src.receivables.ladder import stage_after_break
+
+                case.escalation_level = stage_after_break(case.escalation_level)
         log_event(
             session,
             case,
@@ -856,11 +1117,97 @@ async def expire_promises(
             amount=promise.amount_promised,
             due_at=promise.due_at.isoformat(),
             case_state=case.state,
+            grace_hours=get_settings().promise_grace_hours,
         )
         broken += 1
     if broken:
         logger.info("Promises expired: %d broken as of %s", broken, now.isoformat())
     return broken
+
+
+async def promises_due_for_reminder(
+    session: AsyncSession, *, now: datetime | None = None, limit: int = 100
+) -> list[PromiseToPay]:
+    """
+    Pending promises inside the reminder window whose reminder has not fired.
+
+    The pre-due reminder's entire candidate list: `reminded_at IS NULL` is the
+    one-shot marker (set whether the reminder sent or was skipped-with-reason,
+    so neither path re-fires), the window is `due_at` between now and
+    now + lead, and pending is the status half. Ordered by due_at so the
+    soonest promise is reminded first under a backlog.
+    """
+    now = now or datetime.now(UTC)
+    lead = timedelta(hours=get_settings().promise_reminder_lead_hours)
+    result = await session.execute(
+        select(PromiseToPay)
+        .where(
+            PromiseToPay.status == "pending",
+            PromiseToPay.reminded_at.is_(None),
+            PromiseToPay.due_at > now,
+            PromiseToPay.due_at <= now + lead,
+        )
+        .order_by(PromiseToPay.due_at)
+        .limit(limit)
+    )
+    return list(result.scalars())
+
+
+@dataclass(frozen=True)
+class PromiseScore:
+    """A customer's promise behaviour, as the chase policy and the agent read it."""
+
+    kept: int
+    broken: int
+    pending: int
+    # Kept / resolved, None when nothing has resolved yet — an honest "no
+    # signal" rather than a 0.0 that reads as "worst customer we have".
+    kept_rate: float | None
+    avg_kept_late_days: float
+    total: int
+
+    @property
+    def serial_breaker(self) -> bool:
+        """Two or more broken promises with none kept — the re-ask script's gate."""
+        return self.broken >= 2 and self.kept == 0
+
+
+async def customer_promise_score(
+    session: AsyncSession, customer_id: str | None
+) -> PromiseScore:
+    """
+    The kept-rate signal this table was built to produce, finally read.
+
+    The PromiseToPay docstring says the kept-rate across a customer's promises
+    is "the signal that decides whether another contact is worth making" —
+    until now nothing queried it. This is one indexed scan over promises_to_pay
+    by customer_id; no materialized table, no cache. ponytail: add a
+    per-customer score cache if promise volume outgrows one scan per decision.
+    """
+    if not customer_id:
+        return PromiseScore(0, 0, 0, None, 0.0, 0)
+    keys = ledger_keys(customer_id)
+    if not keys:
+        return PromiseScore(0, 0, 0, None, 0.0, 0)
+    result = await session.execute(
+        select(
+            func.count(PromiseToPay.id),
+            func.count(PromiseToPay.id).filter(PromiseToPay.status == "kept"),
+            func.count(PromiseToPay.id).filter(PromiseToPay.status == "broken"),
+            func.count(PromiseToPay.id).filter(PromiseToPay.status == "pending"),
+            func.coalesce(func.avg(PromiseToPay.kept_late_days), 0.0),
+        ).where(PromiseToPay.customer_id.in_(keys))
+    )
+    total, kept, broken, pending, avg_late = result.one()
+    resolved = int(kept) + int(broken)
+    return PromiseScore(
+        kept=int(kept),
+        broken=int(broken),
+        pending=int(pending),
+        kept_rate=(int(kept) / resolved) if resolved else None,
+        avg_kept_late_days=round(float(avg_late), 1),
+        total=int(total),
+    )
 
 
 # ── Finding work ─────────────────────────────────────────────────────────────

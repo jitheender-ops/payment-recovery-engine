@@ -208,9 +208,9 @@ class GuardrailRules:
         expected_value = confidence * amount_paise
         if expected_value <= cost:
             return False, (
-                f"Expected value non-positive: confidence {confidence:.2f} × "
+                f"Expected value below attempt cost: confidence {confidence:.2f} × "
                 f"₹{amount_paise / 100:,.2f} = ₹{expected_value / 100:,.2f} "
-                f"<= cost ₹{cost / 100:,.2f} — stop and escalate"
+                f"≤ cost ₹{cost / 100:,.2f} — stop and escalate"
             )
         return True, None
 
@@ -222,9 +222,9 @@ class GuardrailRules:
         current_time: datetime,
     ) -> tuple[bool, str | None]:
         """
-        RBI Digital Payments E-mandate Framework, 2026: an issuer must send a
-        pre-transaction notification at least 24 hours before a mandate is
-        charged. Applies across cards, UPI and prepaid instruments.
+        RBI Digital Payments E-mandate Framework, 2026: a pre-transaction
+        notification must reach the customer at least 24 hours before a
+        mandate is charged. Applies across cards, UPI and prepaid instruments.
 
         Only relevant here for risk_type=mandate_failure and action=retry_now
         — that is the one action that re-presents the mandate for collection.
@@ -233,6 +233,12 @@ class GuardrailRules:
         nudge_customer IS how the notification gets sent in the first place,
         so this rule cannot block the notification itself, only a collection
         attempt that skipped it.
+
+        The framework's notice is per-debit, not per-mandate: one notification
+        must not authorize unlimited re-presentations forever. A notification
+        older than mandate_predebit_notification_valid_hours (7 days by
+        default) is treated as no notification — it must be re-sent before
+        the next retry_now is allowed.
         """
         if risk_type != "mandate_failure" or action_type != "retry_now":
             return True, None
@@ -255,6 +261,15 @@ class GuardrailRules:
                 f"RBI e-mandate framework: pre-debit notification sent only "
                 f"{elapsed_hours:.1f}h ago — 24h notice is required before "
                 f"re-presenting the charge"
+            )
+        valid_hours = self._settings.mandate_predebit_notification_valid_hours
+        if elapsed_hours > valid_hours:
+            return False, (
+                f"RBI e-mandate framework: pre-debit notification is stale — "
+                f"sent {elapsed_hours:.0f}h ago, older than the "
+                f"{valid_hours}h validity window. The notice is per-debit: "
+                f"re-send nudge_customer at least 24h before re-presenting "
+                f"the charge"
             )
         return True, None
 

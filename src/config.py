@@ -87,6 +87,24 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://recovery:recovery@localhost:5432/payment_recovery"
     database_url_sync: str = "postgresql://recovery:recovery@localhost:5432/payment_recovery"
 
+    # A connection pooler sits in front of Postgres (Supabase Supavisor,
+    # PgBouncer, RDS Proxy). Shrinks the app-side pool — the pooler is already
+    # the pool, and a second one under it holds server-side connections
+    # hostage — and disables asyncpg's prepared-statement cache, which a
+    # TRANSACTION-mode pooler breaks: statements are prepared by name on a
+    # backend the next transaction may not be given. The failure is
+    # intermittent and load-dependent ("prepared statement _asyncpg_stmt_N
+    # does not exist"), which is exactly the kind that reaches production.
+    #
+    # SUPABASE, specifically: point DATABASE_URL at the SESSION-mode pooler
+    # (port 5432), not transaction mode (6543). src/orchestrator._get_ledger
+    # takes a SELECT ... FOR UPDATE row lock to close the contact-limit TOCTOU,
+    # and a row lock is only meaningful for as long as one transaction holds
+    # one backend. DATABASE_URL_SYNC must be the DIRECT connection
+    # (db.<ref>.supabase.co): Alembic runs DDL, which has no business going
+    # through a pooler.
+    db_behind_pooler: bool = False
+
     # SQLAlchemy statement logging. Off by default: echo logs bound parameters,
     # and those include customer_email / customer_contact / vpa on every
     # payment_failures insert. Never tie this to an env that defaults to on.
@@ -98,6 +116,35 @@ class Settings(BaseSettings):
     # deliberately NOT covered by this: Razorpay cannot be told to send a custom
     # header, so that endpoint authenticates by HMAC over the raw body instead.
     api_key: SecretStr = SecretStr("")
+    # Keys the case_events hash chain (src/audit_chain.py) so that someone
+    # with database write access cannot silently re-stamp a rewritten chain:
+    # the algorithm is in the repo, but this key is not in the database.
+    # Empty means stamp/verify refuse rather than produce a forgeable chain.
+    # Rotating it invalidates every existing stamp — stamp the chain fresh
+    # after rotating (existing rows stay readable, their hashes just stop
+    # verifying until re-stamped).
+    audit_chain_secret: SecretStr = SecretStr("")
+    # HMAC key for the voice webhook (POST /voice/turn). Telephony
+    # providers sign their callbacks the way Razorpay signs webhooks; empty
+    # means the endpoint refuses every request — closed until configured,
+    # same fail-closed rule as every other signed surface.
+    voice_webhook_secret: SecretStr = SecretStr("")
+    # Opt in to the LLM answer path for voice turns. Off = the extractive
+    # path only: replies assembled verbatim from retrieved passages and case
+    # facts, verified by gate 4. On = an LLM rephrases the same passages
+    # (temperature-disciplined, JSON-constrained) and the numeric grounding
+    # gate still applies — a number absent from the passages is a refusal.
+    voice_llm_enabled: bool = False
+    # Opt in to queueing voice follow-up calls after a successful nudge (see
+    # orchestrator._queue_voice_call). Default off: a call is the highest-
+    # friction touch the engine can make and carries its own compliance
+    # posture (DoT/TCPB registration, AI disclosure at call start).
+    voice_chaser_enabled: bool = False
+    # Sarvam AI (STT saaras:v3 auto-detect + TTS bulbul:v2) — the voice
+    # demo and any provider leg that wants the engine to handle audio.
+    # Empty = the demo page shows the error; the webhook's text path keeps
+    # working without it.
+    sarvam_api_key: SecretStr = SecretStr("")
     # Gates the Streamlit dashboard. Empty means the dashboard refuses to render.
     # The dashboard itself reads DASHBOARD_PASSWORD straight from the
     # environment (dashboard/auth.py) — it is a separate process that holds no
@@ -135,6 +182,35 @@ class Settings(BaseSettings):
     # — they complain about the fourth arriving as fast as the first.
     escalation_backoff_hours: int = 24
 
+    # ── Promises to pay ──────────────────────────────────────────────────
+    # A promise breaks on the CLOCK, never on suspicion — but a payment
+    # initiated on the due date can post a day late (bank settlement, UPI
+    # pending states), and breaking a promise the customer actually kept is
+    # the one lie this ledger must never tell. The break condition is
+    # therefore due_at + grace, and a capture inside grace keeps the promise
+    # with kept_late_days recording how late. 24h covers Indian posting
+    # delays without turning "by Friday" into "by Sunday".
+    promise_grace_hours: int = 24
+    # Ceiling on promises per case. A promise buys total silence until its
+    # date, so an unlimited right to re-promise is an unlimited free
+    # deferral loop — a serial promise-breaker can park a case forever with
+    # words. Two broken promises and the third ask is refused by
+    # record_promise (audited as promise_refused); the case stays on its
+    # normal chase ladder, which is the honest path for someone whose words
+    # stopped predicting money.
+    max_promises_per_case: int = 3
+    # How far before due_at the one reminder fires. 48h is the dunning
+    # research default (memory decay is the top break cause, and a reminder
+    # the day before arrives when it can still be acted on). The reminder
+    # spends one real contact slot through the normal chase pipeline — a
+    # promise buys silence for the CHASE, never a free lane to nag from.
+    promise_reminder_lead_hours: int = 48
+    # The farthest-out promise date a capture surface may accept. Kept rate
+    # decays with horizon length (it holds up for ~3-5 days and falls off
+    # after), so "I'll pay in six weeks" is recorded as noise about intent,
+    # not as a promise that silences the case for six weeks.
+    promise_max_horizon_days: int = 14
+
     # Expected-value stopping rule: attempt only while
     # confidence * amount > retry_cost + annoyance_cost. Only enforced when
     # the agent supplies a confidence — an agent that gives no estimate is
@@ -142,6 +218,13 @@ class Settings(BaseSettings):
     # inventing a number to reject on. See guardrail/rules.py:check_expected_value.
     retry_attempt_cost_paise: int = 200  # ₹2 — matches the eval's default retry cost
     retry_annoyance_cost_paise: int = 0  # off by default; a real cost is a product call, not ours
+
+    # RBI e-mandate pre-debit notifications are valid between the 24h minimum
+    # notice and this ceiling. The framework's notice is per-debit: a
+    # notification from weeks ago says nothing about a charge presented today,
+    # so a stale one must be re-sent (nudge_customer) before retry_now is
+    # allowed again. 168h = 7 days, conservative by default.
+    mandate_predebit_notification_valid_hours: int = 168
 
     # ── Customer recovery page ───────────────────────────────────────────
     # Trust X-Forwarded-For when identifying the client for the recovery
@@ -176,6 +259,14 @@ class Settings(BaseSettings):
     # WhatsApp is where Indian customers expect to reach a business. Empty
     # hides the button and the page falls back to "reply to our message".
     support_whatsapp: str = ""
+    # The receivables writeback: where the engine POSTs HMAC-signed alerts
+    # (promise made/broken, dispute opened, plan defaulting, external
+    # payment, chase exhausted) so the merchant's ERP reacts without anyone
+    # watching a console. Signed with the SAME RISK_WEBHOOK_SECRET the
+    # merchant signs their pushes with — one identity, both directions.
+    # Empty means the outbound leg is off; alerts stay queued and visible on
+    # the console's alerts panel, never silently dropped.
+    merchant_webhook_url: str = ""
     # Signs the /recover/<token> links handed to customers. A DEDICATED secret,
     # not the Razorpay webhook one: a leak of either must not be a leak of both,
     # and they authorise completely different things — one proves Razorpay's
@@ -252,11 +343,8 @@ class Settings(BaseSettings):
         Rewriting is safe and total — this field is only ever passed to
         create_async_engine, so there is no caller that wants the sync form.
         """
-        if url.startswith("postgres://"):
-            url = "postgresql://" + url[len("postgres://"):]
-        if url.startswith("postgresql://"):
-            return "postgresql+asyncpg://" + url[len("postgresql://"):]
-        return url
+        url = url.replace("postgres://", "postgresql://", 1)
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     @field_validator("database_url_sync", mode="after")
     @classmethod
@@ -267,8 +355,7 @@ class Settings(BaseSettings):
         same platform-provided connection string and have each end up with the
         driver it needs — which is exactly what render.yaml does.
         """
-        if url.startswith("postgres://"):
-            url = "postgresql://" + url[len("postgres://"):]
+        url = url.replace("postgres://", "postgresql://", 1)
         return url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
     @field_validator("public_base_url", mode="after")

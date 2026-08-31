@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from alembic.config import Config  # noqa: E402
 
 import src.models  # noqa: E402,F401  (registers every table on Base.metadata)
+import src.receivables.models  # noqa: E402,F401  (receivables tables, same metadata)
 from alembic import command  # noqa: E402
 from src.database import Base  # noqa: E402
 

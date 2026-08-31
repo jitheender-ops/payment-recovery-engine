@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Voice demo · Recovery Engine{% endblock %}
+
+{% block body %}
+<nav class="nav">
+  <div class="nav-in">
+    <a class="brand" href="/console">
+      <span class="brand-mark">₹</span>
+      <span class="brand-name">Recovery Engine</span>
+    </a>
+    <div class="nav-links">
+      <a class="nav-link hide-sm" href="/console">Overview</a>
+      <a class="nav-link" href="/voice/demo">Voice demo</a>
+    </div>
+  </div>
+</nav>
+
+<main class="section" style="padding-top:clamp(2.5rem,6vh,4rem)">
+  <div class="wrap" style="max-width:760px">
+    <h1 class="h2">Bolo — say something.</h1>
+    <p class="lede" style="margin-top:.8rem">
+      Mic on, Hinglish me poochho — "mera payment kyu fail hua?",
+      "kitna paisa pending hai?", "band karo calls". Saaras STT transcribes,
+      the grounded pipeline answers, bulbul (anushka) replies.
+    </p>
+
+    <div class="card" style="margin-top:2rem;padding:2rem;text-align:center" data-stage>
+      <button id="mic" class="btn btn-primary" style="min-width:180px">
+        <span id="mic-icon">🎙</span>&nbsp; <span id="mic-label">Tap to speak</span>
+      </button>
+      <div id="status" class="faint" style="margin-top:1rem;font-size:.85rem">idle</div>
+      <div id="pulse" style="width:12px;height:12px;border-radius:50%;background:var(--line-2);margin:1rem auto;transition:transform .15s ease,background .15s ease"></div>
+    </div>
+
+    <div id="turn" class="card" style="margin-top:1rem;padding:1.5rem;display:none">
+      <div class="kpi-label" style="margin-bottom:.6rem">You said</div>
+      <div id="transcript" class="mono" style="font-size:.95rem"></div>
+      <div class="kpi-label" style="margin:1.2rem 0 .6rem">Agent (intent: <span id="intent"></span>)</div>
+      <div id="reply" style="font-size:1rem"></div>
+      <audio id="speech" controls style="width:100%;margin-top:1.2rem;display:none"></audio>
+      <div id="timings" class="faint mono" style="font-size:.72rem;margin-top:.8rem"></div>
+    </div>
+
+    <div id="error" class="alert" style="margin-top:1rem;display:none"></div>
+
+    <p class="faint" style="font-size:.78rem;margin-top:1.5rem">
+      Demo ground rules: no case is bound, so no amounts are spoken — the
+      grounding gate sees no case facts. Opt-out phrases still close nothing
+      here (no customer identity), but the pipeline recognises them.
+      Powered by Sarvam AI (saaras STT · bulbul TTS).
+    </p>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var mic = document.getElementById("mic");
+  var label = document.getElementById("mic-label");
+  var status = document.getElementById("status");
+  var pulse = document.getElementById("pulse");
+  var turn = document.getElementById("turn");
+  var transcript = document.getElementById("transcript");
+  var reply = document.getElementById("reply");
+  var intent = document.getElementById("intent");
+  var speech = document.getElementById("speech");
+  var timings = document.getElementById("timings");
+  var err = document.getElementById("error");
+  var media = null, recording = false, chunks = [];
+
+  function say(text, cls) {
+    err.style.display = "block";
+    err.textContent = text;
+    err.className = "alert" + (cls ? "" : "");
+  }
+  function clear_err() { err.style.display = "none"; }
+
+  mic.addEventListener("click", async function () {
+    if (recording) { media.stop(); return; }
+    clear_err();
+    try {
+      media = new MediaRecorder((await navigator.mediaDevices.getUserMedia({audio: true})));
+    } catch (e) { say("Mic access denied — the demo needs the microphone."); return; }
+    chunks = [];
+    media.ondataavailable = function (e) { if (e.data.size) chunks.push(e.data); };
+    media.onstop = function () { run(new Blob(chunks)); };
+    media.start();
+    recording = true;
+    label.textContent = "Listening… tap to stop";
+    pulse.style.background = "var(--red)";
+    pulse.style.transform = "scale(1.6)";
+    status.textContent = "recording";
+  });
+
+  async function run(blob) {
+    recording = false;
+    label.textContent = "Tap to speak";
+    pulse.style.background = "var(--line-2)";
+    pulse.style.transform = "scale(1)";
+    status.textContent = "transcribing (saaras)…";
+    var t0 = performance.now();
+    try {
+      var stt = await fetch("/voice/demo/stt", {
+        method: "POST",
+        body: (function () {
+          var fd = new FormData();
+          fd.append("audio", blob, "audio.webm");
+          return fd;
+        })()
+      }).then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.detail || "stt failed"); });
+        return r.json();
+      });
+      var sttMs = Math.round(performance.now() - t0);
+      transcript.textContent = stt.transcript;
+      intent.textContent = "";
+      reply.textContent = "";
+      speech.style.display = "none";
+      turn.style.display = "block";
+      status.textContent = "thinking…";
+      var t1 = performance.now();
+      var turnResp = await fetch("/voice/demo/turn", {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify({transcript: stt.transcript})
+      }).then(function (r) { return r.json(); });
+      var pipeMs = Math.round(performance.now() - t1);
+      intent.textContent = turnResp.intent;
+      reply.textContent = turnResp.reply;
+      status.textContent = "speaking (bulbul)…";
+      var t2 = performance.now();
+      if (turnResp.audio_b64) {
+        speech.src = "data:audio/wav;base64," + turnResp.audio_b64;
+        speech.style.display = "block";
+        speech.play().catch(function () {});
+        var ttsMs = Math.round(performance.now() - t2);
+        timings.textContent =
+          "stt " + sttMs + "ms · pipeline " + pipeMs + "ms · tts " + ttsMs + "ms" +
+          (stt.language ? " · detected " + stt.language : "");
+        status.textContent = "done";
+      } else {
+        timings.textContent = "stt " + sttMs + "ms · pipeline " + pipeMs + "ms · tts " + (turnResp.tts_error || "skipped");
+        status.textContent = turnResp.tts_error ? "tts failed" : "done";
+      }
+    } catch (e) {
+      status.textContent = "failed";
+      say(String(e.message || e));
+    }
+  }
+})();
+</script>
+{% endblock %}

@@ -44,15 +44,3 @@ async def is_duplicate_event(session: AsyncSession, event_id: str) -> bool:
         await session.rollback()
         logger.info("Duplicate event detected: %s", event_id)
         return True
-
-    # Try to insert — handles race conditions via unique constraint
-    try:
-        new_record = ProcessedEvent(razorpay_event_id=event_id)
-        session.add(new_record)
-        await session.flush()
-        logger.debug("New event recorded: %s", event_id)
-        return False
-    except IntegrityError:
-        await session.rollback()
-        logger.info("Duplicate event detected (constraint): %s", event_id)
-        return True

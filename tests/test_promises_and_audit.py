@@ -208,7 +208,10 @@ async def test_an_overdue_promise_breaks_and_hands_the_case_back(
     async with db_sessionmaker() as session:
         case = await _open_invoice(session)
         await record_promise(
-            session, case, amount=250_000, due_at=datetime.now(UTC) - timedelta(hours=1)
+            session, case, amount=250_000,
+            # Past due AND past the grace window — the break condition is
+            # due_at + grace, not due_at (bank posting delays are real).
+            due_at=datetime.now(UTC) - timedelta(hours=30)
         )
         await session.commit()
 
@@ -232,7 +235,8 @@ async def test_expire_does_not_reopen_a_closed_case(
     async with db_sessionmaker() as session:
         case = await _open_invoice(session)
         await record_promise(
-            session, case, amount=250_000, due_at=datetime.now(UTC) - timedelta(hours=1)
+            session, case, amount=250_000,
+            due_at=datetime.now(UTC) - timedelta(hours=30),
         )
         case.state = "recovered"
         case.next_action_at = datetime.now(UTC) + timedelta(days=9)

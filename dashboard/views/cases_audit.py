@@ -53,6 +53,57 @@ PROMISE_SQL = """
 SELECT status, COUNT(*) AS n FROM promises_to_pay GROUP BY status ORDER BY n DESC
 """
 
+# The kept-rate funnel, in ₹ value rather than counts — ten kept promises of
+# ₹100 and one broken ₹50,000 is a bad month that count-based reporting calls
+# a good one (the research is unanimous on this one). kept_late_days splits
+# kept-on-time from kept-in-grace: the second is a softer product and the
+# forecast must not be fed them as the same thing.
+PROMISE_FUNNEL_SQL = """
+SELECT
+  COUNT(*) FILTER (WHERE p.status = 'pending')                    AS pending,
+  COUNT(*) FILTER (WHERE p.status = 'pending' AND p.reminded_at IS NOT NULL)
+                                                                   AS reminded,
+  COUNT(*) FILTER (WHERE p.status = 'kept'   AND COALESCE(p.kept_late_days,0) = 0)
+                                                                   AS kept_ontime,
+  COUNT(*) FILTER (WHERE p.status = 'kept'   AND COALESCE(p.kept_late_days,0) > 0)
+                                                                   AS kept_late,
+  COUNT(*) FILTER (WHERE p.status = 'broken')                      AS broken,
+  COUNT(*) FILTER (WHERE p.status = 'cancelled')                   AS cancelled,
+  COALESCE(SUM(p.amount_promised) FILTER (WHERE p.status = 'kept'), 0)  AS kept_paise,
+  COALESCE(SUM(p.amount_promised) FILTER (WHERE p.status = 'broken'), 0) AS broken_paise,
+  COALESCE(AVG(p.kept_late_days) FILTER (WHERE p.status = 'kept'), 0)   AS avg_late
+FROM promises_to_pay p
+"""
+
+# Kept-rate by channel — "does a voice promise keep as well as a page
+# promise" answered with our own data instead of a vendor's slide.
+PROMISE_CHANNEL_SQL = """
+SELECT COALESCE(p.channel, 'unknown') AS channel,
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE p.status = 'kept')   AS kept,
+       COUNT(*) FILTER (WHERE p.status = 'broken') AS broken,
+       COALESCE(SUM(p.amount_promised) FILTER (WHERE p.status = 'kept'), 0) AS kept_paise
+FROM promises_to_pay p GROUP BY 1 ORDER BY total DESC
+"""
+
+# The serial-breaker worklist: cases with repeated broken promises, still
+# open — the human-attention list the cap alone cannot compose.
+PROMISE_BREAKERS_SQL = """
+SELECT p.recovery_case_id::text AS case_id,
+       rc.risk_type AS Type, rc.subject_ref AS Reference,
+       COUNT(*) FILTER (WHERE p.status = 'broken') AS broken,
+       COUNT(*) AS promises,
+       COALESCE(SUM(p.amount_promised) FILTER (WHERE p.status = 'broken'), 0)
+         AS broken_paise
+FROM promises_to_pay p
+JOIN recovery_cases rc ON rc.id = p.recovery_case_id
+WHERE p.status = 'broken' AND rc.state = 'open'
+GROUP BY 1, 2, 3
+HAVING COUNT(*) FILTER (WHERE p.status = 'broken') >= 2
+ORDER BY broken_paise DESC
+LIMIT 25
+"""
+
 EVENTS_SQL = """
 SELECT ce.event_type AS Event, ce.actor AS Actor, ce.detail AS Detail,
        ce.created_at AS At
@@ -222,3 +273,71 @@ def render() -> None:
             for _, r in promises.iterrows()
         )
         st.markdown(chips, unsafe_allow_html=True)
+
+        # ── The funnel and the money ─────────────────────────────────────
+        funnel = query_db(PROMISE_FUNNEL_SQL)
+        if funnel is not None and not funnel.empty:
+            f = funnel.iloc[0]
+            kept_total = int(f["kept_ontime"]) + int(f["kept_late"])
+            resolved = kept_total + int(f["broken"])
+            kept_rate = (kept_total / resolved * 100) if resolved else 0.0
+            ontime_share = (
+                int(f["kept_ontime"]) / kept_total * 100 if kept_total else 0.0
+            )
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric(
+                    "Kept rate",
+                    f"{kept_rate:.0f}%",
+                    f"{kept_total}/{resolved} resolved promises",
+                )
+            with c2:
+                st.metric("Kept on time", f"{ontime_share:.0f}%", "of kept promises")
+            with c3:
+                # The ₹ truth: kept value vs broken value, because the count
+                # truth flatters exactly the wrong portfolio.
+                st.metric(
+                    "₹ kept vs broken",
+                    f"₹{int(f['kept_paise']) // 100:,} / ₹{int(f['broken_paise']) // 100:,}",
+                )
+            if int(f["pending"]):
+                st.caption(
+                    f"{int(f['pending'])} pending · {int(f['reminded'])} reminded · "
+                    f"avg {float(f['avg_late']):.1f} days late on kept"
+                )
+
+        # ── By channel ──────────────────────────────────────────────────
+        by_channel = query_db(PROMISE_CHANNEL_SQL)
+        if by_channel is not None and not by_channel.empty:
+            st.dataframe(
+                by_channel.rename(columns={
+                    "channel": "Channel", "total": "Promises",
+                    "kept": "Kept", "broken": "Broken",
+                }).assign(
+                    **{
+                        "Kept ₹": (by_channel["kept_paise"] // 100)
+                            .map(lambda v: f"₹{v:,}")
+                    }
+                ).drop(columns=["kept_paise"]),
+                width="stretch",
+                hide_index=True,
+            )
+
+        # ── The serial-breaker worklist ─────────────────────────────────
+        breakers = query_db(PROMISE_BREAKERS_SQL)
+        if breakers is not None and not breakers.empty:
+            st.markdown(
+                "**Open cases with 2+ broken promises** — these are the ones "
+                "whose words stopped predicting money:",
+            )
+            st.dataframe(
+                breakers.assign(
+                    **{
+                        "₹ promised (broken)": (
+                            breakers["broken_paise"] // 100
+                        ).map(lambda v: f"₹{v:,}")
+                    }
+                ).drop(columns=["broken_paise"]),
+                width="stretch",
+                hide_index=True,
+            )
