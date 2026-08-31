@@ -221,3 +221,16 @@ services:
       # for money is not a link most people would trust.
       - key: PUBLIC_BASE_URL
         fromService: {type: web, name: recovery-api, property: host}
+
+      # ── Voice chaser (opt-in, off by default) ────────────────────────
+      # Off until DoT/TCCCP registration and the call-start AI disclosure
+      # are sorted. Flipping this to "true" is the actual "turn calls on"
+      # switch; the two secrets below can be set in advance safely.
+      - key: VOICE_CHASER_ENABLED
+        value: "false"
+      # Verifies inbound POST /voice/turn webhooks. Set by hand in the
+      # dashboard, same as the other secrets on this list.
+      - key: VOICE_WEBHOOK_SECRET
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
