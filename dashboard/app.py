@@ -133,15 +133,36 @@ def _sync_deep_link() -> None:
         st.query_params["view"] = slug
 
 
+# Order is the reading order, not the build order: the money first, then each
+# recovery capability on its own page, then the machinery. The four capability
+# pages exist because every one of them was invisible here — Overview totals
+# them together and the funnel counts stages rather than kinds, so a merchant
+# could not tell whether the B2B ladder or the voice leg had ever run.
 _SECTIONS = [
     ("Overview", "overview"),
     ("Recovery funnel", "recovery-funnel"),
+    ("Chasers", "chasers"),
+    ("Receivables", "receivables"),
+    ("Promises", "promises"),
+    ("Voice", "voice"),
     ("Banks & rails", "banks-rails"),
     ("Policy eval", "policy-eval"),
     ("Cases & audit", "cases-audit"),
     ("Operations", "operations"),
 ]
 _LABELS = [label for label, _ in _SECTIONS]
+_CAPTIONS = [
+    "Money at risk, and what came back",
+    "Where the pipeline leaks",
+    "Five kinds of leaking money, per type",
+    "B2B invoices, the ladder, disputes",
+    "Promise-to-pay tracker and plans",
+    "Hinglish call recovery",
+    "Measured routing quality",
+    "Does the agent beat the baseline",
+    "Lifecycle and audit trail of every case",
+    "Scheduler, guardrail vetoes, ledger health",
+]
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────
@@ -189,14 +210,7 @@ with st.sidebar:
         _LABELS,
         key="nav",
         label_visibility="collapsed",
-        captions=[
-            "Money at risk, and what came back",
-            "Where the pipeline leaks",
-            "Measured routing quality",
-            "Does the agent beat the baseline",
-            "Lifecycle and audit trail of every case",
-            "Scheduler, guardrail vetoes, ledger health",
-        ],
+        captions=_CAPTIONS,
         on_change=_sync_deep_link,
     )
     # Canonical URL sync, BOTH directions, every render: deep-link in reflects
@@ -393,6 +407,18 @@ if page == "Overview":
 elif page == "Recovery funnel":
     from dashboard.views import recovery_funnel
     recovery_funnel.render()
+elif page == "Chasers":
+    from dashboard.views import chasers
+    chasers.render()
+elif page == "Receivables":
+    from dashboard.views import receivables
+    receivables.render()
+elif page == "Promises":
+    from dashboard.views import promises
+    promises.render()
+elif page == "Voice":
+    from dashboard.views import voice
+    voice.render()
 elif page == "Banks & rails":
     from dashboard.views import bank_breakdown
     bank_breakdown.render()

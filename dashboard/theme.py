@@ -194,12 +194,17 @@ STATUS_TONE: dict[str, str] = {
 def chip(text: str, *, tone: str = "slate") -> str:
     """One status pill. Tones come from _TONES; unknown tones fall back."""
     fg, bg = _TONES.get(tone, _TONES["slate"])
+    # style="..." with DOUBLE quotes, deliberately: FONT_BODY is
+    # "'IBM Plex Sans', system-ui, sans-serif" — single-quoted family names.
+    # Inside a single-quoted attribute the first of those closes it early, and
+    # Streamlit renders the whole malformed span as literal text. This chip is
+    # the sidebar's connection indicator, so it did that on every page.
     return (
-        f"<span style='display:inline-flex;align-items:center;gap:0.32rem;"
+        f'<span style="display:inline-flex;align-items:center;gap:0.32rem;'
         f"padding:0.14rem 0.55rem;border-radius:999px;font-family:{FONT_BODY};"
         f"font-size:0.72rem;font-weight:500;letter-spacing:0.02em;"
         f"color:{fg};background:{bg};"
-        f"border:1px solid {fg}33;'>{text}</span>"
+        f'border:1px solid {fg}33;">{text}</span>'
     )
 
 
@@ -259,8 +264,10 @@ def status_chip(status: Any) -> str:
 def page_header(eyebrow: str, title: str, note: str | None = None) -> None:
     """Every view opens the same way: eyebrow, headline, optional one-liner."""
     st.markdown(
-        f"<div style='font-family:{FONT_MONO};color:{SLATE};font-size:0.74rem;"
-        f"letter-spacing:0.12em;margin-bottom:0.2rem;'>{eyebrow}</div>",
+        # Double-quoted attribute: FONT_MONO embeds 'IBM Plex Mono' in single
+        # quotes, which would close a single-quoted style attribute early.
+        f'<div style="font-family:{FONT_MONO};color:{SLATE};font-size:0.74rem;'
+        f'letter-spacing:0.12em;margin-bottom:0.2rem;">{eyebrow}</div>',
         unsafe_allow_html=True,
     )
     st.markdown(

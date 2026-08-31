@@ -62,11 +62,20 @@ def no_data(what: str) -> bool:
     """
     Render the honest empty state and return True when there is nothing to draw.
 
-    Returns True so callers can `if no_data(...): return` — the page stops rather
-    than falling through to a chart of invented numbers. Two distinct moments,
-    because they mean different things (2026 empty-state guidance: distinguish
-    "not configured" from "no data yet"): the database is unreachable, or the
-    tables are simply quiet.
+    NOT a predicate, despite the name — it always renders and always returns
+    True. The caller decides there is nothing to draw; this only says so well.
+    The idiom is therefore:
+
+        df = query_db(SQL)
+        if df is None or df.empty:
+            no_data("engine activity")
+            return
+
+    and never `if no_data(...): return`, which stops every page unconditionally.
+
+    Two distinct moments, because they mean different things (2026 empty-state
+    guidance: distinguish "not configured" from "no data yet"): the database is
+    unreachable, or the tables are simply quiet.
     """
     if get_db_engine() is None:
         from dashboard import theme
@@ -86,7 +95,10 @@ def no_data(what: str) -> bool:
         "The engine is honest about zero: an empty chart says 'nothing yet', "
         "a fabricated one says 'here is your business'. Drive the webhook "
         "endpoint and this page fills with measured reality.",
-        icon="◌",
+        # An icon NAME from theme._ICONS, never a literal glyph. This was "◌",
+        # which is not a key, so theme.icon() raised KeyError and took the whole
+        # page down — on precisely the path meant to handle emptiness gracefully.
+        icon="pending",
         action_code="python scripts/simulate_webhooks.py --count 20",
     )
     return True
