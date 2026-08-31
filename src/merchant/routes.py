@@ -681,3 +681,172 @@ async def live_console(request: Request) -> Any:
             "data": data,
         },
     )
+
+
+# ── The rest of the console ─────────────────────────────────────────────────
+# These five pages used to be a SEPARATE Streamlit service. Two consoles meant
+# two hosts, two passwords and two cold starts, and the operator one sat
+# silently broken because nobody had a reason to open it. They are ordinary
+# routes now: same app, same session cookie, same PII-free contract.
+
+
+def _gate(request: Request) -> Any | None:
+    """Shared entry check. Returns a response to send, or None to continue."""
+    if not _password_configured():
+        return _login_page(request)
+    if not _session_valid(request):
+        return RedirectResponse("/console/login", status_code=303)
+    return None
+
+
+def _eval_summary() -> dict[str, Any]:
+    """
+    The eval harness's own output, read from disk. Never computed here.
+
+    The numbers on that page are a claim about whether the agent beats a fixed
+    baseline; recomputing them in a web request would make the page the source
+    of truth for its own marking. It reads the file the harness wrote or says
+    there isn't one.
+    """
+    import json
+    from pathlib import Path
+
+    results = Path("eval/results/eval_results.json")
+    try:
+        with results.open() as fh:
+            raw = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {"available": False}
+
+    policies = raw.get("policies")
+    if not isinstance(policies, dict) or not policies:
+        return {"available": False}
+
+    rows: list[dict[str, Any]] = []
+    for name, m in policies.items():
+        if not isinstance(m, dict):
+            continue
+        rows.append({
+            "name": name,
+            "recovery_raw": float(m.get("recovery_rate_%") or 0.0),
+            "recovery": round(float(m.get("recovery_rate_%") or 0.0), 2),
+            "recovery_std": round(float(m.get("recovery_rate_%_std") or 0.0), 2) or None,
+            "attempts": round(float(m.get("retry_cost_avg") or 0.0), 2),
+            "false_retry": round(float(m.get("false_retry_rate_%") or 0.0), 2),
+            "net": _money(int(float(m.get("net_₹_per_₹1Cr_failed") or 0.0) * 100)),
+            "net_raw": float(m.get("net_₹_per_₹1Cr_failed") or 0.0),
+        })
+    if not rows:
+        return {"available": False}
+
+    rows.sort(key=lambda r: r["net_raw"], reverse=True)
+    best = max(r["net_raw"] for r in rows)
+    for r in rows:
+        r["best"] = r["net_raw"] == best and best > 0
+    return {
+        "available": True,
+        "policies": rows,
+        "max_recovery": max(r["recovery_raw"] for r in rows) or 1.0,
+        "retry_cost": raw.get("retry_cost_inr", "—"),
+    }
+
+
+async def _render_console(
+    request: Request, template: str, build: Any, **extra: Any
+) -> Any:
+    """One shape for every console page: gate, read, render, and stay up.
+
+    A failure here renders the page with `db_ok=False` rather than a 500: a
+    console that cannot read is a fact the merchant needs stated, not a stack
+    trace.
+    """
+    gated = _gate(request)
+    if gated is not None:
+        return gated
+
+    data: dict[str, Any] = {}
+    db_ok = True
+    try:
+        async with async_session_factory() as session:
+            data = await build(session)
+    except Exception:
+        logger.exception("Console page %s could not read the database", template)
+        db_ok = False
+
+    return templates.TemplateResponse(
+        request, template,
+        {
+            "merchant_name": get_settings().merchant_name or None,
+            "db_ok": db_ok, "data": data, **extra,
+        },
+    )
+
+
+@router.get("/console/pipeline", response_class=HTMLResponse)
+async def console_pipeline(request: Request) -> Any:
+    """Where money leaves the pipeline, and what the gateway blamed."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {
+            "funnel": await console_data.pipeline_funnel(session),
+            "causes": await console_data.failure_causes(session),
+        }
+
+    return await _render_console(request, "console_pipeline.html", build)
+
+
+@router.get("/console/routing", response_class=HTMLResponse)
+async def console_routing(request: Request) -> Any:
+    """Which bank, on which rail — the evidence behind switch_rail."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"routing": await console_data.routing_panel(session)}
+
+    return await _render_console(request, "console_routing.html", build)
+
+
+@router.get("/console/cases", response_class=HTMLResponse)
+async def console_cases(request: Request) -> Any:
+    """Every case, filterable by state. References are the merchant's own."""
+    state = request.query_params.get("state", "all")
+    if state != "all" and state not in {
+        "open", "recovered", "exhausted", "abandoned", "expired", "opted_out",
+    }:
+        state = "all"
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {
+            "cases": await console_data.case_list(session, state=state),
+            "states": await console_data.case_states(session),
+        }
+
+    return await _render_console(request, "console_cases.html", build, state=state)
+
+
+@router.get("/console/ops", response_class=HTMLResponse)
+async def console_ops(request: Request) -> Any:
+    """Is the machinery running — sweeps, heartbeat, and what fires next."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {
+            "ops": await console_data.operations_panel(session),
+            "health": await console_data.engine_health(session),
+        }
+
+    return await _render_console(request, "console_ops.html", build)
+
+
+@router.get("/console/evidence", response_class=HTMLResponse)
+async def console_evidence(request: Request) -> Any:
+    """The eval harness's verdict. Read from disk, never recomputed here."""
+    gated = _gate(request)
+    if gated is not None:
+        return gated
+    return templates.TemplateResponse(
+        request, "console_evidence.html",
+        {
+            "merchant_name": get_settings().merchant_name or None,
+            "db_ok": True,
+            "data": {"eval": _eval_summary()},
+        },
+    )

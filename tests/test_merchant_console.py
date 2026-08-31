@@ -355,3 +355,99 @@ async def test_a_database_outage_renders_honestly(
     html = console.get("/console/live").text
     assert "Can't reach the database" in html
     assert "Still owed" not in html
+
+
+# ── The five pages folded in from the Streamlit console ────────────────────
+# They used to be a separate deployed service with no tests at all, which is
+# how one of them stayed broken on Postgres for months. Same contract as the
+# ledger: gated, renders its data, PII-free, and honest when the database is
+# gone.
+
+_FOLDED = ["/console/pipeline", "/console/routing", "/console/cases",
+           "/console/ops", "/console/evidence"]
+
+
+@pytest.mark.parametrize("path", _FOLDED)
+def test_folded_pages_require_a_session(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any, path: str
+) -> None:
+    monkeypatch.setattr("src.merchant.routes.async_session_factory", db_sessionmaker)
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(merchant_router)
+    r = TestClient(app).get(path, follow_redirects=False)
+    get_settings.cache_clear()
+    assert r.status_code == 303 and r.headers["location"] == "/console/login"
+
+
+@pytest.mark.parametrize("path", _FOLDED)
+async def test_folded_pages_render(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession], path: str
+) -> None:
+    """Each renders with data present, and carries the nav to every sibling."""
+    await _seed(db_sessionmaker)
+    r = console.get(path)
+    assert r.status_code == 200
+    # The whole point of folding them in: every page reaches every other one.
+    for label in ("Ledger", "Pipeline", "Routing", "Cases", "Engine", "Evidence"):
+        assert f">{label}</a>" in r.text, f"{path} lost the {label} nav link"
+
+
+@pytest.mark.parametrize("path", _FOLDED)
+async def test_folded_pages_leak_no_customer_identifiers(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession], path: str
+) -> None:
+    """
+    The PII-free contract holds on the folded pages too.
+
+    Worth asserting per page rather than once: the Streamlit originals DID
+    select customer_id — the case list showed it as a column — so this is a
+    rule these pages had to be rewritten to obey, not one they inherited.
+    """
+    await _seed(db_sessionmaker)
+    html = console.get(path).text
+    for leaked in ("ap@buyer.in", "a@b.in", "+919812345678", "email:"):
+        assert leaked not in html, f"{path} leaked {leaked!r}"
+
+
+async def test_cases_page_filters_by_state(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The state filter narrows the list, and an unknown state falls back to all
+    rather than erroring or returning nothing."""
+    await _seed(db_sessionmaker)
+    recovered = console.get("/console/cases?state=recovered").text
+    assert "pay_done" in recovered
+    assert "cart_spent" not in recovered, "an open case showed under 'recovered'"
+
+    junk = console.get("/console/cases?state=../../etc/passwd").text
+    assert "pay_done" in junk and "cart_spent" in junk, "unknown state should fall back to all"
+
+
+async def test_engine_page_reports_a_stale_scheduler(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The dead-man's switch, on the page an operator opens to check it."""
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        hb = await s.get(SchedulerHeartbeat, 1)
+        assert hb is not None
+        hb.last_tick_at = datetime.now(UTC) - timedelta(hours=6)
+        await s.commit()
+    html = console.get("/console/ops").text
+    assert "Stopped" in html and "Running" not in html
+
+
+async def test_folded_pages_survive_a_database_outage(
+    console: Any, monkeypatch: Any
+) -> None:
+    """A page that cannot read says so; it does not 500."""
+    class _Boom:
+        def __call__(self) -> Any:
+            raise RuntimeError("database is gone")
+
+    monkeypatch.setattr("src.merchant.routes.async_session_factory", _Boom())
+    for path in ("/console/pipeline", "/console/routing", "/console/cases", "/console/ops"):
+        r = console.get(path)
+        assert r.status_code == 200, f"{path} returned {r.status_code} with no database"

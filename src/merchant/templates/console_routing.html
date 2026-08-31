@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, bar %}
+{% block title %}Routing · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("routing", merchant_name) }}
+<main class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Routing</div>
+    <h1 class="ptitle">Which bank, on which rail</h1>
+    <p class="psub">The evidence behind <span class="mono">switch_rail</span>. A decline is
+    not just a decline — it belongs to an issuer and a method, and moving to the rail most
+    likely to clear is only defensible if that pattern is visible.</p>
+  </header>
+
+  {% if not db_ok %}
+    <div class="empty">
+      <b>Can't reach the database.</b>
+      <p>This page shows nothing rather than something wrong. Every figure here is
+      read live, so there is no cached number to fall back on — check the database
+      and reload.</p>
+    </div>
+  {% else %}
+
+  {% if not data.routing.has_data %}
+    <div class="empty">
+      <b>No routing data yet.</b>
+      <p>Bank and method come from the gateway's decline payload, so this page fills once
+      real card failures have flowed through the webhook. The four merchant-pushed types
+      never reach a gateway and so never carry an issuer.</p>
+    </div>
+  {% else %}
+    {% if data.routing.banks %}
+    <section class="sec" style="margin-top:1.4rem">
+      <h2 class="sec-t">Failures by bank</h2>
+      <p class="sec-s">Green is the share the engine considers worth retrying.</p>
+      {% set worst = data.routing.banks[0].failures %}
+      <div style="margin-top:.9rem">
+      {% for b in data.routing.banks %}
+        {{ bar(b.bank, "{:,}".format(b.failures) ~ " · " ~ b.retryable ~ " retryable",
+               b.failures / worst) }}
+      {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <div class="grid grid-2" style="margin-top:1.8rem">
+      {% if data.routing.methods %}
+      <section>
+        <h2 class="sec-t">By method</h2>
+        <p class="sec-s">How the customer tried to pay.</p>
+        <div class="tw"><table class="ct">
+          <thead><tr><th>Method</th><th style="text-align:right">Failures</th></tr></thead>
+          <tbody>{% for m in data.routing.methods %}
+            <tr><td>{{ m.method }}</td><td class="n">{{ "{:,}".format(m.n) }}</td></tr>
+          {% endfor %}</tbody>
+        </table></div>
+      </section>
+      {% endif %}
+
+      {% if data.routing.rails %}
+      <section>
+        <h2 class="sec-t">Rails the engine chose</h2>
+        <p class="sec-s">Where <span class="mono">switch_rail</span> actually sent people.</p>
+        <div class="tw"><table class="ct">
+          <thead><tr><th>Rail</th><th style="text-align:right">Attempts</th></tr></thead>
+          <tbody>{% for r in data.routing.rails %}
+            <tr><td>{{ r.rail }}</td><td class="n">{{ "{:,}".format(r.n) }}</td></tr>
+          {% endfor %}</tbody>
+        </table></div>
+      </section>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

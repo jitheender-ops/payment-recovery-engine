@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
+{% block title %}Cases · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("cases", merchant_name) }}
+<main class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Cases</div>
+    <h1 class="ptitle">Every unit of revenue at risk</h1>
+    <p class="psub">One row per case, newest first. References are your own — invoice
+    numbers, cart ids — never a customer's email or phone.</p>
+  </header>
+
+  {% if not db_ok %}
+    <div class="empty">
+      <b>Can't reach the database.</b>
+      <p>This page shows nothing rather than something wrong. Every figure here is
+      read live, so there is no cached number to fall back on — check the database
+      and reload.</p>
+    </div>
+  {% else %}
+
+  {% if data.states %}
+  <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:1.4rem">
+    <a class="pill {% if state == 'all' %}pill-g{% endif %}" href="/console/cases">all</a>
+    {% for s in data.states %}
+      <a class="pill {% if state == s.state %}pill-g{% endif %}"
+         href="/console/cases?state={{ s.state }}">{{ s.state }} · {{ s.n }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if not data.cases %}
+    <div class="empty">
+      <b>No cases{% if state != 'all' %} in state “{{ state }}”{% endif %}.</b>
+      <p>A case opens when a charge fails or you push a risk event. Until then there is
+      nothing to list, and this page says so rather than drawing an empty table.</p>
+    </div>
+  {% else %}
+    <div class="tw">
+      <table class="ct">
+        <thead><tr>
+          <th>Reference</th><th>Type</th><th>State</th>
+          <th style="text-align:right">At risk</th><th style="text-align:right">Recovered</th>
+          <th>Attempts</th><th>Next action</th><th>Opened</th>
+        </tr></thead>
+        <tbody>
+        {% for c in data.cases %}
+          <tr>
+            <td class="ref">{{ c.case_ref }}</td>
+            <td>{{ c.risk_type.replace("_", " ") }}</td>
+            <td><span class="pill {% if c.state == 'recovered' %}pill-g{% elif c.state in ('exhausted','abandoned','expired') %}pill-r{% endif %}">{{ c.state }}</span></td>
+            <td class="n">{{ c.at_risk }}</td>
+            <td class="n">{{ c.recovered }}</td>
+            <td class="n">{{ c.attempts }}</td>
+            <td class="ref">{{ c.next_action }}</td>
+            <td class="ref">{{ c.opened }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="sec-s" style="margin-top:.8rem">
+      Showing {{ data.cases | length }} case{{ "s" if data.cases | length != 1 }}.
+      Every open, contact, deferral and attribution is on the ledger's activity feed.</p>
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

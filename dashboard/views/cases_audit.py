@@ -31,18 +31,29 @@ FROM recovery_cases GROUP BY state ORDER BY n DESC
 """
 
 CASES_SQL = """
+-- EVERY display alias is double-quoted, and both halves of that matter.
+--
+-- Unquoted, `AS Next action` is a syntax error (Postgres reads `AS Next`, then
+-- chokes on `action`) — and query_db() returns None on any exception, so this
+-- page rendered "No cases in state 'all'" forever rather than an error.
+--
+-- Unquoted aliases are also FOLDED TO LOWER CASE, so `AS Opened` comes back as
+-- `opened`. The renderer below indexes by exact string ("Opened", "State",
+-- "Used", ...), so fixing only the two aliases with spaces would have traded a
+-- silently empty page for a KeyError. Quoting preserves the case the display
+-- code expects.
 SELECT rc.id::text                    AS case_id,
-       rc.state                       AS State,
-       rc.risk_type                   AS Type,
-       rc.customer_id                 AS Customer,
+       rc.state                       AS "State",
+       rc.risk_type                   AS "Type",
+       rc.customer_id                 AS "Customer",
        rc.amount_at_risk              AS at_risk,
        rc.amount_recovered            AS recovered,
-       rc.attempts_used               AS Used,
-       rc.max_attempts                AS Max,
-       rc.escalation_level            AS Esc,
-       rc.next_action_at              AS Next action,
-       rc.close_reason                AS Close reason,
-       rc.opened_at                   AS Opened
+       rc.attempts_used               AS "Used",
+       rc.max_attempts                AS "Max",
+       rc.escalation_level            AS "Esc",
+       rc.next_action_at              AS "Next action",
+       rc.close_reason                AS "Close reason",
+       rc.opened_at                   AS "Opened"
 FROM recovery_cases rc
 WHERE (:state = 'all' OR rc.state = :state)
 ORDER BY rc.opened_at DESC
