@@ -159,7 +159,6 @@ def main() -> None:
             f"(5000 keeps every class populated; retry_now is the scarce one)."
         )
     print(f"Training on {len(X_train)}, holding out {len(X_test)}...")
-    print(f"Training on {len(X_train)}, holding out {len(X_test)}...")
 
     from src.agent.xgboost_baseline import XGBoostBaseline
     # "" forces the rule path so training never loads a previous model over
