@@ -80,6 +80,48 @@ Forcing light here would ignore a preference the reader set deliberately, and a
 payment page that blasts pure white at somebody checking their phone at 1am is a
 defect, not a brand decision.
 
+## Type scale & rhythm (2026-08-31 refinement)
+
+`h1` tightened from `1.6rem`/`1.95rem` to `1.5rem`/`1.75rem` (mobile/desktop)
+— the jump from body text felt looser than the rest of the page's
+deliberate hierarchy. Section-to-section whitespace (`.sec` top margin,
+`--sp-6` → `--sp-5`) and footer bottom padding (`--sp-7` → `--sp-6`)
+tightened to read as one continuous flow rather than a long scroll of ruled
+blocks. `.amount` is untouched — it is the emotional focal point and
+already has its own overflow-safe sizing rule below; tightness elsewhere
+should never come at its expense. The mono label voice (uppercase, `.68rem`,
+wide letter-spacing) is untouched too — it is signature statement/register
+typography, not something "modern" should erase.
+
+## CTA & trust-strip weight
+
+The primary button (`.btn`) carries a contact shadow (`--btn-shadow`,
+tied to `--ink`'s rgb rather than a flat black, so it reads as this
+surface's own shadow) so it is unambiguously the one raised, clickable
+thing on the page. Label weight is `700` (was `600`). `.btn-quiet`
+explicitly opts back out of both (`box-shadow:none`, weight `600`) so the
+one primary action per state stays the only heavy element — a page with
+two "loud" buttons has zero. Corner radius stays the sharp `3px` — that is
+part of the cheque-stock identity, not something a "modern" pass should
+round off.
+
+Dark mode redefines `--btn-shadow` rather than reusing the light-mode
+value: a black contact shadow disappears against the `#141815` ground, so
+dark mode trades it for a crisp 1px edge definition plus a tighter shadow
+instead — still legible as "the raised thing," by a different mechanism.
+
+The trust strip's lock icon is sized up slightly (`14×16`, was the SVG's
+raw `12×14`) and its internal gap tightened (`--sp-4` → `--sp-3`) so lock +
+"secured" line + payment marks reads as one unit sitting immediately under
+the button, at the point of hesitation research says security cues matter
+most — weight through proximity, not new elements.
+
+The button gets a subtle `scale(.98)` on `:active` alongside the existing
+colour change — a tactile "checkout" press. Governed by the same blanket
+`prefers-reduced-motion` kill-switch as every other transition on this page
+(`*{transition:none!important}`), so it degrades to an instant state change,
+not motion, when that preference is set.
+
 ## Amount sizing
 
 Mono advance width is fixed and a crore has five more glyphs than a thousand, so

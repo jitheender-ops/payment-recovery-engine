@@ -50,6 +50,13 @@
     --sp-1:.25rem; --sp-2:.5rem; --sp-3:.75rem; --sp-4:1rem;
     --sp-5:1.5rem; --sp-6:2rem; --sp-7:3rem;
     --r:3px;
+
+    /* Contact shadow for the one raised, clickable thing on the page (the
+       primary button). Tied to --ink's rgb rather than a flat black so it
+       reads as "this surface's own shadow," not a generic UI-kit drop
+       shadow. Redefined in dark mode below, since a black shadow is
+       invisible against a near-black ground. */
+    --btn-shadow:0 1px 2px rgba(23,26,24,.08), 0 6px 18px rgba(23,26,24,.14);
   }
   *,*::before,*::after{box-sizing:border-box}
   html{-webkit-text-size-adjust:100%}
@@ -60,7 +67,7 @@
   }
   main{max-width:33rem; margin:0 auto; padding:var(--sp-5) var(--sp-4) var(--sp-6)}
 
-  h1{font-family:var(--display); font-weight:600; font-size:1.6rem;
+  h1{font-family:var(--display); font-weight:600; font-size:1.5rem;
      line-height:1.18; letter-spacing:0; margin:0 0 var(--sp-4)}
   p{margin:0 0 var(--sp-3)}
   .quiet{color:var(--quiet)}
@@ -141,7 +148,7 @@
   /* ---- Ruled section head: statement vernacular, and it is true — this
      page is a record. Not numbered; nothing here is a sequence. ---------- */
   .sec{display:flex; align-items:center; gap:var(--sp-3);
-       margin:var(--sp-6) 0 var(--sp-3)}
+       margin:var(--sp-5) 0 var(--sp-3)}
   .sec h2{margin:0; white-space:nowrap; font-family:var(--mono);
           font-size:.68rem; font-weight:500; letter-spacing:.14em;
           text-transform:uppercase; color:var(--quiet)}
@@ -160,22 +167,24 @@
   .btn{display:flex; align-items:center; justify-content:center; gap:var(--sp-2);
        width:100%; min-height:56px; padding:var(--sp-3) var(--sp-5);
        border-radius:var(--r); border:1px solid var(--ink);
-       font-family:var(--display); font-size:1.1rem; font-weight:600;
+       font-family:var(--display); font-size:1.1rem; font-weight:700;
        background:var(--ink); color:var(--field); cursor:pointer;
-       text-decoration:none; transition:background .14s ease,color .14s ease}
+       text-decoration:none; box-shadow:var(--btn-shadow);
+       transition:background .14s ease,color .14s ease,transform .1s ease}
   .btn:hover{background:var(--btn-hover)}
-  .btn:active{background:var(--btn-active)}
+  .btn:active{background:var(--btn-active); transform:scale(.98)}
   .btn[disabled],.btn[aria-disabled="true"]{opacity:.6; cursor:progress}
-  .btn-quiet{background:transparent; color:var(--ink); border-color:var(--rule)}
+  .btn-quiet{background:transparent; color:var(--ink); border-color:var(--rule);
+             font-weight:600; box-shadow:none}
   .btn-quiet:hover{background:var(--field); color:var(--ink)}
 
   /* ---- Trust strip: sits AT the button, where hesitation peaks. The
      research puts security cues exactly at the moment of payment, not in a
      footer nobody reaches. Lock is an inline SVG — no emoji, no webfont. -- */
   .trust{margin:var(--sp-3) 0 0; display:flex; flex-wrap:wrap; align-items:center;
-         justify-content:center; gap:var(--sp-2) var(--sp-4);
+         justify-content:center; gap:var(--sp-2) var(--sp-3);
          font-size:.8rem; color:var(--quiet)}
-  .trust .lock{flex:none}
+  .trust .lock{flex:none; width:14px; height:16px}
   .trust .marks{font-family:var(--mono); font-size:.68rem; font-weight:600;
                 letter-spacing:.08em; text-transform:uppercase; white-space:nowrap}
 
@@ -233,7 +242,7 @@
   details[open] summary::before{content:"−"}
 
   footer{max-width:33rem; margin:0 auto;
-         padding:var(--sp-5) var(--sp-4) var(--sp-7);
+         padding:var(--sp-5) var(--sp-4) var(--sp-6);
          border-top:1px solid var(--rule); color:var(--quiet); font-size:.86rem}
   .mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
 
@@ -247,6 +256,10 @@
       --ink:#E8EBE7; --quiet:#99A29B; --rule:#39413B; --rule-soft:#2A312C;
       --hold:#A996CE; --settled:#4FBF87; --halt:#E88C8C;
       --hatch:#2E2A38; --btn-hover:#FFFFFF; --btn-active:#C2C7C1;
+      /* A black contact shadow disappears against this near-black ground,
+         so dark mode trades the light-mode drop shadow for a crisp edge
+         definition instead — still reads as "the one raised thing." */
+      --btn-shadow:0 1px 3px rgba(0,0,0,.5), 0 0 0 1px rgba(232,235,231,.08);
     }
     /* The rail track is a container, not a surface: on dark it must read as a
        recess the block sits in, so it takes the page ground rather than the
@@ -263,7 +276,7 @@
     .rail-block,.rail-block.breathe{animation:none!important; opacity:1}
   }
   @media (min-width:33rem){
-    h1{font-size:1.95rem}
+    h1{font-size:1.75rem}
     .amount{font-size:3.6rem}
     .amount-long{font-size:2.8rem}
   }
