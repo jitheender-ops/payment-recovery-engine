@@ -387,7 +387,12 @@ async def test_reconcile_risk_events_recovers_a_dropped_event(
     assert recovered == 1
     case = await _case_for(db_sessionmaker, "invoice_overdue", "inv_dropped")
     assert case is not None
-    assert case.attempts_used == 1  # immediate type chased during reconcile
+    # The case is OPENED by the reconcile — that is what "recovered a dropped
+    # event" means — but not contacted: an invoice is account-linked on ingest
+    # and belongs to the consolidation sweep, which sends one statement per
+    # buyer rather than one message per invoice.
+    assert case.attempts_used == 0
+    assert case.state == "open"
     async with db_sessionmaker() as session:
         fresh = (
             await session.execute(
@@ -475,15 +480,20 @@ async def test_process_risk_event_chases_immediate_types_right_away(
     calls: list[dict[str, Any]] = []
     _spy_executor(monkeypatch, orch, calls)
 
+    # subscription_failure, not invoice_overdue: both carry
+    # first_action_hours=0, but an invoice is linked to an AR account on
+    # ingest and is therefore left for the consolidation sweep — contacting it
+    # here would be one message per invoice for a buyer who should get one
+    # statement. That path has its own test in test_integration_seams.py.
     event = await _seed_risk_event(
-        db_sessionmaker, risk_type="invoice_overdue", reference_id="inv_204"
+        db_sessionmaker, risk_type="subscription_failure", reference_id="sub_204"
     )
     async with db_sessionmaker() as session:
         await orch.process_risk_event(event, session)
 
-    case = await _case_for(db_sessionmaker, "invoice_overdue", "inv_204")
+    case = await _case_for(db_sessionmaker, "subscription_failure", "sub_204")
     assert case is not None
-    # first_action_hours == 0 → the first chase step ran during ingestion.
+    # first_action_hours == 0 and nothing to consolidate → chased on ingest.
     assert case.attempts_used == 1
     assert len(calls) == 1
     assert calls[0]["case"].id == case.id

@@ -588,3 +588,111 @@ async def test_a_fire_time_rejection_still_advances_the_ladder(
         "the case is still due at a past instant — the next tick will re-chase "
         "it immediately, ignoring the re_chase_hours floor"
     )
+
+
+# ── Seam 4: ingestion must not bypass B2B consolidation ────────────────────
+
+
+async def test_account_linked_invoices_are_consolidated_not_chased_on_arrival(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    Four invoices for ONE buyer, ingested together → ONE contact.
+
+    invoice_overdue carries first_action_hours=0, and process_risk_event read
+    that as "chase immediately" for every case including account-linked ones.
+    So a buyer sending four overdue invoices got four separate messages — the
+    precise harm src/receivables exists to prevent — and the consolidation
+    sweep never got a chance: by the time it ran, the inline chases had pushed
+    every next_action_at forward, so it found nothing due and no
+    ar_contact_log row was ever written.
+
+    This drives process_risk_event, NOT the sweep. An earlier version of this
+    test opened the cases directly and ticked, which passes with or without
+    the fix — the bug is in the ingest path that runs before any sweep, so
+    that is the path the test has to take.
+    """
+    from src.models import RiskEvent
+    from src.scheduler import tick
+
+    calls: list[str] = []
+    orch = _orchestrator(monkeypatch, calls)
+    now = datetime.now(UTC)
+
+    async with db_sessionmaker() as session:
+        for n in range(4):
+            session.add(RiskEvent(
+                event_id=f"evt_inv_{n}",
+                risk_type="invoice_overdue",
+                reference_id=f"INV-{n}",
+                amount=100_000,
+                currency="INR",
+                customer_email="ap@buyer.in",
+                account_ref="one-buyer",
+                occurred_at=now - timedelta(days=5 + n),
+                due_at=now - timedelta(days=5 + n),
+                meta={},
+                payload={"risk_type": "invoice_overdue"},
+                processed=False,
+            ))
+        await session.commit()
+
+        events = (await session.execute(sa.select(RiskEvent))).scalars().all()
+        for event in events:
+            await orch.process_risk_event(event, session)
+
+        ingest_contacts = len(calls)
+        counts = await tick(session, now=now)
+        logs = (await session.execute(sa.select(ArContactLog))).scalars().all()
+
+    assert ingest_contacts == 0, (
+        f"ingestion contacted the buyer {ingest_contacts} time(s) before the "
+        "consolidation sweep could group the invoices"
+    )
+    assert len(calls) == 1, (
+        f"the buyer was contacted {len(calls)} times for four invoices "
+        f"({calls}) — consolidation is what makes that exactly one"
+    )
+    assert counts["accounts_consolidated"] == 1
+    assert len(logs) == 1, "no consolidated statement was recorded"
+
+
+async def test_an_invoice_with_no_customer_at_all_still_chases_on_arrival(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    The fix must not disable the immediate path outright.
+
+    Worth pinning because the "unlinked invoice" is rarer than it looks:
+    process_risk_event DERIVES an account from the customer key when no
+    account_ref is supplied, so almost every invoice is account-linked and
+    therefore consolidated. Only an event carrying no email, no contact and
+    no customer id has nothing to group with — and that one must still be
+    chased on arrival rather than waiting for a sweep that will never find a
+    buyer for it.
+    """
+    from src.models import RiskEvent
+
+    calls: list[str] = []
+    orch = _orchestrator(monkeypatch, calls)
+    now = datetime.now(UTC)
+
+    async with db_sessionmaker() as session:
+        event = RiskEvent(
+            event_id="evt_anon", risk_type="invoice_overdue",
+            reference_id="INV-ANON", amount=100_000, currency="INR",
+            occurred_at=now - timedelta(days=9), due_at=now - timedelta(days=9),
+            meta={}, payload={"risk_type": "invoice_overdue"}, processed=False,
+        )
+        session.add(event)
+        await session.commit()
+        await orch.process_risk_event(event, session)
+
+        fresh = (await session.execute(
+            sa.select(RecoveryCase).where(RecoveryCase.subject_ref == "INV-ANON")
+        )).scalars().one()
+        assert fresh.account_id is None, "no customer key, so nothing to group with"
+
+    assert calls == ["INV-ANON"], "an account-less invoice should chase on arrival"
