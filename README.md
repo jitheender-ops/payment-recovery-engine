@@ -589,6 +589,10 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 # Train the XGBoost baseline (run.sh does this automatically if no model exists)
 .venv/bin/python scripts/train_xgboost.py --n-samples 10000
 
+# Check a DEPLOYED instance is functioning. Read-only — writes nothing, so it
+# is safe to run against production. Exit 0 only if every required check passed.
+.venv/bin/python scripts/check_deployment.py --host https://<host> --password "$DASHBOARD_PASSWORD"
+
 # Simulate webhooks against the running API
 .venv/bin/python scripts/simulate_webhooks.py --count 20
 
@@ -634,7 +638,8 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   └── runner.py         # Runs all policies, produces results table
 ├── dashboard/            # Streamlit ops console (6 views under views/)
 ├── tests/                # Pytest suite — real schema over throwaway SQLite
-├── scripts/              # simulate_webhooks, run_risk_batch, train_xgboost, ...
+├── scripts/              # check_deployment (is a live host healthy?),
+│                         #   simulate_webhooks, run_risk_batch, train_xgboost, ...
 ├── alembic/versions/     # Schema migrations (create_all is not an upgrade path)
 ├── models/               # Trained XGBoost artefact (gitignored; run.sh builds it)
 ├── .github/workflows/    # CI: ruff + mypy strict + pytest on 3.11 & 3.13,

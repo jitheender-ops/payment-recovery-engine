@@ -152,9 +152,31 @@ back to the case that earned it.
 
 ## 4. Verify
 
+One command checks every claim this document makes. It writes nothing, so it
+is safe against a live deployment:
+
 ```bash
-curl https://<recovery-api>.onrender.com/health
+python scripts/check_deployment.py \
+    --host https://<recovery-api>.onrender.com \
+    --password "$DASHBOARD_PASSWORD"
 ```
+
+It verifies the service is reachable, the public landing renders, **the console
+actually redirects when signed out**, `/risks` **rejects an unsigned event**,
+`/docs` is closed, the database is readable, and the scheduler has ticked. Exit
+code 0 only if every required check passed, so it also works in a deploy hook.
+Each of those is a promise made in this file or in PRODUCT.md, and each fails
+quietly — the page still renders either way.
+
+Then drive real traffic through it:
+
+```bash
+python scripts/simulate_webhooks.py --host https://<recovery-api>.onrender.com --count 24
+python scripts/run_risk_batch.py    --host https://<recovery-api>.onrender.com --count 24
+```
+
+Doing it in that order matters: if the console is ungated or `/risks` is taking
+unsigned events, you want to know before you push data in, not after.
 
 Then open `/console/live`, sign in with `DASHBOARD_PASSWORD`, and read the
 heartbeat strip at the top of the page:
