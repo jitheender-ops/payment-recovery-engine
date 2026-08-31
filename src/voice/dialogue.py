@@ -69,10 +69,16 @@ class Intent:
     response: str
 
 
+# The AI disclosure lives HERE, not as a policy note elsewhere: this is the
+# literal opening line a real call speaks (or the script handed to whatever
+# telephony/IVR provider dials the number — see voice/TODO.md section 2).
+# "automated" plus the explicit "AI hoon, insaan nahi" is the one thing that
+# must be true of the very first sentence before anything else is said.
 GREETING = Intent(
     "greeting",
-    "Namaste, main {merchant} ka recovery assistant hoon. Aapke ek pending "
-    "payment ke bare mein baat karni thi — kya aapke paas ek minute hai?",
+    "Namaste, main {merchant} ka automated recovery assistant hoon — ek AI "
+    "hoon, insaan nahi. Aapke ek pending payment ke bare mein baat karni "
+    "thi — kya aapke paas ek minute hai?",
 )
 
 ASK_CONSENT = Intent(

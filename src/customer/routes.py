@@ -53,7 +53,13 @@ from src.customer.i18n import Translator, pick
 from src.database import get_session
 from src.formatting import ist as _ist
 from src.formatting import money as _money
-from src.models import PaymentFailure, PromiseToPay, RecoveryCase, RetryAttempt
+from src.models import (
+    PaymentFailure,
+    PromiseToPay,
+    RecoveryCase,
+    RetryAttempt,
+    VoiceCallQueue,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -517,6 +523,28 @@ async def recovery_page(
         max(0, (promise.due_at.date() - datetime.now(UTC).date()).days) if promise else 0
     )
 
+    # Honest "we called you" trace. VoiceCallQueue.state == "done" is the
+    # real signal for a completed call — RetryAttempt.channel is never set
+    # to "voice" by any code path (a voice call is queued as a follow-up
+    # against the ORIGINAL nudge_customer attempt, not written as its own
+    # attempt row), so that field would silently never match.
+    voice_call = (
+        await session.execute(
+            select(VoiceCallQueue)
+            .where(
+                VoiceCallQueue.recovery_case_id == case.id,
+                VoiceCallQueue.state == "done",
+            )
+            .order_by(VoiceCallQueue.claimed_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    voice_call_when = (
+        _ist(voice_call.claimed_at).strftime("%d %b, %H:%M")
+        if voice_call is not None and voice_call.claimed_at is not None
+        else None
+    )
+
     # Confirming resolves itself: one automatic re-check after a few seconds,
     # then the honest "we'll message you" instead of a spinner that can spin
     # for a minute. The ?r=1 flag stops the loop after the single re-check.
@@ -569,6 +597,7 @@ async def recovery_page(
             "cart_items": cart_items,
             "sequence_attempts": sequence_attempts,
             "sequence_upcoming_when": sequence_upcoming_when,
+            "voice_call_when": voice_call_when,
             "promise_due_when": promise_due_when,
             "promise_days_left": promise_days_left,
             "last_promise_broken": broken_promise is not None,

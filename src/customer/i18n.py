@@ -90,6 +90,9 @@ CATALOGS: dict[str, dict[str, str]] = {
         "sequence_action_switch_rail": "We suggested a different way to pay.",
         "sequence_action_nudge": "We sent you a reminder.",
         "sequence_upcoming": "We'll be in touch again around {when}.",
+        # honest voice-call trace — any risk type, whenever a call actually
+        # completed (VoiceCallQueue.state == "done")
+        "sequence_call_made": "We called you on {when}.",
         # register labels
         "register_attempted": "Attempted",
         "register_opened": "Opened",
@@ -168,6 +171,7 @@ CATALOGS: dict[str, dict[str, str]] = {
         "sequence_action_switch_rail": "हमने भुगतान का एक अलग तरीका सुझाया।",
         "sequence_action_nudge": "हमने आपको याद दिलाया।",
         "sequence_upcoming": "हम {when} के आसपास फिर संपर्क करेंगे।",
+        "sequence_call_made": "हमने आपको {when} को कॉल किया था।",
         "register_attempted": "कोशिश की गई",
         "register_opened": "खोला गया",
         "pay_securely": "{amount} सुरक्षित रूप से भुगतान करें",

@@ -67,6 +67,17 @@ FROM promises_to_pay
 WHERE channel = 'voice'
 """
 
+# KNOWN GAP (2026-09-01): no write path in this repo ever sets
+# retry_attempts.channel = 'voice' — a voice call is queued
+# (orchestrator._queue_voice_call) against the ORIGINAL nudge_customer
+# attempt row, never written as its own attempt with this channel. This
+# panel is therefore always empty against real data today. The honest fix
+# is either recording a real attempt row when a call completes, or
+# rewriting this query against voice_call_queue directly — not something
+# to silently paper over here; flagging it is the fix for now. See the
+# same root cause called out on the customer recovery page
+# (src/customer/routes.py's voice_call query, which reads
+# VoiceCallQueue.state == "done" instead for exactly this reason).
 ATTEMPTS_SQL = """
 SELECT COALESCE(language, 'unset') AS language, COUNT(*) AS n
 FROM retry_attempts

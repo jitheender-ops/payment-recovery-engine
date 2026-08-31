@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import get_settings
 from src.voice import pipeline
-from src.voice.dialogue import is_injection, is_opt_out
+from src.voice.dialogue import GREETING, is_injection, is_opt_out
 from src.voice.facts import CaseFacts
 from src.voice.knowledge import retrieve
 from src.voice.pipeline import run_turn
@@ -88,6 +88,19 @@ def client(
 )
 async def test_opt_out_is_recognised_in_every_phrasing(transcript: str) -> None:
     assert is_opt_out(transcript) is True
+
+
+def test_the_greeting_discloses_it_is_automated() -> None:
+    """
+    The one line stated as a precondition for going live: the greeting
+    must say it is an automated assistant, not just "recovery assistant".
+    This is the literal call-opening script (voice/TODO.md section 2) — a
+    passing test here means the compliance requirement is actually met in
+    the source, not just noted as a TODO.
+    """
+    text = GREETING.response.lower()
+    assert "automated" in text
+    assert "ai" in text.split()
 
 
 async def test_an_opt_out_turn_never_becomes_a_pitch() -> None:

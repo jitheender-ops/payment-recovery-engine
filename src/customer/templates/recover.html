@@ -142,6 +142,12 @@
       <span class="when">&nbsp;</span>
       <p class="what">{{ t('timeline_result_reason', reason=detail.headline[0].lower() + detail.headline[1:]) if lang == 'en' else t('timeline_result') }}</p>
     </li>
+    {% if voice_call_when %}
+    <li class="done">
+      <span class="when">&nbsp;</span>
+      <p class="what">{{ t('sequence_call_made', when=voice_call_when) }}</p>
+    </li>
+    {% endif %}
     <li class="safe">
       <span class="when">&nbsp;</span>
       <p class="what">{{ t('timeline_safe') }}</p>
@@ -166,6 +172,12 @@
       </p>
     </li>
     {% endfor %}
+    {% if voice_call_when %}
+    <li class="done">
+      <span class="when">&nbsp;</span>
+      <p class="what">{{ t('sequence_call_made', when=voice_call_when) }}</p>
+    </li>
+    {% endif %}
     {% if sequence_upcoming_when %}
     <li class="upcoming">
       <span class="when">&nbsp;</span>

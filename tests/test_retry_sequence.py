@@ -1,12 +1,18 @@
 """
-The retry-sequence panel on the recovery page — subscription/mandate only.
+The retry-sequence panel on the recovery page (subscription/mandate) and
+the honest "we called you" voice trace (any risk type).
 
-The one rule that matters here: the upcoming row states WHEN, never WHAT.
-retry_now, retry_at, switch_rail and nudge_customer are all decided live by
-the agent at the moment it next acts, not stored ahead of time, so a label
-predicting the verb would eventually be wrong — which is the one thing this
-page's honesty rules never allow. Every test below is really testing that
-one boundary from a different angle.
+The one rule that matters for the sequence panel: the upcoming row states
+WHEN, never WHAT. retry_now, retry_at, switch_rail and nudge_customer are
+all decided live by the agent at the moment it next acts, not stored ahead
+of time, so a label predicting the verb would eventually be wrong — which
+is the one thing this page's honesty rules never allow. Most tests below
+are really testing that one boundary from a different angle.
+
+The voice-call tests exist because RetryAttempt.channel is never actually
+set to "voice" by any code path — VoiceCallQueue.state == "done" is the
+real signal, and a query against the wrong field would silently never
+render, which is worse than not having the feature at all.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from src.cases import open_case
 from src.config import get_settings
 from src.customer.routes import router as customer_router
 from src.database import get_session
-from src.models import RetryAttempt
+from src.models import RetryAttempt, VoiceCallQueue
 from src.recovery_link import mint
 
 LINK_SECRET = "recovery-link-test-secret"
@@ -201,3 +207,82 @@ async def test_cart_and_invoice_pages_get_no_sequence_rows(
     )
     page = client.get(f"/recover/{token}")
     assert "in touch again" not in page.text
+
+
+# ── The "we called you" voice trace (any risk type) ────────────────────────
+
+
+async def _add_voice_call(
+    sm: async_sessionmaker[AsyncSession],
+    case_id: uuid.UUID,
+    *,
+    state: str,
+    claimed_at: datetime | None,
+) -> None:
+    async with sm() as s:
+        s.add(VoiceCallQueue(
+            recovery_case_id=case_id,
+            retry_attempt_id=uuid.uuid4(),
+            customer_contact="+919812345678",
+            risk_type="mandate_failure",
+            amount_paise=99900,
+            state=state,
+            claimed_at=claimed_at,
+        ))
+        await s.commit()
+
+
+async def test_a_completed_call_renders_honestly(
+    client: TestClient, db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    case_id, token = await _open(
+        db_sessionmaker, risk_type="mandate_failure", subject="mandate_call_1",
+    )
+    await _add_voice_call(
+        db_sessionmaker, case_id, state="done",
+        claimed_at=datetime.now(UTC) - timedelta(hours=3),
+    )
+    page = client.get(f"/recover/{token}")
+    assert "We called you on" in page.text
+
+
+async def test_a_call_still_queued_or_claimed_says_nothing_yet(
+    client: TestClient, db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Nothing definite has happened yet — don't claim it did."""
+    case_id, token = await _open(
+        db_sessionmaker, risk_type="mandate_failure", subject="mandate_call_2",
+    )
+    await _add_voice_call(db_sessionmaker, case_id, state="queued", claimed_at=None)
+    page = client.get(f"/recover/{token}")
+    assert "We called you on" not in page.text
+
+
+async def test_a_failed_call_is_not_reported_as_a_completed_one(
+    client: TestClient, db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    case_id, token = await _open(
+        db_sessionmaker, risk_type="mandate_failure", subject="mandate_call_3",
+    )
+    await _add_voice_call(
+        db_sessionmaker, case_id, state="failed",
+        claimed_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    page = client.get(f"/recover/{token}")
+    assert "We called you on" not in page.text
+
+
+async def test_a_completed_call_renders_on_the_payment_rail_page_too(
+    client: TestClient, db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The trace isn't scoped to subscription/mandate — any risk type."""
+    case_id, token = await _open(
+        db_sessionmaker, risk_type="checkout_abandonment", subject="cart_call_1",
+        max_attempts=2, attempts_used=0,
+    )
+    await _add_voice_call(
+        db_sessionmaker, case_id, state="done",
+        claimed_at=datetime.now(UTC) - timedelta(hours=5),
+    )
+    page = client.get(f"/recover/{token}")
+    assert "We called you on" in page.text
