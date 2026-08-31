@@ -120,13 +120,24 @@ class XGBoostBaseline:
                 logger.exception("Failed to load XGBoost model from %s", model_path)
 
         if self._model is None:
-            # warning, not info: this is a silent capability downgrade on the
-            # decision path, and it read as normal startup noise at info level.
-            logger.warning(
-                "XGBoost: no trained model at %r — falling back to rule-based "
-                "heuristics. Train one with scripts/train_xgboost.py.",
-                model_path,
-            )
+            if model_path:
+                # A path WAS configured and we still have no model: either the
+                # file is missing or joblib.load raised. That is a silent
+                # capability downgrade on the decision path, and it read as
+                # normal startup noise at info level.
+                logger.warning(
+                    "XGBoost: no trained model at %r — falling back to rule-based "
+                    "heuristics. Train one with scripts/train_xgboost.py.",
+                    model_path,
+                )
+            else:
+                # Empty path is the caller ASKING for the rules (see the note
+                # above, and scripts/train_xgboost.py, which passes "" so a
+                # training run cannot load a previous model over itself).
+                # Warning about a deliberate choice cried wolf in every build
+                # log and every test run, which is how real warnings get
+                # ignored.
+                logger.debug("XGBoost: rule heuristics requested explicitly.")
 
     @property
     def is_trained(self) -> bool:
@@ -338,7 +349,10 @@ class XGBoostBaseline:
             objective="multi:softprob",
             num_class=len(ACTION_LABELS),
             eval_metric="mlogloss",
-            use_label_encoder=False,
+            # No use_label_encoder: XGBoost removed it, and passing it made
+            # every training run print "Parameters: { use_label_encoder } are
+            # not used" — including inside the Docker build, where a warning
+            # in the log is the first thing anyone reads when a deploy fails.
             random_state=42,
         )
         model.fit(X, y)
