@@ -1,6 +1,26 @@
 # Razorpay error code → failure class mapping rules.
 # Matched in priority order (highest first). First match wins.
 # Uses Razorpay's 5-tuple: (error_code, error_source, error_step, error_reason, description_pattern)
+#
+# AUDITED 2026-09-01 against Razorpay's own published list (docs/decline-taxonomy.md
+# has the full table, the before/after, and the reasoning). Ten of their
+# eighteen documented error_reason values matched no rule here by name. Two
+# outcomes, and the second is the expensive one:
+#
+#   * `card_declined` and `payment_declined` — the two most generic bank
+#     declines there are — reached NO rule at all, because the low-priority
+#     catch-alls key on error_source customer/business and these arrive from
+#     the bank. They classified as UNKNOWN, which is non-retryable, so those
+#     cases were abandoned without a single attempt.
+#   * The rest were absorbed by a catch-all into `issuer_decline`. Still
+#     chased, but explained to the customer as something they were not —
+#     `payment_collect_request_expired` (an expired UPI collect) was told it
+#     was an issuer decline, and then recommended UPI.
+#
+# Rules NOT in Razorpay's published list were kept, not deleted: that list is
+# a curated failure-analysis page rather than an exhaustive enum, and removing
+# a mapping that does fire would silently route real declines to UNKNOWN. An
+# unused rule costs one dict comparison; a missing one costs the recovery.
 
 rules:
   # ── Fraud / Hard Decline (highest priority) ──────────────────────────
@@ -90,6 +110,16 @@ rules:
     retryable: true
     priority: 80
 
+  # The same reason without the step. The rule above is the precise one and
+  # still wins; this exists because a reason that only classifies with a
+  # companion field is invisible to the coverage check — and a payload that
+  # names the reason but not the step would otherwise fall to a catch-all.
+  # audit 2026-09-01
+  - error_reason: "authentication_failed"
+    failure_class: "3ds_dropoff"
+    retryable: true
+    priority: 78
+
   # ── Insufficient Funds ───────────────────────────────────────────────
   - error_reason: "insufficient_funds"
     failure_class: "insufficient_funds"
@@ -118,6 +148,18 @@ rules:
     priority: 75
 
   # ── UPI Collect Timeout ──────────────────────────────────────────────
+  # Razorpay's real string for an expired UPI collect request. The rule below
+  # it keys on "upi_collect_timeout", which appears nowhere in their
+  # documentation. Until this was added, an expired collect request was
+  # absorbed by the priority-10 customer catch-all into `issuer_decline`: the
+  # case was still chased, but the page explained a UPI timeout as a bank
+  # refusal and then recommended UPI — to someone whose UPI request had just
+  # expired. audit 2026-09-01
+  - error_reason: "payment_collect_request_expired"
+    failure_class: "upi_collect_timeout"
+    retryable: true
+    priority: 70
+
   - error_reason: "upi_collect_timeout"
     failure_class: "upi_collect_timeout"
     retryable: true
@@ -165,6 +207,82 @@ rules:
     failure_class: "issuer_decline"
     retryable: true
     priority: 55
+
+  # ── audit 2026-09-01: Razorpay's documented reasons that matched nothing ──
+  #
+  # Each of these fell through to UNKNOWN (non-retryable = abandoned without
+  # an attempt) despite Razorpay publishing a retry verdict for it. Priorities
+  # sit inside the existing bands for their class, not above them.
+
+  # "Card issuer does not support 3DS, or the holder has not registered for
+  # it." The OTP step is the obstacle, which is what 3ds_dropoff means and
+  # why it is one of the UPI-recommended classes — UPI skips that step.
+  - error_reason: "card_not_enrolled"
+    failure_class: "3ds_dropoff"
+    retryable: true
+    priority: 80
+
+  # "Issuer Banks can decline the card due to multiple checks" / "Issuer Bank
+  # or Gateway has declined the payment" — an issuer decline with no specific
+  # reason given, which is exactly issuer_decline's definition.
+  #
+  # THE EXPENSIVE GAP. These two arrive with error_source "bank", which no
+  # catch-all covers (they key on customer and business), so both landed on
+  # UNKNOWN — non-retryable — and the case was abandoned without an attempt.
+  # Razorpay documents both as retryable. Between them they are the most
+  # generic decline the card rail produces.
+  - error_reason: "card_declined"
+    failure_class: "issuer_decline"
+    retryable: true
+    priority: 55
+
+  - error_reason: "payment_declined"
+    failure_class: "issuer_decline"
+    retryable: true
+    priority: 55
+
+  # "Payment failed due to a technical error at the gateway" and "error at
+  # bank or wallet gateway" — transient, and an immediate retry often works.
+  - error_reason: "gateway_technical_error"
+    failure_class: "network_error"
+    retryable: true
+    priority: 60
+
+  - error_reason: "payment_failed"
+    failure_class: "network_error"
+    retryable: true
+    priority: 40
+
+  - error_reason: "server_error"
+    failure_class: "network_error"
+    retryable: true
+    priority: 40
+
+  # Razorpay's "Business failures": the request itself was wrong, or the
+  # merchant account is not enabled for it. Retrying the identical request
+  # reproduces the identical refusal, so these are hard declines — and
+  # Razorpay marks every one of them non-retryable too.
+  - error_reason: "input_validation_failed"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
+
+  - error_reason: "invalid_amount"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
+
+  - error_reason: "invalid_currency"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
+
+  # Razorpay's spelling; "international_cards_not_supported" below is ours and
+  # is kept in case it is what actually arrives.
+  - error_reason: "international_transaction_not_allowed"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 30
 
   - error_reason: "declined_by_issuer"
     failure_class: "issuer_decline"
@@ -228,3 +346,59 @@ rules:
     failure_class: "network_error"
     retryable: true
     priority: 5
+
+# ── The published reference this file is audited against ─────────────────
+#
+# Razorpay's own failure-analysis page, fetched 2026-09-01 via
+# razorpay.com/docs/llms.txt:
+#   razorpay.com/docs/build/llm-docs/payments/payments/failure-analysis.md
+#
+# Kept HERE, beside the rules, so the audit is a check rather than a memory:
+# scripts/seed_error_codes.py fails if any reason below classifies to
+# `unknown`, which is the check that would have caught the ten unmapped
+# reasons found on 2026-09-01. `retryable` is Razorpay's verdict, not ours —
+# where the two differ deliberately, docs/decline-taxonomy.md says why.
+#
+# This list is a curated page, NOT an exhaustive enum. It is a floor for
+# coverage, never a licence to delete a rule that is not on it.
+# Documented reasons deliberately left unmapped, with the reason why. The
+# coverage check reports these every run but does not fail on them: they are
+# decisions, not oversights. Anything NOT listed here that classifies to
+# `unknown` is a failure.
+razorpay_unmapped_deliberately:
+  mobile_number_invalid: >-
+    "The customer is using an invalid or an unregistered mobile number" —
+    a wallet-registration problem, not a card, bank, network or timeout one.
+    Every class in FailureClass would put visibly wrong words on a money page:
+    invalid_card says "check the number, expiry and CVV", issuer_decline says
+    "your bank declined... call the number on your card". Falling through to
+    UNKNOWN renders the generic "The payment didn't go through. You can try
+    again below." — which is the only honest thing this taxonomy can currently
+    say about it. The cost is real and accepted: UNKNOWN is non-retryable, so
+    the engine will not chase these on its own, while Razorpay calls them
+    retryable. Closing it properly means a new FailureClass with its own
+    customer copy, which is a product decision rather than a mapping fix.
+
+razorpay_documented:
+  # Customer drop-offs
+  authentication_failed: true
+  card_not_enrolled: true
+  insufficient_funds: true
+  payment_cancelled: true
+  payment_collect_request_expired: true
+  # Bank failures
+  card_declined: true
+  gateway_technical_error: true
+  payment_declined: true
+  payment_failed: true
+  payment_timed_out: true
+  # Business failures
+  input_validation_failed: false
+  international_transaction_not_allowed: false
+  invalid_amount: false
+  invalid_currency: false
+  # Other failures
+  bank_technical_error: true
+  server_error: true
+  mobile_number_invalid: true
+  payment_risk_check_failed: true

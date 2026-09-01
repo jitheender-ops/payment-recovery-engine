@@ -1,0 +1,152 @@
+# Decline taxonomy — Razorpay's reasons, and what this engine does with them
+
+**Audited 2026-09-01.** Source: Razorpay's own failure-analysis page, reached
+through `razorpay.com/docs/llms.txt` →
+`razorpay.com/docs/build/llm-docs/payments/payments/failure-analysis.md`.
+
+This document exists because the mapping it describes had never been written
+down. `src/classifier/error_codes.yaml` had 41 rules and no record of what
+they were checked against, so nobody could tell a deliberate omission from an
+accidental one — and ten of Razorpay's eighteen documented reasons turned out
+to be accidental ones.
+
+## Where a decline actually goes
+
+A `payment.failed` webhook carries Razorpay's error 5-tuple. The machine
+string this file is about is **`error_reason`**; `error_code` is the
+envelope-level bucket (`BAD_REQUEST_ERROR`, `GATEWAY_ERROR`, `SERVER_ERROR`).
+
+```
+webhook → ClassifierMapper.classify()   src/classifier/mapper.py
+        → first matching rule wins      src/classifier/error_codes.yaml  (priority-sorted)
+        → FailureClass                  src/classifier/taxonomy.py
+        → customer copy                 src/customer/explain.py
+        → retry policy / rail choice    src/agent/, src/executor/rail_selector.py
+```
+
+**Falling through costs money.** No matching rule means
+`FailureClass.UNKNOWN`, and `UNKNOWN` is non-retryable — the case is closed
+without the engine making a single attempt.
+
+Two things make a gap hard to see, and both bit here:
+
+1. **Low-priority catch-alls absorb most misses.** `BAD_REQUEST_ERROR` +
+   `error_source: customer` → `issuer_decline`; `GATEWAY_ERROR` →
+   `network_error`. An unmapped reason usually lands in one of these, so it
+   is still *chased* — just explained to the customer as something it wasn't.
+2. **They don't cover `error_source: bank`.** A reason arriving from the bank
+   with no rule of its own hits nothing at all, and is abandoned.
+
+## What the audit found
+
+| Razorpay `error_reason` | Razorpay says retryable | Before the audit | After |
+|---|---|---|---|
+| `authentication_failed` | yes | `3ds_dropoff` (only with `error_step=payment_authentication`) | `3ds_dropoff`, with or without the step |
+| `card_not_enrolled` | yes | `issuer_decline` *(catch-all)* | `3ds_dropoff` |
+| `insufficient_funds` | yes | `insufficient_funds` | unchanged |
+| `payment_cancelled` | yes | `customer_cancelled` | unchanged — **deliberate disagreement**, below |
+| `payment_collect_request_expired` | yes | `issuer_decline` *(catch-all)* | `upi_collect_timeout` |
+| `card_declined` | yes | **`unknown` — abandoned** | `issuer_decline` |
+| `gateway_technical_error` | yes | `network_error` *(via `GATEWAY_ERROR`)* | `network_error`, by name |
+| `payment_declined` | yes | **`unknown` — abandoned** | `issuer_decline` |
+| `payment_failed` | yes | `network_error` *(via `GATEWAY_ERROR`)* | `network_error`, by name |
+| `payment_timed_out` | yes | `payment_timeout` | unchanged |
+| `input_validation_failed` | no | `hard_decline` *(catch-all)* | `hard_decline`, by name |
+| `international_transaction_not_allowed` | no | `hard_decline` *(catch-all)* | `hard_decline`, by name |
+| `invalid_amount` | no | `hard_decline` *(catch-all)* | `hard_decline`, by name |
+| `invalid_currency` | no | `hard_decline` *(catch-all)* | `hard_decline`, by name |
+| `bank_technical_error` | yes | `bank_downtime` | unchanged |
+| `server_error` | yes | `network_error` *(via `SERVER_ERROR`)* | `network_error`, by name |
+| `mobile_number_invalid` | yes | `issuer_decline` *(catch-all)* | **deliberately unmapped**, below |
+| `payment_risk_check_failed` | yes | `fraud_block` | unchanged — **deliberate disagreement**, below |
+
+### The expensive one
+
+`card_declined` and `payment_declined` are the most generic declines the card
+rail produces — "Issuer Banks can decline the card due to multiple checks",
+"Issuer Bank or Gateway has declined the payment". Both arrive with
+`error_source: bank`, which no catch-all covers. Both classified as `unknown`,
+which is non-retryable, so **every case carrying one was closed without an
+attempt**, while Razorpay documents both as retryable.
+
+### The wrong-words ones
+
+Not money lost, but a money page saying something untrue:
+
+- `payment_collect_request_expired` — an expired UPI collect request was
+  explained as *"Your bank declined the payment… try a different card or UPI"*,
+  and since `issuer_decline` is UPI-recommended, the page then recommended UPI
+  to someone whose UPI request had just expired. It now says *"The UPI request
+  expired before it was approved."*
+- `card_not_enrolled` — a 3DS-enrolment problem blamed on the bank. Both
+  classes are UPI-recommended, so the button was already right; only the
+  explanation was wrong.
+
+## Deliberate disagreements with Razorpay
+
+Both are printed by `scripts/seed_error_codes.py` on every run, so neither can
+quietly become an accident.
+
+**`payment_cancelled` → `customer_cancelled`, non-retryable.** Razorpay marks
+it retryable. The customer explicitly cancelled; chasing them for a payment
+they just cancelled is the behaviour a complaint is about. The recovery page
+still offers payment (`Explanation.retryable` is true — *the page* stays open),
+but the engine does not pursue it on its own. Respecting stated intent outranks
+a recoverable rupee.
+
+**`payment_risk_check_failed` → `fraud_block`, non-retryable.** Razorpay marks
+it retryable and advises *"The customer must retry with a different card or
+method"* — note that is a **rail switch**, not a retry of the same instrument.
+Kept conservative for now: this is fraud-adjacent, the engine's `fraud_block`
+copy correctly tells the customer only their bank can clear it, and loosening
+it is a product decision about chasing risk-flagged declines rather than a
+mapping correction. **Open question, deliberately left open** — if it should
+become a switch-rail class instead of an abandon, that is a decision to make
+on purpose.
+
+## Deliberately unmapped
+
+**`mobile_number_invalid`** — "the customer is using an invalid or an
+unregistered mobile number", a wallet-registration problem. Every existing
+`FailureClass` would put visibly wrong words on a money page: `invalid_card`
+says *"check the number, expiry and CVV"*; `issuer_decline` says *"your bank
+declined… call the number on your card"*. Falling through to `UNKNOWN` renders
+the generic *"The payment didn't go through. You can try again below."* —
+the only honest thing this taxonomy can currently say.
+
+The cost is real and accepted: `UNKNOWN` is non-retryable, so the engine will
+not chase these, while Razorpay calls them retryable. Closing it properly
+means a new `FailureClass` with its own copy — a product decision, not a
+mapping fix.
+
+## Rules that are not on Razorpay's list
+
+Twenty-odd rules key on reasons the failure-analysis page never names
+(`card_stolen`, `do_not_honor`, `invalid_otp`, `upi_collect_timeout`,
+`issuer_down`, `vpa_not_found`, …). **None were removed.** That page is a
+curated failure-analysis article, not an exhaustive enum, and deleting a rule
+that does fire would silently route real declines to `UNKNOWN` and abandon
+them. An unused rule costs one dict comparison; a missing one costs the
+recovery.
+
+## Keeping this honest
+
+`scripts/seed_error_codes.py` is the check, and it runs in `run.sh` and CI:
+
+- every rule references a real `FailureClass`;
+- **every documented reason is matched by name** — probed with an empty
+  `error_code` and no source or step, so only `error_reason` rules can fire.
+  A realistic 5-tuple would prove nothing, because the catch-alls swallow
+  everything; that is exactly how ten reasons hid while the file looked
+  complete;
+- acknowledged gaps and deliberate disagreements are printed every run;
+- **it exits non-zero.** It previously returned `None` whatever it found, so
+  `run.sh`'s `&& ok "…"` printed a tick unconditionally and the gate could
+  not fail.
+
+The reference list itself lives in `error_codes.yaml` under
+`razorpay_documented`, beside the rules it audits, so the audit is a check
+rather than a memory.
+
+**When Razorpay publishes new codes**, add them there; the check will fail
+until each one is mapped or explicitly acknowledged.

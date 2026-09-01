@@ -276,7 +276,13 @@ ok "pytest"
 # nobody reads.
 env -u DEMO_MODE "$VPY" -m mypy src scripts eval || die "mypy failed"
 ok "mypy --strict"
-"$VPY" scripts/seed_error_codes.py >/dev/null && ok "error-code taxonomy validated"
+# `|| die`, not `&& ok`. Under `set -e` a failure inside an && list does not
+# exit, so the old form skipped the tick and carried on — and the script it
+# calls returned None regardless of what it found, so nothing could fail
+# anyway. Both halves of that are fixed: an unmapped Razorpay decline reason
+# now stops the build, because it means cases are being abandoned unattempted.
+"$VPY" scripts/seed_error_codes.py || die "error-code taxonomy check failed (see above)"
+ok "error-code taxonomy validated"
 
 # The XGBoost baseline needs a trained model or it silently runs the rule
 # heuristic instead — which is the state the repo shipped in, with the README
