@@ -172,6 +172,180 @@ def _seed_b2b_account(url: str) -> int:
     return made
 
 
+def _as_uuid(value: object) -> uuid.UUID | None:
+    """
+    Raw SQL hands back a UUID on Postgres and a plain string on SQLite. Every
+    caller here wants the object, so normalise once instead of at each site.
+    """
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+# The seven capabilities, and the one case each is visible on.
+#
+# WHY THIS EXISTS: everything below was already built and rendering, and it
+# was still effectively invisible — this script grouped links by PAGE STATE
+# (payable / confirming / recovered / ...) and printed one per state, so all
+# seven features were buried inside "PAYABLE (30 cases)" behind a single
+# link that was almost always a plain card decline. A state is what the page
+# is doing; a feature is what you came to look at, and they are not the same
+# index.
+#
+# Each entry is (label, what to look at, SQL picking the case that shows it).
+# The SQL is the honest part: it selects a case that genuinely exhibits the
+# feature, so a missing link means the demo has no such case rather than the
+# feature being broken.
+_FEATURES: list[tuple[str, str, str]] = [
+    (
+        "Checkout drop-off recovery",
+        "cart contents named back, honest 'nothing was charged' framing",
+        "SELECT id FROM recovery_cases WHERE risk_type='checkout_abandonment' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "Failed-subscription recovery",
+        "renewal copy + the retry-sequence panel (attempts made, one hollow "
+        "'upcoming' row)",
+        "SELECT id FROM recovery_cases WHERE risk_type='subscription_failure' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "Mandate retry sequencer",
+        "same panel on the RBI e-mandate path — the upcoming row states WHEN, "
+        "never WHAT",
+        "SELECT id FROM recovery_cases WHERE risk_type='mandate_failure' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "B2B receivables chaser",
+        "invoice copy, due date and computed days-overdue in the register",
+        "SELECT id FROM recovery_cases WHERE risk_type='invoice_overdue' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "Payment degradation → root cause → action",
+        "the decline explained in the customer's words, plus the rail "
+        "recommendation named out loud above the CTA",
+        "SELECT rc.id FROM recovery_cases rc "
+        "JOIN payment_failures pf ON pf.payment_id = rc.subject_ref "
+        "WHERE rc.state='open' AND pf.method <> 'upi' AND pf.failure_class IN "
+        "('3ds_dropoff','card_limit_exceeded','issuer_decline',"
+        "'insufficient_funds','invalid_card','expired_instrument') LIMIT 1",
+    ),
+    (
+        "Promise-to-pay tracker",
+        "'You said you'd pay by {date}. N days left.' — persistent, not a flash",
+        "SELECT rc.id FROM recovery_cases rc "
+        "JOIN promises_to_pay p ON p.recovery_case_id = rc.id "
+        "WHERE p.status='pending' AND rc.state='open' LIMIT 1",
+    ),
+    (
+        "Hinglish voice recovery",
+        "'We called you on {date}' in the timeline; add ?lang=hi for the "
+        "Hindi page",
+        "SELECT rc.id FROM recovery_cases rc "
+        "JOIN voice_call_queue v ON v.recovery_case_id = rc.id "
+        "WHERE v.state='done' LIMIT 1",
+    ),
+]
+
+
+def _feature_urls(url: str) -> list[tuple[str, str, str | None]]:
+    """(label, what to look at, URL or None) — one openable page per feature."""
+    engine = sa.create_engine(url)
+    out: list[tuple[str, str, str | None]] = []
+    with engine.connect() as conn:
+        for label, blurb, query in _FEATURES:
+            try:
+                case_id = conn.execute(sa.text(query)).scalar()
+            except Exception:
+                # A table this demo has not created yet (voice_call_queue on
+                # an older database). Report the feature as unavailable
+                # rather than taking the whole listing down with it.
+                case_id = None
+            resolved = _as_uuid(case_id)
+            link = recovery_link.url_for(resolved) if resolved else None
+            out.append((label, blurb, link))
+    engine.dispose()
+    return out
+
+
+def _seed_voice_call(url: str) -> int:
+    """
+    One COMPLETED voice call, so the "We called you on {date}" trace has
+    something to render.
+
+    Nothing else creates one. VOICE_CHASER_ENABLED is off by default (a call
+    is the highest-friction touch the engine can make and needs the
+    merchant's own DoT/TCPB registration), and even with it on the row only
+    reaches state "done" once a real telephony leg claims it and reports
+    back. So the honest voice trace on the recovery page was invisible in
+    the demo — not because it is broken, but because the demo had no call to
+    show. Returns the number of calls inserted.
+    """
+    from src.models import VoiceCallQueue
+
+    engine = sa.create_engine(url)
+    made = 0
+    with engine.begin() as conn:
+        if conn.execute(
+            sa.select(sa.func.count()).select_from(VoiceCallQueue)
+        ).scalar_one():
+            engine.dispose()
+            return 0
+
+        # A case that already has an executed attempt: a voice touch is an
+        # attempt-row event, so inventing one with no attempt behind it
+        # would be a shape the engine never produces.
+        # Prefer a case the feature index is not already using for something
+        # else, so the seven links land on seven different pages. The voice
+        # chaser queues after a successful nudge on ANY risk type, so this is
+        # a presentation choice, not a behavioural claim.
+        row = conn.execute(sa.text("""
+            SELECT rc.id, rc.risk_type, rc.amount_at_risk, ra.id
+            FROM recovery_cases rc
+            JOIN retry_attempts ra ON ra.recovery_case_id = rc.id
+            WHERE rc.state = 'open' AND ra.executed_at IS NOT NULL
+            ORDER BY CASE rc.risk_type
+                       WHEN 'invoice_overdue' THEN 0
+                       WHEN 'payment_failure' THEN 1
+                       ELSE 2
+                     END
+            LIMIT 1
+        """)).first()
+        if row is None:
+            engine.dispose()
+            return 0
+
+        case_id, risk_type, amount, attempt_id = row
+        case_id, attempt_id = _as_uuid(case_id), _as_uuid(attempt_id)
+        if case_id is None or attempt_id is None:
+            engine.dispose()
+            return 0
+        conn.execute(sa.insert(VoiceCallQueue).values(
+            id=uuid.uuid4(),
+            recovery_case_id=case_id,
+            retry_attempt_id=attempt_id,
+            customer_contact="+919876543210",
+            risk_type=risk_type,
+            amount_paise=amount,
+            state="done",
+            claimed_at=datetime.now(UTC) - timedelta(hours=6),
+            claimed_by="demo-telephony-leg",
+            result="promise_captured",
+            created_at=datetime.now(UTC) - timedelta(hours=6),
+        ))
+        made = 1
+    engine.dispose()
+    return made
+
+
 def _statement_urls(url: str) -> list[tuple[str, str, int]]:
     """(display name, statement URL, open invoice count) per AR account that
     actually has open invoices — the accounts whose statement page is worth
@@ -228,6 +402,7 @@ def main() -> int:
         # so it needs its own seed — no other script links invoice cases to
         # an ArAccount, and without one the page renders empty.
         seeded += _seed_b2b_account(settings.database_url_sync)
+        seeded += _seed_voice_call(settings.database_url_sync)
         print(f"Inserted {seeded} preview row(s).\n" if seeded
               else "Every surface already has data.\n")
 
@@ -279,8 +454,31 @@ def main() -> int:
               "    python scripts/simulate_webhooks.py --count 20")
         return 0
 
-    wanted = [args.state] if args.state else list(BLURB)
     shown = 0
+
+    # ── By feature, first ────────────────────────────────────────────────
+    # Ahead of the by-state listing on purpose: "show me the mandate retry
+    # sequencer" is the question people actually arrive with, and grouping
+    # only by page state made every feature unfindable behind one PAYABLE
+    # link.
+    if not args.state:
+        print("\n╔══ WHAT TO LOOK AT ═══════════════════════════════════════")
+        print("║  one page per capability, each on a case that really shows it")
+        print("╚══════════════════════════════════════════════════════════")
+        for label, blurb, link in _feature_urls(settings.database_url_sync):
+            print(f"\n{label}")
+            print(f"  {blurb}")
+            if link:
+                print(f"  {link}")
+                shown += 1
+            else:
+                print("  — no case in the database exhibits this yet "
+                      "(try --seed-states, or seed more traffic)")
+        print("\n" + "─" * 60)
+        print("Everything below is the same pages indexed by PAGE STATE — "
+              "what the\npage is doing, rather than what you came to look at.")
+
+    wanted = [args.state] if args.state else list(BLURB)
     for state in wanted:
         urls = by_state.get(state, [])
         print(f"\n{state.upper()}  ({len(urls)} case{'s' if len(urls) != 1 else ''})")
