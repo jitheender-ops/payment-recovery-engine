@@ -51,7 +51,13 @@ def client(
     """
     monkeypatch.setattr(
         "src.ingestion.router.get_settings",
-        lambda: type("S", (), {"razorpay_webhook_secret": SECRET})(),
+        # webhook_ip_allowlist empty = the allowlist is off, which is the
+        # default and what every test in this file is about: these measure the
+        # signature/idempotency/attribution behaviour, not the network filter.
+        # tests/test_webhook_allowlist.py covers that on its own.
+        lambda: type(
+            "S", (), {"razorpay_webhook_secret": SECRET, "webhook_ip_allowlist": ""}
+        )(),
     )
     # The background task would run the whole orchestrator against Razorpay.
     # Recorded instead, so this file tests the endpoint and not the pipeline.

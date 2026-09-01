@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.auth import client_ip, ip_allowed
 from src.config import get_settings, reveal
 from src.database import async_session_factory, get_session
 from src.ingestion.idempotency import is_duplicate_event
@@ -226,6 +227,7 @@ async def _process_event_background(
         400: {"description": "Body is not valid JSON"},
         413: {"description": "Body exceeds the size cap"},
         401: {"description": "Missing or invalid X-Razorpay-Signature — fail closed"},
+        403: {"description": "Client IP outside WEBHOOK_IP_ALLOWLIST (only when one is set)"},
     },
 )
 async def receive_razorpay_webhook(
@@ -241,6 +243,20 @@ async def receive_razorpay_webhook(
     Returns 200 OK immediately; actual processing happens asynchronously.
     """
     settings = get_settings()
+
+    # 0. Network-layer allowlist, if one is configured. Defence in depth
+    # ALONGSIDE the signature check below, never instead of it — Razorpay's
+    # security guidance recommends allowlisting their webhook source IPs, and
+    # this is that for a deployment with no firewall in front of it. Unset
+    # means off, so this changes nothing for anyone who has not opted in
+    # (see Settings.webhook_ip_allowlist for why this guard alone does not
+    # fail closed). Checked first because it is cheap and decides nothing
+    # about authenticity; HMAC remains the authenticator.
+    if not ip_allowed(request, settings.webhook_ip_allowlist):
+        logger.warning(
+            "Webhook from %s rejected — not in WEBHOOK_IP_ALLOWLIST", client_ip(request)
+        )
+        return Response(status_code=403, content="Forbidden")
 
     # 1. Read raw body (MUST be raw bytes for signature verification)
     if body_too_large(request.headers.get("content-length")):

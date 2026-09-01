@@ -13,10 +13,14 @@ each matched to what the caller can actually prove.
 from __future__ import annotations
 
 import hmac
+import ipaddress
+import logging
 
 from fastapi import Header, HTTPException, Request, status
 
 from src.config import get_settings, reveal
+
+logger = logging.getLogger(__name__)
 
 
 def client_ip(request: Request) -> str:
@@ -44,6 +48,49 @@ def client_ip(request: Request) -> str:
         if len(entries) >= hops:
             return entries[-hops]
     return request.client.host if request.client else "unknown"
+
+
+def ip_allowed(request: Request, allowlist: str) -> bool:
+    """
+    Is this request's client IP inside the configured allowlist?
+
+    True when the allowlist is empty — an unset allowlist is OFF, not
+    "deny everything" (see Settings.webhook_ip_allowlist for why this one
+    guard deliberately does not fail closed).
+
+    Entries are IPs or CIDRs, comma-separated. The address compared is
+    client_ip()'s, so this inherits the trusted-proxy handling above rather
+    than re-deriving it — and inherits its safety property too: with no
+    trusted proxy configured, X-Forwarded-For is ignored and the socket peer
+    is used, so nobody can spoof their way past this with a header.
+
+    A malformed entry is skipped with a warning rather than raising. This runs
+    on the webhook path, and a typo in one CIDR must not turn every incoming
+    payment event into a 500.
+    """
+    if not allowlist.strip():
+        return True
+
+    peer = client_ip(request)
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        # "unknown" from client_ip when there is no peer, or something
+        # unparseable. Fail closed HERE: the allowlist is on, and an address
+        # we cannot evaluate is not an address we can vouch for.
+        logger.warning("Webhook from unparseable client address %r — refused", peer)
+        return False
+
+    for entry in allowlist.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            logger.warning("Ignoring malformed webhook allowlist entry %r", entry)
+    return False
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:

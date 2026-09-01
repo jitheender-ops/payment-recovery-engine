@@ -42,17 +42,45 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.config import get_settings, reveal  # noqa: E402
 from src.demo import captured_payload, sign  # noqa: E402
 
+# Synthetic declines, in Razorpay's OWN vocabulary.
+#
+# This list used to be six-tenths invented: invalid_otp, issuer_down,
+# card_expired, timeout, upi_collect_timeout and card_limit_exceeded are
+# strings that appear nowhere in Razorpay's documentation, while fourteen
+# reasons they DO document were never sent at all. The demo was therefore
+# exercising rules that may never fire in production and skipping the ones
+# that do — which is why it could never have surfaced the 2026-09-01 audit's
+# finding that card_declined and payment_declined were being abandoned
+# unattempted (see docs/decline-taxonomy.md).
+#
+# Every entry below is a documented error_reason, paired with the
+# error_source and error_step its category implies. The four undocumented
+# ones at the end are kept deliberately: their rules exist in
+# error_codes.yaml and were not deleted, so the demo should still cover them.
 SAMPLE_FAILURES = [
+    # Customer drop-offs
     {"error_code": "BAD_REQUEST_ERROR", "error_reason": "insufficient_funds", "error_source": "customer", "error_step": "payment_authorization", "method": "card", "bank": "HDFC"},
-    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "invalid_otp", "error_source": "customer", "error_step": "payment_authentication", "method": "card", "bank": "SBI"},
-    {"error_code": "GATEWAY_ERROR", "error_reason": "issuer_down", "error_source": "gateway", "error_step": "payment_authorization", "method": "netbanking", "bank": "PNB"},
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "authentication_failed", "error_source": "customer", "error_step": "payment_authentication", "method": "card", "bank": "SBI"},
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "card_not_enrolled", "error_source": "customer", "error_step": "payment_authentication", "method": "card", "bank": "Axis"},
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "payment_collect_request_expired", "error_source": "customer", "error_step": "payment_authorization", "method": "upi", "bank": "Kotak"},
     {"error_code": "BAD_REQUEST_ERROR", "error_reason": "payment_cancelled", "error_source": "customer", "error_step": "payment_authentication", "method": "upi", "bank": "ICICI"},
+    # Bank failures. These two arrive with source "bank", which no catch-all
+    # covers — they were the ones being abandoned before the audit.
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "card_declined", "error_source": "bank", "error_step": "payment_authorization", "method": "card", "bank": "HDFC"},
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "payment_declined", "error_source": "bank", "error_step": "payment_authorization", "method": "card", "bank": "PNB"},
+    {"error_code": "GATEWAY_ERROR", "error_reason": "gateway_technical_error", "error_source": "gateway", "error_step": "payment_authorization", "method": "netbanking", "bank": "PNB"},
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "payment_timed_out", "error_source": "customer", "error_step": "payment_authorization", "method": "upi", "bank": "SBI"},
+    # Other
     {"error_code": "GATEWAY_ERROR", "error_reason": "bank_technical_error", "error_source": "gateway", "error_step": "payment_authorization", "method": "card", "bank": "Axis"},
-    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "card_expired", "error_source": "customer", "error_step": "payment_initiation", "method": "card", "bank": "HDFC"},
+    {"error_code": "SERVER_ERROR", "error_reason": "server_error", "error_source": "razorpay", "error_step": "payment_capture", "method": "upi", "bank": "SBI"},
     {"error_code": "BAD_REQUEST_ERROR", "error_reason": "payment_risk_check_failed", "error_source": "razorpay", "error_step": "payment_authorization", "method": "card", "bank": "ICICI"},
-    {"error_code": "SERVER_ERROR", "error_reason": "timeout", "error_source": "razorpay", "error_step": "payment_capture", "method": "upi", "bank": "SBI"},
-    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "upi_collect_timeout", "error_source": "customer", "error_step": "payment_authorization", "method": "upi", "bank": "Kotak"},
+    # Business failures — hard declines, so these exercise the abandon path.
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "invalid_amount", "error_source": "business", "error_step": "payment_initiation", "method": "card", "bank": "HDFC"},
+    # Not on Razorpay's published list, kept because their rules are.
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "invalid_otp", "error_source": "customer", "error_step": "payment_authentication", "method": "card", "bank": "SBI"},
+    {"error_code": "BAD_REQUEST_ERROR", "error_reason": "card_expired", "error_source": "customer", "error_step": "payment_initiation", "method": "card", "bank": "HDFC"},
     {"error_code": "BAD_REQUEST_ERROR", "error_reason": "card_limit_exceeded", "error_source": "customer", "error_step": "payment_authorization", "method": "card", "bank": "HDFC"},
+    {"error_code": "GATEWAY_ERROR", "error_reason": "issuer_down", "error_source": "gateway", "error_step": "payment_authorization", "method": "netbanking", "bank": "Kotak"},
 ]
 
 # Realistic Indian ticket sizes in paise, rather than ₹100, ₹200, ₹300 —

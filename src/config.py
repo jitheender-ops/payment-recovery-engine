@@ -46,6 +46,22 @@ class Settings(BaseSettings):
     # means the /risks surface is OFF and every event is rejected — fail
     # closed, same as the Razorpay secrets above.
     risk_webhook_secret: SecretStr = SecretStr("")
+    # Optional network-layer allowlist for POST /webhooks/razorpay, as
+    # comma-separated IPs or CIDRs. Razorpay's security guidance recommends
+    # allowlisting their webhook source IPs as defence in depth; this is that,
+    # in the app, for a deployment with no firewall in front of it.
+    #
+    # EMPTY MEANS OFF, and that is deliberate — the opposite of the fail-closed
+    # rule the secrets above follow. Those guard authentication, and an
+    # unconfigured authenticator must refuse everyone. This does not: HMAC
+    # signature verification is the authenticator and is always on. An
+    # allowlist that defaulted to closed would reject every real webhook the
+    # moment someone upgraded without setting it, which is an outage, not a
+    # security posture. It only ever narrows what HMAC already guards.
+    #
+    # Razorpay publishes the current IPs; they change, so this is not shipped
+    # with a baked-in list that would silently rot into an outage.
+    webhook_ip_allowlist: str = ""
     # Per-request timeout for the Razorpay SDK. requests defaults to no timeout
     # at all, so without this a single hung connection blocks a worker forever.
     # Payment-link creation is a fast call; 10s is generous, not tight.
