@@ -169,6 +169,33 @@ the honest, always-true sentence is "We'll be in touch again around
 {date}." — same discipline as `expires_line` and the promise tracker above:
 state the real date, claim nothing about content.
 
+## Rail recommendation (2026-09-01, payment rail only)
+
+For six failure classes (`3ds_dropoff`, `card_limit_exceeded`,
+`issuer_decline`, `insufficient_funds`, `invalid_card`,
+`expired_instrument`) the engine already *enforces* a rail switch: `/pay`
+mints a UPI-only link. Until now the only visible trace of that was the
+primary button's verb changing from "Pay securely" to "Pay by UPI" — the
+engine making a recommendation without ever admitting it was making one.
+
+One `.note` above the CTA now names it: **"We recommend UPI for this
+payment. It skips the card step that failed."** Three rules govern it:
+
+- It is computed from `recommended_rail` alone. Nothing about the
+  recommendation is written by hand per class, so it can never claim a
+  switch the `/pay` route will not actually make.
+- It renders only when the recommended rail **differs from the one that
+  failed**. Recommending UPI to someone whose UPI just declined is noise.
+- It is payment-rail only (`is_payment`). The chase policies for
+  `subscription_failure` and `mandate_failure` also set
+  `recommended_rail="upi"`, but no gateway decline named a rail there —
+  there is nothing to recommend *away from*, and the note would be
+  advice about a failure that was never described.
+
+It is a `.note` and not part of `detail.next` on purpose: that paragraph
+explains the decline, this is a recommendation about what to do next, and
+folding one into the other blurs which of the two the engine is asserting.
+
 ## Constraints inherited from the master prompt
 
 - Never display success from a client signal. `recovered` comes from the

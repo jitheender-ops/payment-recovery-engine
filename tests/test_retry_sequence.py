@@ -286,3 +286,18 @@ async def test_a_completed_call_renders_on_the_payment_rail_page_too(
     )
     page = client.get(f"/recover/{token}")
     assert "We called you on" in page.text
+
+
+async def test_a_risk_type_case_never_shows_the_rail_recommendation(
+    client: TestClient, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    subscription_failure's chase policy recommends UPI, so recommended_rail is
+    set here too — but no gateway decline named a rail that failed, so there is
+    nothing to recommend *away from*. The note is payment-rail only.
+    """
+    _, token = await _open(
+        db_sessionmaker, risk_type="subscription_failure", subject="sub_rail_1"
+    )
+    body = client.get(f"/recover/{token}").text
+    assert "We recommend UPI" not in body

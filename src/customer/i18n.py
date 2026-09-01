@@ -102,6 +102,12 @@ CATALOGS: dict[str, dict[str, str]] = {
         "pay_opening": "Opening Razorpay…",
         "pay_note": "Opens Razorpay. You'll come back here once it's done.",
         "pay_other_methods": "You can choose a different payment method on the next screen.",
+        # Rail recommendation — the engine's own switch_rail decision, said
+        # out loud instead of only showing up as a changed button verb.
+        # Rendered only when the recommended rail differs from the one that
+        # failed; computed from recommended_rail, never invented.
+        "rail_recommend_upi": "We recommend UPI for this payment.",
+        "rail_recommend_upi_why": "It skips the card step that failed.",
         # trust strip (sits at the CTA, not the footer)
         "trust_secured": "Payments secured by Razorpay",
         "trust_never_stored": "Your card details are never seen or stored by us",
@@ -179,6 +185,8 @@ CATALOGS: dict[str, dict[str, str]] = {
         "pay_opening": "Razorpay खुल रहा है…",
         "pay_note": "Razorpay खुलेगा। भुगतान होते ही आप यहीं वापस आ जाएंगे।",
         "pay_other_methods": "अगली स्क्रीन पर आप कोई और भुगतान तरीका चुन सकते हैं।",
+        "rail_recommend_upi": "इस भुगतान के लिए हम UPI का सुझाव देते हैं।",
+        "rail_recommend_upi_why": "इससे वह कार्ड वाला चरण छूट जाता है जो विफल हुआ था।",
         "trust_secured": "भुगतान Razorpay के ज़रिए सुरक्षित है",
         "trust_never_stored": "आपके कार्ड की जानकारी हम कभी देखते या सेव नहीं करते",
         "expires_line": "यह लिंक {when} तक चलेगा।",

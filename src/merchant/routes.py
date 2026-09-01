@@ -790,6 +790,7 @@ async def console_pipeline(request: Request) -> Any:
         return {
             "funnel": await console_data.pipeline_funnel(session),
             "causes": await console_data.failure_causes(session),
+            "min_sample": console_data.FAILURE_CLASS_MIN_SAMPLE,
         }
 
     return await _render_console(request, "console_pipeline.html", build)

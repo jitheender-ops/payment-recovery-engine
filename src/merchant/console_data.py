@@ -702,8 +702,24 @@ async def pipeline_funnel(session: AsyncSession) -> dict[str, Any]:
     }
 
 
+# Below this many chased cases a recovery percentage is arithmetic, not a rate.
+# Same threshold and same caveat wording as the bank x rail heatmap
+# (dashboard/views/bank_breakdown.py) — one thin-sample rule for the console,
+# not a second one that happens to disagree.
+FAILURE_CLASS_MIN_SAMPLE = 5
+
+
 async def failure_causes(session: AsyncSession, *, limit: int = 12) -> list[dict[str, Any]]:
-    """Why the gateway said no, ranked. Drives whether a retry is worth making."""
+    """
+    Why the gateway said no, ranked — and what each class does once chased.
+
+    Counts alone answer "what declines most" and never "what is worth
+    chasing". Bank x rail has had that second answer since routing_panel;
+    failure class only ever had the first. `chased`/`recovered` close it,
+    joined the same way the bank x rail heatmap joins (attempt -> failure,
+    attempt -> case), so "recovered" means a case this engine actually
+    touched, never a customer who retried on their own.
+    """
     from src.models import PaymentFailure
 
     rows = (
@@ -718,10 +734,43 @@ async def failure_causes(session: AsyncSession, *, limit: int = 12) -> list[dict
             .limit(limit)
         )
     ).all()
-    return [
-        {"cause": r.failure_class or "unclassified", "n": r.n, "retryable": r.retryable}
-        for r in rows
-    ]
+
+    outcome = (
+        await session.execute(
+            select(
+                PaymentFailure.failure_class,
+                func.count(func.distinct(RecoveryCase.id)).label("chased"),
+                func.count(func.distinct(RecoveryCase.id))
+                .filter(RecoveryCase.state == "recovered")
+                .label("recovered"),
+            )
+            .select_from(RetryAttempt)
+            .join(PaymentFailure, RetryAttempt.payment_failure_id == PaymentFailure.id)
+            .join(RecoveryCase, RetryAttempt.recovery_case_id == RecoveryCase.id)
+            .group_by(PaymentFailure.failure_class)
+        )
+    ).all()
+    by_class = {r.failure_class: r for r in outcome}
+
+    causes = []
+    for r in rows:
+        cls = r.failure_class or "unclassified"
+        o = by_class.get(r.failure_class)
+        chased = o.chased if o else 0
+        recovered = o.recovered if o else 0
+        causes.append({
+            "cause": cls,
+            "n": r.n,
+            "retryable": r.retryable,
+            "chased": chased,
+            "recovered": recovered,
+            # None, not 0 — "we have never chased one of these" and "we chased
+            # them and none came back" are different facts and must not render
+            # as the same 0%.
+            "recovery_rate": round(100.0 * recovered / chased, 1) if chased else None,
+            "thin": 0 < chased < FAILURE_CLASS_MIN_SAMPLE,
+        })
+    return causes
 
 
 async def routing_panel(session: AsyncSession) -> dict[str, Any]:

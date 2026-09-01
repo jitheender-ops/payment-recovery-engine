@@ -74,11 +74,12 @@ async def _seed(
     short_url: str | None = None,
     attempt_age_min: int = 1,
     failed_at: datetime | None = None,
+    method: str = "card",
 ) -> uuid.UUID:
     pid = f"pay_cust_{uuid.uuid4().hex[:8]}"
     async with sm() as session:
         failure = PaymentFailure(
-            payment_id=pid, order_id="order_cust_1", amount=amount, method="card",
+            payment_id=pid, order_id="order_cust_1", amount=amount, method=method,
             bank="HDFC", error_code="BAD_REQUEST_ERROR", failure_class=failure_class,
             is_retryable=failure_class not in ("fraud_block", "expired_instrument"),
             webhook_event_id=uuid.uuid4(),
@@ -783,3 +784,38 @@ async def test_the_charged_but_failed_faqs_exists(
     token = recovery_link.mint(case_id)
     body = client.get(f"/recover/{token}").text
     assert "I was charged, but this page says failed" in body
+
+
+# ── The rail recommendation, said out loud ───────────────────────────────
+#
+# The engine has enforced this for six failure classes since the UPI-first
+# work: /pay mints a UPI-only link for them. Until now the only visible
+# trace was the button's verb, which is the engine making a recommendation
+# without ever admitting it was making one.
+
+
+async def test_a_recommended_rail_switch_is_named_not_just_enforced(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    case_id = await _seed(db_sessionmaker, failure_class="3ds_dropoff", method="card")
+    body = client.get(f"/recover/{recovery_link.mint(case_id)}").text
+    assert "We recommend UPI for this payment." in body
+
+
+async def test_no_rail_note_when_the_failed_rail_is_already_the_recommended_one(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Recommending UPI to someone whose UPI just failed is noise, not advice."""
+    case_id = await _seed(
+        db_sessionmaker, failure_class="insufficient_funds", method="upi"
+    )
+    body = client.get(f"/recover/{recovery_link.mint(case_id)}").text
+    assert "We recommend UPI" not in body
+
+
+async def test_no_rail_note_for_a_class_the_engine_does_not_switch(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    case_id = await _seed(db_sessionmaker, failure_class="bank_downtime", method="card")
+    body = client.get(f"/recover/{recovery_link.mint(case_id)}").text
+    assert "We recommend UPI" not in body

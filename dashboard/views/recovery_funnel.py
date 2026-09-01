@@ -97,46 +97,11 @@ def render() -> None:
         unsafe_allow_html=True,
     )
 
-    st.divider()
-    theme.section("What is blocking payment", "By failure class, most common first.")
-
-    fc = query_db(
-        "SELECT failure_class, COUNT(*) AS n FROM payment_failures "
-        "GROUP BY failure_class ORDER BY n DESC"
-    )
-    if fc is None or fc.empty:
-        st.info("No classified failures yet.")
-        return
-
-    fc = fc.sort_values("n")
-    fig2 = go.Figure(
-        go.Bar(
-            x=fc["n"],
-            y=[c.replace("_", " ") for c in fc["failure_class"]],
-            orientation="h",
-            # One hue: this is magnitude, not identity. Twelve categorical hues
-            # would be a rainbow and would still not be rankable by eye.
-            marker={"color": theme.BRASS, "line": {"color": theme.INK, "width": 2}},
-            text=[f"{n:,}" for n in fc["n"]],
-            textposition="outside",
-            textfont={"family": theme.FONT_MONO, "color": theme.SLATE, "size": 12},
-            hovertemplate="<b>%{y}</b><br>%{x:,} failures<extra></extra>",
-        )
-    )
-    fig2.update_layout(xaxis={"visible": False}, showlegend=False)
-    theme.bar_headroom(fig2, fc["n"])
-    st.plotly_chart(
-        theme.style_fig(fig2, height=max(260, 26 * len(fc))), width="stretch"
-    )
-
-    with st.expander("View as table"):
-        st.dataframe(
-            pd.DataFrame({"Failure class": fc["failure_class"], "Failures": fc["n"]})
-            .sort_values("Failures", ascending=False),
-            width="stretch",
-            hide_index=True,
-        )
-
+    # The failure-class breakdown that used to live here charted exactly the
+    # same GROUP BY as the CHASERS page's "Why payments degraded" — two
+    # independent queries of one fact, free to drift apart. That page's version
+    # is canonical: it filters is_retryable and now carries the recovery rate
+    # too. One chart, one place.
     st.divider()
     theme.section("Chaser effectiveness", "Per risk type, per touch: does the rung earn its slot.")
     # Straight SQL over the engine's own tables — the same facts

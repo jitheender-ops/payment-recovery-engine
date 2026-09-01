@@ -23,6 +23,7 @@ them has to take "bounded" on trust.
 
 from __future__ import annotations
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -54,12 +55,26 @@ JOIN recovery_cases c ON c.id = a.recovery_case_id
 GROUP BY c.risk_type
 """
 
+# Below this many chased cases a percentage is arithmetic, not a rate — same
+# threshold and same caveat as the bank x rail heatmap (bank_breakdown.py).
+MIN_SAMPLE = 5
+
+# Counts alone rank what declines most and never what is worth chasing. The
+# outcome half joins the way bank_breakdown does (attempt -> failure,
+# attempt -> case), so "recovered" is a case the engine actually touched.
 FAILURE_CAUSE_SQL = """
-SELECT failure_class          AS cause,
-       COUNT(*)               AS failures,
-       COUNT(*) FILTER (WHERE is_retryable) AS retryable
-FROM payment_failures
-GROUP BY failure_class
+-- DISTINCT pf.id, not COUNT(*): the LEFT JOIN fans one failure out to one
+-- row per attempt made against it, and a plain count would report a
+-- much-retried class as many more declines than actually happened.
+SELECT pf.failure_class       AS cause,
+       COUNT(DISTINCT pf.id)  AS failures,
+       COUNT(DISTINCT pf.id) FILTER (WHERE pf.is_retryable) AS retryable,
+       COUNT(DISTINCT ra.recovery_case_id)     AS chased,
+       COUNT(DISTINCT CASE WHEN rc.state = 'recovered' THEN rc.id END) AS recovered
+FROM payment_failures pf
+LEFT JOIN retry_attempts ra ON ra.payment_failure_id = pf.id
+LEFT JOIN recovery_cases rc ON rc.id = ra.recovery_case_id
+GROUP BY pf.failure_class
 ORDER BY failures DESC
 LIMIT 12
 """
@@ -233,13 +248,22 @@ def render() -> None:
         return
 
     causes["cause"] = causes["cause"].fillna("unclassified")
+    # NaN, not 0: "never chased one of these" and "chased them and none came
+    # back" are different facts and must not render as the same 0%.
+    causes["rate"] = (100.0 * causes["recovered"] / causes["chased"]).where(
+        causes["chased"] > 0
+    )
     fig = go.Figure(
         go.Bar(
             x=causes["failures"],
             y=causes["cause"],
             orientation="h",
             marker_color=theme.BRASS,
-            hovertemplate="%{y}<br>%{x} failures<extra></extra>",
+            customdata=causes["rate"].round(1).fillna(-1),
+            hovertemplate=(
+                "%{y}<br>%{x} failures"
+                "<br>%{customdata}% recovered once chased<extra></extra>"
+            ),
         )
     )
     fig.update_layout(yaxis={"autorange": "reversed"}, xaxis_title="failures")
@@ -247,6 +271,26 @@ def render() -> None:
         theme.style_fig(fig, height=max(240, 26 * len(causes))),
         use_container_width=True,
     )
+
+    # The second answer this chart never had: what recovers best once retried.
+    rated = causes[causes["chased"] > 0].sort_values("rate", ascending=False)
+    if not rated.empty:
+        st.dataframe(
+            pd.DataFrame({
+                "Failure class": rated["cause"],
+                "Chased": rated["chased"],
+                "Recovered": rated["recovered"],
+                "Recovered %": rated["rate"].round(1),
+                "": ["thin sample" if c < MIN_SAMPLE else "" for c in rated["chased"]],
+            }),
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            f"Recovery among cases the engine chased, not among all declines. "
+            f"Rows marked thin have fewer than {MIN_SAMPLE} chased cases — shown "
+            f"as measured, not yet readable as a rate."
+        )
 
     hard = causes[causes["retryable"] == 0]["failures"].sum()
     if hard:

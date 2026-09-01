@@ -53,13 +53,24 @@
       {% set worst = data.causes[0].n %}
       <div style="margin-top:.9rem">
       {% for c in data.causes %}
-        {{ bar(c.cause, "{:,}".format(c.n), c.n / worst,
+        {# Count and outcome on one row. A count alone ranks what declines most
+           and never what is worth chasing; the second figure is the recovery
+           rate among cases this engine actually touched. Blank, not 0%, when
+           none of that class was ever chased. #}
+        {{ bar(c.cause,
+               "{:,}".format(c.n) ~ (" · " ~ c.recovery_rate ~ "% back" ~ ("*" if c.thin else "") if c.recovery_rate is not none else ""),
+               c.n / worst,
                "green" if c.retryable else "red") }}
       {% endfor %}
       </div>
       <p class="sec-s" style="margin-top:.9rem">
         Red bars are hard declines — fraud blocks, stolen cards, permanent refusals.
-        They are abandoned before the agent is called.</p>
+        They are abandoned before the agent is called.
+        "% back" is recovery among cases the engine chased, not among all declines.</p>
+      {% if data.causes | selectattr("thin") | list %}
+      <p class="sec-s">* fewer than {{ data.min_sample }} chased cases. Shown as measured;
+        not yet a rate.</p>
+      {% endif %}
     </section>
     {% endif %}
   {% endif %}

@@ -451,3 +451,58 @@ async def test_folded_pages_survive_a_database_outage(
     for path in ("/console/pipeline", "/console/routing", "/console/cases", "/console/ops"):
         r = console.get(path)
         assert r.status_code == 200, f"{path} returned {r.status_code} with no database"
+
+
+# ── Failure class: counts alone never said what is worth chasing ─────────
+
+
+async def test_failure_causes_separates_never_chased_from_never_recovered(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    The one distinction this query exists to keep: a class the engine has
+    never chased and a class it chased and lost both have zero recoveries,
+    and rendering both as "0%" would invent a verdict for the first.
+    """
+    from src.merchant import console_data
+    from src.models import PaymentFailure
+
+    now = datetime.now(UTC)
+    async with db_sessionmaker() as s:
+        chased_f = PaymentFailure(
+            payment_id="pay_chased", amount=10_000, method="card",
+            error_code="E", failure_class="issuer_decline", is_retryable=True,
+            webhook_event_id=uuid.uuid4(), failed_at=now,
+        )
+        untouched_f = PaymentFailure(
+            payment_id="pay_untouched", amount=10_000, method="card",
+            error_code="E", failure_class="fraud_block", is_retryable=False,
+            webhook_event_id=uuid.uuid4(), failed_at=now,
+        )
+        s.add_all([chased_f, untouched_f])
+        await s.flush()
+
+        case = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_chased",
+            amount_at_risk=10_000, max_attempts=3,
+        )
+        await s.flush()
+        s.add(RetryAttempt(
+            payment_failure_id=chased_f.id, payment_id="pay_chased",
+            idempotency_key="k_fc", attempt_number=1, recovery_case_id=case.id,
+            action_type="retry_now", guardrail_passed=True, result="success",
+        ))
+        await s.commit()
+
+    async with db_sessionmaker() as s:
+        by_class = {c["cause"]: c for c in await console_data.failure_causes(s)}
+
+    chased = by_class["issuer_decline"]
+    assert chased["chased"] == 1
+    assert chased["recovery_rate"] == 0.0, "chased and lost is a real 0%"
+    assert chased["thin"] is True, "one case is not a rate"
+
+    untouched = by_class["fraud_block"]
+    assert untouched["chased"] == 0
+    assert untouched["recovery_rate"] is None, "never chased is not 0%"
+    assert untouched["thin"] is False

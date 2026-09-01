@@ -236,6 +236,17 @@
    It authenticates by CAPABILITY TOKEN in the path (recovery_link.verify):
    whoever can forge this POST already holds the token and could just open
    the page. A CSRF token would be theatre here, not protection. #}
+{% if is_payment and recommended_rail == "upi" and method != "upi" %}
+  {# The engine already ENFORCES this: /pay mints a UPI-only link for these
+     failure classes. Until now the only trace was the button's verb changing.
+     Saying it plainly is the honest version — the recommendation is ours, it
+     is named as ours, and it is computed from recommended_rail alone. Not
+     folded into detail.next: that paragraph explains the decline; this is a
+     recommendation about what to do next, and they are different claims. #}
+  <div class="note">
+    <p><strong>{{ t('rail_recommend_upi') }}</strong> {{ t('rail_recommend_upi_why') }}</p>
+  </div>
+{% endif %}
 <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -- capability-token auth: the path secret IS the authority (see routes.py) -->
 <form method="post" action="/recover/{{ token }}/pay" id="payform">
     <button class="btn" type="submit" id="paybtn">{% if recommended_rail == "upi" %}{{ t('pay_upi', amount=amount) }}{% else %}{{ t('pay_securely', amount=amount) }}{% endif %}</button>
