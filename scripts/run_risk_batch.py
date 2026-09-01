@@ -32,8 +32,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
-import hmac
 import json
 import random
 import sys
@@ -48,6 +46,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import get_settings, reveal  # noqa: E402
+from src.demo import captured_payload, sign  # noqa: E402
 
 # Per-type shape: reference prefix, realistic paise ticket sizes, and a meta
 # snippet that exercises the prompt's sanitised merchant-meta block.
@@ -73,10 +72,6 @@ RISK_SHAPES: dict[str, dict[str, Any]] = {
         "meta": {"emandate_token": "emand_9f2c", "debit_reason": "insufficient_funds"},
     },
 }
-
-
-def sign(body: bytes, secret: str) -> str:
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
 # A handful of buyer companies for the B2B events to belong to. Without an
@@ -124,22 +119,6 @@ def risk_payload(risk_type: str, idx: int, amount: int) -> dict[str, Any]:
         }
 
     return payload
-
-
-def captured_payload(amount: int, idempotency_key: str) -> dict[str, Any]:
-    """A capture for a payment we have never seen — paying a link mints a new
-    id. The link's notes come back on the payment, so the breadcrumb the
-    executor wrote is what joins the money home."""
-    return {
-        "entity": "event", "event": "payment.captured", "contains": ["payment"],
-        "payload": {"payment": {"entity": {
-            "id": f"pay_test_{uuid.uuid4().hex[:12]}",
-            "entity": "payment", "amount": amount, "currency": "INR",
-            "status": "captured", "method": "upi", "created_at": int(time.time()),
-            "notes": {"retry_idempotency_key": idempotency_key},
-        }}},
-        "created_at": int(time.time()),
-    }
 
 
 def open_case_attempts() -> list[tuple[str, int, str]]:
@@ -381,7 +360,7 @@ def main() -> None:
 
     with httpx.Client(timeout=args.timeout) as client:
         for key, amount, risk_type in candidates[:n_att]:
-            body = json.dumps(captured_payload(amount, key)).encode()
+            body = json.dumps(captured_payload(amount, idempotency_key=key)).encode()
             resp = client.post(
                 f"{args.host}/webhooks/razorpay",
                 content=body,

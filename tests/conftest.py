@@ -12,9 +12,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import pytest
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.ext.compiler import compiles
 
 import src.models  # noqa: F401  — defining the classes is what registers the tables
 
@@ -29,15 +27,11 @@ import src.receivables.models  # noqa: F401,E402  — same reason, other module
 from src.agent.actions import FailureContext, RetryAction
 from src.database import Base
 
-
 # ── Database harness ─────────────────────────────────────────────────────
-# The models declare Postgres JSONB, which the SQLite type compiler cannot
-# render. This one shim makes the whole schema portable so DB-touching code can
-# be tested without a Postgres server. UUID columns need no shim: SQLAlchemy
-# 2.x's postgresql.UUID subclasses the generic Uuid type.
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_on_sqlite(type_: Any, compiler: Any, **kw: Any) -> str:
-    return "JSON"
+# The JSONB-on-SQLite shim that makes this whole harness possible now lives in
+# src/database.py, because the local demo needs it too (it runs the real app
+# against a SQLite file). Importing Base above registers it. UUID columns need
+# no shim: SQLAlchemy 2.x's postgresql.UUID subclasses the generic Uuid type.
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +55,14 @@ def hermetic_settings(monkeypatch: Any) -> Any:
     from src.config import Settings, get_settings
 
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+    # Blanking env_file stops .env leaking in, but an EXPORTED variable still
+    # reaches Settings — and DEMO_MODE is the one that does real damage,
+    # because it is the only setting that can make Settings refuse to
+    # construct at all (it is invalid alongside APP_ENV != development). A
+    # developer with the local demo's environment in their shell would watch
+    # every test that sets APP_ENV=production die inside pydantic, for
+    # reasons having nothing to do with the code under test.
+    monkeypatch.delenv("DEMO_MODE", raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

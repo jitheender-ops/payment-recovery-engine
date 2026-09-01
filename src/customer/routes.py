@@ -341,6 +341,41 @@ def _live_link(attempts: Sequence[Any]) -> str | None:
 _PAYMENT_REDIRECT_HOSTS = ("razorpay.com", "rzp.io")
 
 
+def _is_demo_redirect_target(url: str) -> bool:
+    """
+    True only for this process's own demo checkout, and only in demo mode.
+
+    Demo mode replaces Razorpay with a local fake, so its short_url is on
+    localhost over http and the allowlist above correctly refuses it. This
+    is the narrowest possible exception to that, and every clause is load-
+    bearing: demo_mode is itself refused outside development
+    (Settings._demo_mode_is_development_only), the URL must sit on exactly
+    the configured PUBLIC_BASE_URL origin — scheme, host AND port — and the
+    path must be under /demo/checkout/, which is the only place the fake
+    ever points. A poisoned short_url therefore still cannot redirect
+    anywhere, in demo mode or out of it.
+    """
+    settings = get_settings()
+    if not settings.demo_mode:
+        return False
+    base = urlparse(settings.public_base_url)
+    try:
+        parsed = urlparse(url)
+        # .port is parsed lazily ON ACCESS and raises ValueError for a
+        # non-numeric one, so it has to be read inside this try — otherwise
+        # "http://127.0.0.1:8000.evil.example/..." escapes as a 500 from the
+        # pay route instead of a clean refusal. Same for base.
+        candidate = (parsed.scheme, (parsed.hostname or "").lower(), parsed.port)
+        expected = (base.scheme, (base.hostname or "").lower(), base.port)
+    except (ValueError, TypeError):
+        return False
+    return (
+        bool(base.hostname)
+        and candidate == expected
+        and parsed.path.startswith("/demo/checkout/")
+    )
+
+
 def _is_payment_redirect_target(url: str) -> bool:
     """True only for an https URL on a Razorpay host (or subdomain)."""
     try:
@@ -365,7 +400,7 @@ def _payment_redirect(url: str, token: str) -> RedirectResponse:
     customer is sent back to the recovery page with ?error=1 (the "we couldn't
     open the payment page" note) instead of being shipped to an attacker host.
     """
-    if _is_payment_redirect_target(url):
+    if _is_payment_redirect_target(url) or _is_demo_redirect_target(url):
         return RedirectResponse(url, status_code=303)
     logger.error(
         "Refusing pay redirect to non-Razorpay target %r — possible poisoned "

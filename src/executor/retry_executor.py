@@ -114,16 +114,32 @@ class RetryExecutor:
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = razorpay.Client(
-            session=_TimeoutSession(settings.razorpay_timeout_seconds),
-            auth=(settings.razorpay_key_id, reveal(settings.razorpay_key_secret)),
-        )
+        if settings.demo_mode:
+            # The one seam demo mode needs. Everything below and after this
+            # line is the real code path — see src/demo.py for why that
+            # matters and for the safety rail that keeps this out of
+            # production.
+            from src.demo import FakeRazorpayClient
+
+            self._client: Any = FakeRazorpayClient()
+            logger.warning(
+                "RetryExecutor in DEMO MODE — the payment gateway is a local "
+                "fake and no money can move"
+            )
+        else:
+            self._client = razorpay.Client(
+                session=_TimeoutSession(settings.razorpay_timeout_seconds),
+                auth=(settings.razorpay_key_id, reveal(settings.razorpay_key_secret)),
+            )
         # The process-wide dedicated pool (see _shared_pool): one slow
         # Razorpay day can hold up to this many calls, and the rest of the
         # process keeps its own executor untouched. Shared across executor
         # instances so constructing one per request cannot leak threads.
         self._pool = _shared_pool()
-        logger.info("RetryExecutor initialized (key_id=%s...)", settings.razorpay_key_id[:12])
+        if not settings.demo_mode:
+            logger.info(
+                "RetryExecutor initialized (key_id=%s...)", settings.razorpay_key_id[:12]
+            )
 
     async def _off_thread(self, fn: Any, *args: Any) -> Any:
         """Run a blocking SDK call on the dedicated Razorpay pool."""

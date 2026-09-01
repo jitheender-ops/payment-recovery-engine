@@ -10,14 +10,34 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase
 
 from src.config import Settings, get_settings
+
+
+# The models declare Postgres JSONB, which the SQLite type compiler cannot
+# render at all — `create_all` raises CompileError before a single table is
+# made. This one shim makes the whole schema portable.
+#
+# It lives here rather than in tests/conftest.py (its original home) because
+# it now has two callers: the test harness, and the local demo, which runs
+# the real app against a SQLite file so it needs no Postgres server. A second
+# copy in the demo path would be one fact in two places, free to drift — and
+# the failure mode of that drift is "the demo works and the tests do not",
+# or worse, the reverse.
+#
+# Postgres is unaffected: @compiles registers this for the sqlite dialect
+# only, so a real deployment still gets a real JSONB column.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_on_sqlite(type_: Any, compiler: Any, **kw: Any) -> str:
+    return "JSON"
 
 
 class Base(DeclarativeBase):

@@ -27,8 +27,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
-import hmac
 import json
 import random
 import sys
@@ -42,6 +40,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import get_settings, reveal  # noqa: E402
+from src.demo import captured_payload, sign  # noqa: E402
 
 SAMPLE_FAILURES = [
     {"error_code": "BAD_REQUEST_ERROR", "error_reason": "insufficient_funds", "error_source": "customer", "error_step": "payment_authorization", "method": "card", "bank": "HDFC"},
@@ -60,10 +59,6 @@ SAMPLE_FAILURES = [
 # the amount ceiling and the ₹ figures on the dashboard only mean something
 # against amounts a real merchant would see.
 AMOUNTS = [49900, 79900, 129900, 250000, 499000, 599000, 1250000, 2499000]
-
-
-def sign(body: bytes, secret: str) -> str:
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
 def post(client: httpx.Client, host: str, payload: dict[str, Any], secret: str) -> int:
@@ -91,33 +86,6 @@ def failed_payload(failure: dict[str, Any], idx: int, amount: int) -> dict[str, 
             "error_source": failure["error_source"], "error_step": failure["error_step"],
             "error_reason": failure["error_reason"], "created_at": int(time.time()),
         }}},
-        "created_at": int(time.time()),
-    }
-
-
-def captured_payload(
-    amount: int, *, idempotency_key: str | None = None, order_id: str | None = None
-) -> dict[str, Any]:
-    """
-    A capture for a payment we have never seen — which is the whole difficulty.
-
-    With `idempotency_key`, this is our link being paid: Razorpay copies a link's
-    notes onto the payment, so the breadcrumb the executor wrote comes back and
-    the money is credited to the attempt that earned it. With only `order_id`,
-    the customer paid the original order themselves — real revenue, credited to
-    the case but explicitly NOT to us.
-    """
-    entity: dict[str, Any] = {
-        "id": f"pay_test_{uuid.uuid4().hex[:12]}",   # deliberately a NEW id
-        "entity": "payment", "amount": amount, "currency": "INR",
-        "status": "captured", "method": "upi", "created_at": int(time.time()),
-        "notes": {"retry_idempotency_key": idempotency_key} if idempotency_key else {},
-    }
-    if order_id:
-        entity["order_id"] = order_id
-    return {
-        "entity": "event", "event": "payment.captured", "contains": ["payment"],
-        "payload": {"payment": {"entity": entity}},
         "created_at": int(time.time()),
     }
 

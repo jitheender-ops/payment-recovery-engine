@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -33,6 +35,10 @@ from src.config import get_settings, reveal  # noqa: E402
 from src.customer.explain import explain  # noqa: E402
 from src.customer.routes import _view_state  # noqa: E402
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt  # noqa: E402
+
+# The seeded buyer account. A stable ref so re-running is idempotent —
+# a second run finds this account and adds nothing.
+_DEMO_ACCOUNT_REF = "ref:demo-nandini-traders"
 
 # What each state is for, so it is obvious which ones still need looking at.
 BLURB = {
@@ -64,9 +70,6 @@ def _seed_missing_states(url: str) -> int:
         DELETE FROM payment_failures WHERE payment_id LIKE 'pay_preview_%';
         DELETE FROM recovery_cases   WHERE subject_ref LIKE 'pay_preview_%';
     """
-    import uuid
-    from datetime import UTC, datetime, timedelta
-
     # (page state, case state, failure class, attempt result, attempt age)
     wanted = [
         ("confirming", "open", "insufficient_funds", "pending", 2),
@@ -115,13 +118,99 @@ def _seed_missing_states(url: str) -> int:
     return made
 
 
+def _seed_b2b_account(url: str) -> int:
+    """
+    One buyer account with several open invoices, so the STATEMENT page has
+    something to be.
+
+    Neither simulate_webhooks.py nor run_risk_batch.py creates this: the
+    first only knows the payment rail, and the second opens invoice cases
+    without linking them to an ArAccount. But /statement/{token} is an
+    account-level surface — with no account carrying two or more open
+    invoices, the page it renders is an empty one, which demonstrates
+    nothing. Returns the number of invoices inserted.
+    """
+    from src.receivables.models import ArAccount
+
+    engine = sa.create_engine(url)
+    made = 0
+    with engine.begin() as conn:
+        existing = conn.execute(
+            sa.select(ArAccount.id).where(ArAccount.account_ref == _DEMO_ACCOUNT_REF)
+        ).scalar_one_or_none()
+        if existing is not None:
+            engine.dispose()
+            return 0
+
+        now = datetime.now(UTC)
+        account_id = uuid.uuid4()
+        conn.execute(sa.insert(ArAccount).values(
+            id=account_id, account_ref=_DEMO_ACCOUNT_REF,
+            display_name="Nandini Traders Pvt Ltd", created_at=now,
+        ))
+        # Deliberately varied: one plain, one part-paid, one recently due.
+        # A statement where every row looks the same shows less than one
+        # where the totals have to be read carefully.
+        invoices = [
+            ("INV-2041", 1_250_000, 0, 27),
+            ("INV-2044", 480_000, 150_000, 18),
+            ("INV-2050", 96_500, 0, 9),
+            ("INV-2053", 310_000, 0, 3),
+        ]
+        for ref, at_risk, recovered, days_overdue in invoices:
+            conn.execute(sa.insert(RecoveryCase).values(
+                id=uuid.uuid4(), risk_type="invoice_overdue", subject_ref=ref,
+                customer_id="email:ap@nanditraders.example", account_id=account_id,
+                amount_at_risk=at_risk, currency="INR", amount_recovered=recovered,
+                state="open", attempts_used=1, max_attempts=4, escalation_level=0,
+                due_at=now - timedelta(days=days_overdue),
+                opened_at=now - timedelta(days=days_overdue),
+                updated_at=now,
+            ))
+            made += 1
+    engine.dispose()
+    return made
+
+
+def _statement_urls(url: str) -> list[tuple[str, str, int]]:
+    """(display name, statement URL, open invoice count) per AR account that
+    actually has open invoices — the accounts whose statement page is worth
+    opening."""
+    from src.receivables.models import ArAccount
+
+    engine = sa.create_engine(url)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.select(
+                ArAccount.id,
+                ArAccount.display_name,
+                ArAccount.account_ref,
+                sa.func.count(RecoveryCase.id),
+            )
+            .join(RecoveryCase, RecoveryCase.account_id == ArAccount.id)
+            .where(
+                RecoveryCase.risk_type == "invoice_overdue",
+                RecoveryCase.state == "open",
+            )
+            .group_by(ArAccount.id, ArAccount.display_name, ArAccount.account_ref)
+        ).all()
+    engine.dispose()
+    out = []
+    for account_id, name, ref, count in rows:
+        link = recovery_link.url_for_account(account_id)
+        if link:
+            out.append((name or ref, link, int(count)))
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--all", action="store_true", help="every case, not one per state")
     p.add_argument("--state", help="only this page state")
     p.add_argument("--limit", type=int, default=400)
     p.add_argument("--seed-states", action="store_true",
-                   help="insert one preview case per state that has none")
+                   help="insert preview data for any surface that has none "
+                        "(page states, and a B2B account for the statement page)")
     args = p.parse_args()
 
     settings = get_settings()
@@ -135,8 +224,12 @@ def main() -> int:
 
     if args.seed_states:
         seeded = _seed_missing_states(settings.database_url_sync)
-        print(f"Inserted {seeded} preview case(s).\n" if seeded
-              else "Every state already has a case.\n")
+        # The statement page is an ACCOUNT-level surface, not a page state,
+        # so it needs its own seed — no other script links invoice cases to
+        # an ArAccount, and without one the page renders empty.
+        seeded += _seed_b2b_account(settings.database_url_sync)
+        print(f"Inserted {seeded} preview row(s).\n" if seeded
+              else "Every surface already has data.\n")
 
     engine = sa.create_engine(settings.database_url_sync)
     with engine.connect() as conn:
@@ -198,6 +291,41 @@ def main() -> int:
         for url in (urls if (args.all or args.state) else urls[:1]):
             print(f"  {url}")
             shown += 1
+
+    # ── The account statement: a sibling surface, not a page state ──────
+    # /statement/{token} shows one buyer every open invoice they have. It is
+    # reached by an ACCOUNT-scoped token, so it can never appear in the
+    # per-state listing above however many cases exist.
+    if not args.state:
+        statements = _statement_urls(settings.database_url_sync)
+        print(f"\nSTATEMENT  ({len(statements)} account"
+              f"{'s' if len(statements) != 1 else ''})")
+        print("  every open invoice for one B2B buyer, each row linking to "
+              "its own page")
+        if statements:
+            for name, link, count in statements:
+                print(f"  {link}")
+                print(f"      {name} — {count} open invoice"
+                      f"{'s' if count != 1 else ''}")
+                shown += 1
+        else:
+            print("  — no AR account has open invoices yet "
+                  "(try --seed-states)")
+
+        # ── The merchant console: password-gated, not token-gated ───────
+        base = settings.public_base_url.rstrip("/")
+        print("\nCONSOLE  (sign in with DASHBOARD_PASSWORD)")
+        print("  the merchant's side — the same data, for whoever is chasing it")
+        for path, blurb in (
+            ("/console/login", "sign in first; everything below redirects here"),
+            ("/console/live", "ladder, promises, disputes, aging"),
+            ("/console/pipeline", "where money leaves, and what the gateway blamed"),
+            ("/console/routing", "which bank on which rail — the switch_rail evidence"),
+            ("/console/cases", "every case, filterable by state"),
+            ("/console/ops", "is the machinery running"),
+        ):
+            print(f"  {base}{path}")
+            print(f"      {blurb}")
 
     missing = [s for s in BLURB if not by_state.get(s)]
     if missing and not args.state:

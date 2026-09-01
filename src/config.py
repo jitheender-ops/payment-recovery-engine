@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -161,6 +161,15 @@ class Settings(BaseSettings):
     # ── Application ──────────────────────────────────────────────────────
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
+
+    # ── Demo mode ────────────────────────────────────────────────────────
+    # Swaps the Razorpay SDK client for an in-process fake so the whole
+    # engine — link minting, the pay redirect, the capture webhook,
+    # attribution — runs on a laptop with no credentials and no network.
+    # Off by default, and REFUSED outside development by the validator
+    # below: a stub that can run in production is a worse bug than no stub,
+    # because everything looks like it is working while no money moves.
+    demo_mode: bool = False
 
     # ── Guardrail Thresholds ─────────────────────────────────────────────
     max_retries_per_payment: int = 3
@@ -380,6 +389,29 @@ class Settings(BaseSettings):
         if url and not url.startswith(("http://", "https://")):
             return f"https://{url}"
         return url
+
+    @model_validator(mode="after")
+    def _demo_mode_is_development_only(self) -> Settings:
+        """
+        Refuse demo mode anywhere but development.
+
+        Demo mode replaces the payment gateway with a fake that always
+        succeeds. Every downstream signal — a minted link, a captured
+        payment, a recovered case, money on the dashboard — looks exactly
+        like the real thing. Reaching staging or production with this on
+        would not fail loudly; it would report a healthy, recovering
+        business while no money moved at all. That is the one failure this
+        codebase's fail-closed discipline exists to prevent, so it is a
+        startup error rather than a warning.
+        """
+        if self.demo_mode and self.app_env != "development":
+            raise ValueError(
+                f"DEMO_MODE is on with APP_ENV={self.app_env}. Demo mode fakes "
+                "the payment gateway and is development-only — every recovery "
+                "it reports would be fictional. Unset DEMO_MODE, or set "
+                "APP_ENV=development."
+            )
+        return self
 
     def require_razorpay_credentials(self) -> None:
         """

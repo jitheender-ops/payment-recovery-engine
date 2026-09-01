@@ -81,3 +81,7 @@ preview/
 # Machine-local resume cache for the LLM eval prefetch (accumulates real
 # decisions across free-tier daily-quota-limited runs). Not a result artifact.
 eval/results/.llm_decision_cache.jsonl
+
+# Local demo (./run.sh --demo)
+.demo.sqlite3
+.demo.seeded

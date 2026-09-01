@@ -3,6 +3,8 @@
 # One command: clean build, verify, run, and expose a public webhook URL.
 #
 #   ./run.sh                 build + verify + API + dashboard + public tunnel
+#   ./run.sh --demo          everything, offline: SQLite, fake gateway, seeded,
+#                            no credentials and no Docker needed
 #   ./run.sh --verify-only   build + ruff/pytest/mypy, start nothing (CI)
 #   ./run.sh --no-tunnel     build + verify + run locally, no public URL
 #
@@ -14,11 +16,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 VERIFY_ONLY=false
 TUNNEL=true
+DEMO=false
 for arg in "$@"; do
   case "$arg" in
     --verify-only) VERIFY_ONLY=true ;;
     --no-tunnel)   TUNNEL=false ;;
-    -h|--help)     sed -n '3,7p' "$0"; exit 0 ;;
+    # --demo implies --no-tunnel. The whole point is that nothing leaves the
+    # machine, and a public URL fronting a fake gateway is the worst of both.
+    --demo)        DEMO=true; TUNNEL=false ;;
+    -h|--help)     sed -n '3,9p' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -47,6 +53,39 @@ ok "$($PY -V) at $(command -v "$PY")"
 # Values are never printed — a leaked webhook secret lets anyone forge a
 # payment failure, and a leaked key secret moves money.
 say "Configuration"
+if $DEMO; then
+  # Demo mode answers for itself. It needs no .env, no Razorpay account and
+  # no Postgres: the gateway is a local fake (src/demo.py) and the database
+  # is a file. The secrets below are real HMAC keys — the engine genuinely
+  # signs and verifies with them — but they authenticate this process to
+  # itself and are worth nothing anywhere else, which is why they can be
+  # written down here.
+  #
+  # .env is deliberately NOT sourced. `source` overwrites variables that are
+  # already exported, so a committed APP_PORT or DASHBOARD_PASSWORD in .env
+  # would silently beat one the caller passed on the command line — and a
+  # stale .env is exactly what a demo must not depend on. The app still reads
+  # .env through pydantic-settings, where real environment variables take
+  # precedence, so the values below win there too.
+  set -a
+  APP_ENV=development
+  DEMO_MODE=true
+  DATABASE_URL="sqlite+aiosqlite:///$PWD/.demo.sqlite3"
+  DATABASE_URL_SYNC="sqlite:///$PWD/.demo.sqlite3"
+  RAZORPAY_KEY_ID="${RAZORPAY_KEY_ID:-rzp_test_demo0000000}"
+  RAZORPAY_KEY_SECRET="${RAZORPAY_KEY_SECRET:-demo_key_secret_local_only}"
+  RAZORPAY_WEBHOOK_SECRET="${RAZORPAY_WEBHOOK_SECRET:-demo_webhook_secret_local_only}"
+  RISK_WEBHOOK_SECRET="${RISK_WEBHOOK_SECRET:-demo_risk_secret_local_only}"
+  RECOVERY_LINK_SECRET="${RECOVERY_LINK_SECRET:-demo_recovery_link_secret_local_only}"
+  AUDIT_CHAIN_SECRET="${AUDIT_CHAIN_SECRET:-demo_audit_secret_local_only}"
+  MERCHANT_NAME="${MERCHANT_NAME:-Kirana Supply Co}"
+  DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD:-demo-console-password}"
+  APP_PORT="${APP_PORT:-8000}"
+  PUBLIC_BASE_URL="http://127.0.0.1:$APP_PORT"
+  set +a
+  ok "demo mode — SQLite at .demo.sqlite3, gateway faked, nothing leaves this machine"
+  warn "every 'recovered' rupee this run reports is fictional"
+else
 if [[ ! -f .env ]]; then
   cp .env.example .env
   die ".env created from .env.example — fill in your keys, then re-run."
@@ -93,6 +132,9 @@ if [[ -z "${DASHBOARD_PASSWORD:-}" ]]; then
 else
   ok "DASHBOARD_PASSWORD set (${#DASHBOARD_PASSWORD} chars)"
 fi
+fi   # end of the non-demo configuration branch
+
+STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
 
 # ── 3. Virtualenv ────────────────────────────────────────────────────────
 # Deliberately NOT --system-site-packages, and the probe below enforces that:
@@ -174,8 +216,10 @@ fi
 # wired up but has no revisions yet, so there is nothing to upgrade.
 #
 # Skipped for --verify-only: ruff, pytest and mypy touch no database, and CI
-# should not need Postgres to type-check.
-if ! $VERIFY_ONLY; then
+# should not need Postgres to type-check. Skipped for --demo too: that path
+# runs on a SQLite file precisely so a laptop needs no Postgres and no Docker,
+# and this block would die on a machine that has neither.
+if ! $VERIFY_ONLY && ! $DEMO; then
 say "Database"
 DB_NAME="${DB_NAME:-payment_recovery}"
 DB_USER="${DB_USER:-recovery}"
@@ -218,9 +262,19 @@ fi
 say "Verifying"
 .venv/bin/ruff check . || die "ruff failed"
 ok "ruff"
-"$VPY" -m pytest -q || die "tests failed"
+# `env -u DEMO_MODE`: the suite verifies the PRODUCT, not the demo harness, so
+# it must not inherit the demo's environment. It would not merely skew a
+# result — Settings refuses to construct when DEMO_MODE meets a non-development
+# APP_ENV (and .env commonly sets one), so src.main would fail at import and
+# every test touching it would die for a reason unrelated to the code.
+env -u DEMO_MODE "$VPY" -m pytest -q || die "tests failed"
 ok "pytest"
-"$VPY" -m mypy . || die "mypy failed"
+# `src scripts eval`, matching .github/workflows/ci.yml — not `mypy .`, which
+# this line used to say. Under strict=true that also swept tests/ and
+# alembic/, where 47 pre-existing errors live, so the local gate failed on a
+# clean checkout while CI passed. A gate that is red for everyone is a gate
+# nobody reads.
+env -u DEMO_MODE "$VPY" -m mypy src scripts eval || die "mypy failed"
 ok "mypy --strict"
 "$VPY" scripts/seed_error_codes.py >/dev/null && ok "error-code taxonomy validated"
 
@@ -251,9 +305,19 @@ fi
 # Alembic, not init_db()'s create_all — which is development-only in
 # src/main.py now, and which never added a missing COLUMN anyway, so it was
 # never an upgrade path for a database that already existed.
-say "Applying migrations"
-"$VPY" -m alembic upgrade head || die "alembic upgrade failed"
-ok "schema at head"
+if $DEMO; then
+  # Not alembic: the migrations carry Postgres JSONB columns SQLite cannot
+  # compile. The demo takes the app's own development path instead —
+  # src/main.py runs create_all when APP_ENV=development, and the JSONB
+  # shim in src/database.py makes the schema portable. Deleting
+  # .demo.sqlite3 is the whole reset story.
+  say "Database"
+  ok "SQLite at .demo.sqlite3 — tables created on startup, no migrations to run"
+else
+  say "Applying migrations"
+  "$VPY" -m alembic upgrade head || die "alembic upgrade failed"
+  ok "schema at head"
+fi
 
 # ── 7. Run ───────────────────────────────────────────────────────────────
 PIDS=()
@@ -284,6 +348,26 @@ else
   for _ in $(seq 40); do healthy && break; sleep 0.5; done
   healthy || die "API did not become healthy. Scroll up for the uvicorn traceback."
   ok "started on :$APP_PORT"
+fi
+
+# ── 7b. Seed the demo ────────────────────────────────────────────────────
+# Only once: a re-run of --demo reuses the database it already built, so the
+# links printed last time keep working and the recovered figures do not reset
+# under you mid-demo. Delete .demo.sqlite3 to start over.
+if $DEMO && [[ ! -f .demo.seeded ]]; then
+  say "Seeding demo data"
+  # Payment rail first (it opens cases the chasers do not), then the four
+  # chaser risk types, then the preview rows for page states and the B2B
+  # account the statement page needs. Output is summarised, not silenced —
+  # a seed that half-failed should be visible.
+  "$VPY" scripts/simulate_webhooks.py --host "http://127.0.0.1:$APP_PORT" \
+    --count 24 2>&1 | tail -20 || warn "payment-rail seed had problems (see above)"
+  "$VPY" scripts/run_risk_batch.py --host "http://127.0.0.1:$APP_PORT" \
+    --count 16 2>&1 | tail -20 || warn "risk-batch seed had problems (see above)"
+  "$VPY" scripts/recovery_links.py --seed-states >/dev/null 2>&1 \
+    || warn "preview-state seed had problems"
+  touch .demo.seeded
+  ok "seeded"
 fi
 
 say "Dashboard"
@@ -344,13 +428,14 @@ if [[ "${APP_ENV:-development}" == "development" ]]; then
 else
   DOCS_LINE="    API docs     disabled (APP_ENV=$APP_ENV); /openapi.json needs X-API-Key"
 fi
+if $DEMO; then DASH_HINT="password below"; else DASH_HINT="password from .env"; fi
 cat <<BANNER
 
   $(printf '\033[1;32m●\033[0m') Payment Failure Recovery Engine is up
 
     API          http://127.0.0.1:$APP_PORT
 $DOCS_LINE
-    Dashboard    http://127.0.0.1:$STREAMLIT_PORT  (password from .env)
+    Dashboard    http://127.0.0.1:$STREAMLIT_PORT  ($DASH_HINT)
 BANNER
 if [[ -n "$PUBLIC_URL" ]]; then
   cat <<BANNER
@@ -365,6 +450,28 @@ if [[ -n "$PUBLIC_URL" ]]; then
   and a mismatch is rejected with 401 before the payload is read.
 BANNER
 fi
+if $DEMO; then
+  cat <<BANNER
+
+    Console      http://127.0.0.1:$APP_PORT/console/login
+    Password     $DASHBOARD_PASSWORD
+
+  Every customer-facing URL worth opening, below. The tokens ARE the
+  credential, so these are the real links a customer would receive.
+BANNER
+  # The link printer derives each page's state by calling routes._view_state
+  # itself, so these labels cannot drift from what the page actually renders.
+  "$VPY" scripts/recovery_links.py || warn "could not print links"
+  cat <<'BANNER'
+
+  Try the whole loop: open a PAYABLE link, press Pay, then pay on the demo
+  checkout. The page should come back reading "recovered" with a receipt,
+  and the console's recovered figure should move.
+
+  Re-seed from scratch:  rm .demo.sqlite3 .demo.seeded && ./run.sh --demo
+  Ctrl-C stops everything.
+BANNER
+else
 cat <<'BANNER'
 
   Send yourself a test failure:
@@ -372,6 +479,7 @@ cat <<'BANNER'
 
   Ctrl-C stops everything.
 BANNER
+fi
 
 # Nothing was started by this run — everything was already up. Blocking on
 # `wait` with no children returns instantly, which would look like a crash.

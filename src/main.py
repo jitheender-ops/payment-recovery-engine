@@ -168,6 +168,19 @@ from src.voice.webhook import router as voice_router  # noqa: E402
 
 app.include_router(voice_router, include_in_schema=False)
 
+# The demo gateway's stub checkout — mounted ONLY in demo mode, so the routes
+# do not exist at all on a normal boot. Settings refuses demo_mode outside
+# development (see Settings._demo_mode_is_development_only), so this is the
+# second of two independent guards rather than the only one.
+if settings.demo_mode:
+    from src.demo import router as demo_router
+
+    app.include_router(demo_router, include_in_schema=False)
+    logger.warning(
+        "DEMO MODE ACTIVE — the payment gateway is a local fake. "
+        "Every 'recovered' rupee this process reports is fictional."
+    )
+
 if not _docs_public:
     # The schema itself stays useful outside development — client codegen and
     # contract tests want it — and unlike a browser loading Swagger UI, those

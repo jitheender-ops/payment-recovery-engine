@@ -253,6 +253,36 @@ This is the first question a fintech panel will ask. Here's the answer:
 
 ## 🚀 Quick Start
 
+### Just show me it working (no account, no Docker, no internet)
+
+```bash
+./run.sh --demo
+```
+
+That is the whole thing. No `.env`, no Razorpay account, no Postgres, no
+tunnel. It runs the same verification the normal path does, then starts the
+engine against a SQLite file with the payment gateway replaced by a local
+fake (`src/demo.py`), seeds a few dozen realistic cases, and prints every URL
+worth opening — one per customer-page state, the B2B account statement, and
+the merchant console with its password.
+
+The point is that it is not a mock-up. The **whole loop runs for real**: open
+a payable link, press Pay, pay on the demo checkout, and that page sends a
+genuinely HMAC-signed `payment.captured` to the real webhook endpoint, which
+verifies the signature, stores the event, and attributes the money through
+the same code production uses. The page comes back reading *recovered* with
+a receipt, and the console's recovered figure moves.
+
+What is faked is exactly one object — the Razorpay SDK client. Demo mode
+**cannot** run with `APP_ENV` set to anything but `development`; Settings
+refuses to construct. A fake gateway that always succeeds looks like a
+healthy business from every downstream signal, so it must never be able to
+run where someone would believe it.
+
+Reset with `rm .demo.sqlite3 .demo.seeded`.
+
+### The real thing
+
 ```bash
 cp .env.example .env    # fill in your Razorpay test keys + LLM key
 ./run.sh
@@ -288,6 +318,7 @@ means the build is actually clean. Ctrl-C stops everything.
 
 | | |
 |---|---|
+| `./run.sh --demo` | everything, offline: SQLite, fake gateway, seeded, no credentials |
 | `./run.sh --verify-only` | build + all three checks, start nothing (needs no Postgres) |
 | `./run.sh --no-tunnel` | run locally without a public URL |
 | `PY=python3.12 ./run.sh` | pin the interpreter, when `python3` isn't the one with working wheels |
