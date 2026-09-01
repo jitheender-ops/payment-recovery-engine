@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 import uuid
 from collections import defaultdict
@@ -246,6 +247,18 @@ _FEATURES: list[tuple[str, str, str]] = [
         "WHERE p.status='pending' AND rc.state='open' LIMIT 1",
     ),
     (
+        "Dispute → chase freeze",
+        "raised through open_dispute(): the invoice reads 'under review — "
+        "reminders paused' on the statement, and the console lists it",
+        "SELECT case_id FROM case_disputes WHERE status='open' LIMIT 1",
+    ),
+    (
+        "Instalment plan (4 of a possible 6)",
+        "the form shipped 2 hardcoded rows until this session — open the "
+        "'pay in parts' box to see all six reachable",
+        "SELECT case_id FROM payment_plans LIMIT 1",
+    ),
+    (
         "Hinglish voice recovery",
         "'We called you on {date}' in the timeline; add ?lang=hi for the "
         "Hindi page",
@@ -346,6 +359,146 @@ def _seed_voice_call(url: str) -> int:
     return made
 
 
+async def _seed_receivables_async(async_url: str) -> int:
+    """
+    The B2B half of the product, seeded through its OWN functions.
+
+    Five tables were empty in a fresh demo — ar_contacts, ar_contact_log,
+    case_disputes, payment_plans/plan_instalments, merchant_alerts and
+    account_tasks — so every surface built on them rendered an empty state.
+    None of it was broken; nothing had exercised it. simulate_webhooks.py
+    only knows the payment rail, and run_risk_batch.py opens invoice cases
+    without contacts, disputes or plans.
+
+    Deliberately calls the real functions rather than INSERTing rows:
+    open_dispute, create_plan, add_contact, raise_call_task and the
+    scheduler's own chase_due_accounts. A raw insert would prove a table can
+    hold a row; this proves the feature works, and it fails loudly here if
+    one of them ever stops working.
+
+    Returns the number of artefacts created.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from src.models import RecoveryCase
+    from src.receivables.accounts import add_contact
+    from src.receivables.disputes import open_dispute
+    from src.receivables.models import ArAccount, ArContact
+    from src.receivables.plans import create_plan
+    from src.receivables.tasks import raise_call_task
+    from src.scheduler import chase_due_accounts
+
+    engine = create_async_engine(async_url)
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    made = 0
+    try:
+        async with sm() as session:
+            account = await session.scalar(
+                sa.select(ArAccount).where(ArAccount.account_ref == _DEMO_ACCOUNT_REF)
+            )
+            if account is None:
+                return 0
+            if await session.scalar(
+                sa.select(sa.func.count()).select_from(ArContact)
+                .where(ArContact.account_id == account.id)
+            ):
+                return 0  # already seeded
+
+            # 1. The three roles a dunning ladder escalates through. Without
+            # these the ladder has nobody to address, and the console's
+            # contact column is blank.
+            for role, name, email in (
+                ("ap_clerk", "Priya Nair", "ap@nanditraders.example"),
+                ("finance_manager", "Rakesh Iyer", "finance@nanditraders.example"),
+                ("escalation", "S. Venkatesh", "director@nanditraders.example"),
+            ):
+                await add_contact(
+                    session, account_id=account.id, role=role, email=email,
+                    name=name, phone="+919876500000",
+                )
+                made += 1
+
+            invoices = list((await session.execute(
+                sa.select(RecoveryCase)
+                .where(
+                    RecoveryCase.account_id == account.id,
+                    RecoveryCase.risk_type == "invoice_overdue",
+                    RecoveryCase.state == "open",
+                )
+                .order_by(RecoveryCase.due_at)
+            )).scalars().all())
+
+            # 2. A dispute on one invoice — freezes its chase and raises a
+            # merchant alert, which is what the console's disputed table and
+            # the statement page's "under review" row both read.
+            if invoices:
+                if await open_dispute(
+                    session, invoices[-1],
+                    reason="Quantity billed does not match PO-4471 (12 vs 10 crates)",
+                ):
+                    made += 1
+
+            # 3. A four-instalment plan on another. Four matters: the form
+            # shipped two hardcoded rows until this session, so a plan of
+            # more than two was unreachable through the UI.
+            if len(invoices) >= 2:
+                target = invoices[0]
+                outstanding = target.amount_at_risk - target.amount_recovered
+                share, rest = outstanding // 4, outstanding - 3 * (outstanding // 4)
+                base = datetime.now(UTC) + timedelta(days=5)
+                plan = await create_plan(
+                    session, target,
+                    amounts_paise=[share, share, share, rest],
+                    due_dates=[base + timedelta(days=14 * i) for i in range(4)],
+                )
+                if plan is not None:
+                    made += 1
+
+            # 4. A human call task + its alert — the escalation path when the
+            # automated ladder has run out of rungs.
+            await raise_call_task(
+                session, account_id=account.id, account_ref=account.account_ref,
+                detail={
+                    "reason": "final rung reached with no promise",
+                    "open_invoices": len(invoices),
+                },
+            )
+            made += 1
+            await session.commit()
+
+        # 5. The consolidated ladder contact itself — ONE message per account
+        # per rung, carrying every open invoice. Run at a fixed Tuesday
+        # 10:30 IST because chase_due_accounts defers outside Mon-Fri
+        # 09:30-18:30 IST, so a demo seeded at any other hour would produce
+        # nothing and look broken.
+        async with sm() as session:
+            window = datetime(2026, 9, 1, 5, 0, tzinfo=UTC)  # 10:30 IST, a Tuesday
+            await session.execute(
+                sa.update(RecoveryCase)
+                .where(
+                    RecoveryCase.account_id == account.id,
+                    RecoveryCase.risk_type == "invoice_overdue",
+                    RecoveryCase.state == "open",
+                )
+                .values(next_action_at=window - timedelta(hours=1))
+            )
+            await session.commit()
+            made += await chase_due_accounts(session, now=window)
+            await session.commit()
+    finally:
+        await engine.dispose()
+    return made
+
+
+def _seed_receivables(async_url: str) -> int:
+    """Sync wrapper — this script is otherwise synchronous."""
+    try:
+        return asyncio.run(_seed_receivables_async(async_url))
+    except Exception as exc:  # pragma: no cover - demo convenience
+        print(f"  (receivables seed skipped: {exc})")
+        return 0
+
+
 def _statement_urls(url: str) -> list[tuple[str, str, int]]:
     """(display name, statement URL, open invoice count) per AR account that
     actually has open invoices — the accounts whose statement page is worth
@@ -367,6 +520,10 @@ def _statement_urls(url: str) -> list[tuple[str, str, int]]:
                 RecoveryCase.state == "open",
             )
             .group_by(ArAccount.id, ArAccount.display_name, ArAccount.account_ref)
+            # Most invoices first: a statement with four rows, a part-payment
+            # and a disputed line shows what the page is FOR; one with a
+            # single row shows almost nothing.
+            .order_by(sa.func.count(RecoveryCase.id).desc())
         ).all()
     engine.dispose()
     out = []
@@ -403,6 +560,7 @@ def main() -> int:
         # an ArAccount, and without one the page renders empty.
         seeded += _seed_b2b_account(settings.database_url_sync)
         seeded += _seed_voice_call(settings.database_url_sync)
+        seeded += _seed_receivables(settings.database_url)
         print(f"Inserted {seeded} preview row(s).\n" if seeded
               else "Every surface already has data.\n")
 
@@ -516,11 +674,16 @@ def main() -> int:
         print("  the merchant's side — the same data, for whoever is chasing it")
         for path, blurb in (
             ("/console/login", "sign in first; everything below redirects here"),
-            ("/console/live", "ladder, promises, disputes, aging"),
-            ("/console/pipeline", "where money leaves, and what the gateway blamed"),
+            ("/console/live",
+             "the B2B half: ladder rung per account, promises, disputes, "
+             "instalment plans, aging, voice, merchant alerts"),
+            ("/console/pipeline",
+             "payment degradation — where money leaves, what the gateway "
+             "blamed, and now what each failure class recovers once chased"),
             ("/console/routing", "which bank on which rail — the switch_rail evidence"),
             ("/console/cases", "every case, filterable by state"),
-            ("/console/ops", "is the machinery running"),
+            ("/console/ops", "is the machinery running — sweeps, heartbeat, what fires next"),
+            ("/console/evidence", "the audit trail behind a recovered rupee"),
         ):
             print(f"  {base}{path}")
             print(f"      {blurb}")
