@@ -60,6 +60,8 @@ from src.models import (
     RetryAttempt,
     VoiceCallQueue,
 )
+from src.receivables.models import ArAccount, CaseDispute
+from src.receivables.plans import MAX_INSTALMENTS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -122,6 +124,25 @@ def _format_expiry(expires_at: datetime, lang: str) -> str:
 def _format_promise_due(due_at: datetime) -> str:
     """'28 Aug' in IST — honest short format for the promise line."""
     return _ist(due_at).strftime("%d %b")
+
+
+def _aging(due_at: datetime | None) -> tuple[str | None, int | None]:
+    """
+    ('04 Sep 2026', days-overdue-or-None) for an invoice's due date.
+
+    The ladder and the merchant console have both computed days-past-due
+    since the receivables layer landed; the customer looking at the invoice
+    was the only one who could not see it. Days overdue is None before the
+    date passes — a not-yet-due invoice must never render "0 days overdue"
+    or, worse, a negative one dressed up as urgency.
+    """
+    if due_at is None:
+        return None, None
+    due = _ist(_aware(due_at))
+    # Both sides in IST: the reader is in India, and comparing a UTC "today"
+    # against an IST due date flips the answer for five and a half hours a day.
+    overdue = (_ist(datetime.now(UTC)).date() - due.date()).days
+    return due.strftime("%d %b %Y"), (overdue if overdue > 0 else None)
 
 # ── Rate limiting ───────────────────────────────────────────────────────────
 # This is the one public, unauthenticated surface in the product (the token in
@@ -467,6 +488,10 @@ async def recovery_page(
                 if a.executed_at is not None
             ]
 
+    due_when, days_overdue = (
+        _aging(case.due_at) if case.risk_type == "invoice_overdue" else (None, None)
+    )
+
     state = _view_state(
         case, attempt, detail.retryable,
         failed_at=anchor, window_hours=window_hours,
@@ -590,6 +615,10 @@ async def recovery_page(
             "recommended_rail": recommended_rail,
             "auto_refresh": auto_refresh,
             "token": token,
+            # The shared shell's self-links (language toggle, the confirming
+            # page's one re-check). Supplied by the route, never read off the
+            # request — see base.html for why.
+            "page_path": f"/recover/{token}",
             "has_link": live_link is not None,
             "hero_key": hero_key,
             "is_payment": is_payment,
@@ -601,6 +630,14 @@ async def recovery_page(
             "promise_due_when": promise_due_when,
             "promise_days_left": promise_days_left,
             "last_promise_broken": broken_promise is not None,
+            # Invoices only: every other risk type either has no due date or
+            # has one identical to "when it failed", already in the register.
+            "due_when": due_when,
+            "days_overdue": days_overdue,
+            # The server's own cap, not a number typed into the template —
+            # the form promised "2-6" and shipped 2 for exactly as long as
+            # those were two independent facts.
+            "max_instalments": MAX_INSTALMENTS,
             "promise_min_date": (datetime.now(UTC) + timedelta(days=1))
                 .astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
             "promise_max_date": (datetime.now(UTC) + timedelta(
@@ -1155,4 +1192,129 @@ async def _start_payment_from_case(
 
     return await _self_serve_mint(
         session, case, token, context, recommended, execute
+    )
+
+
+# ── The account statement: every open invoice for one buyer ──────────────
+#
+# A buyer with four overdue invoices has had ONE consolidated message per
+# ladder rung since the receivables layer landed — and every link in it
+# still resolved to one carrier invoice's isolated page. There was nowhere
+# they could see what they actually owe. src/receivables/statement.py's own
+# SMS copy has promised "the account statement page" the whole time, and
+# scheduler.py passed statement_link="" because the page did not exist.
+#
+# DESIGN RULE: this page SHOWS and LINKS. It processes no payment, no
+# dispute, no plan. Every action deep-links to that invoice's own
+# /recover/{token} page, which is the tested money path. A second surface
+# with its own pay handling would be a second thing to get wrong on the one
+# path where being wrong means double-charging someone.
+
+
+@router.get("/statement/{token}", response_class=HTMLResponse)
+async def statement_page(
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
+) -> Any:
+    """Show one buyer every invoice they have open, and where to pay each."""
+    _check_rate_limit(request, kind="page", limit=_PAGE_LIMIT)
+
+    settings = get_settings()
+    lang = pick(request.query_params.get("lang"), request.headers.get("accept-language"))
+    t = Translator(lang)
+
+    account_id = recovery_link.verify_account(token)
+    if account_id is None:
+        # Same single response as /recover for expired, forged, wrong-scope
+        # and unknown alike — see recovery_page() for why they must not be
+        # distinguishable.
+        return templates.TemplateResponse(
+            request, "expired.html",
+            {"t": t, "lang": lang, "merchant_name": settings.merchant_name},
+            status_code=404,
+        )
+
+    account = await session.get(ArAccount, account_id)
+    if account is None:
+        return templates.TemplateResponse(
+            request, "expired.html",
+            {"t": t, "lang": lang, "merchant_name": settings.merchant_name},
+            status_code=404,
+        )
+
+    cases = (
+        (
+            await session.execute(
+                select(RecoveryCase)
+                .where(
+                    RecoveryCase.account_id == account_id,
+                    RecoveryCase.risk_type == "invoice_overdue",
+                    RecoveryCase.state == "open",
+                )
+                .order_by(RecoveryCase.due_at, RecoveryCase.opened_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # One query for every open dispute on this account, not one per invoice:
+    # a buyer disputing three of eight invoices should cost three fewer round
+    # trips than the loop would. A disputed invoice still appears — hiding it
+    # would make the total unexplainable — but says so, the same fact the
+    # console's disputed table and the ladder's chase exclusion both act on.
+    disputed_ids = set(
+        (
+            await session.execute(
+                select(CaseDispute.case_id).where(
+                    CaseDispute.case_id.in_([c.id for c in cases]),
+                    CaseDispute.status == "open",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    ) if cases else set()
+
+    invoices = []
+    outstanding = 0
+    for case in cases:
+        owed = max(0, case.amount_at_risk - case.amount_recovered)
+        outstanding += owed
+        due_when, days_overdue = _aging(case.due_at)
+        # Each row's link is that invoice's OWN case token, minted the same
+        # way its per-case nudge mints one. The statement grants no authority
+        # of its own over any invoice — it hands out the same credential the
+        # SMS for that invoice would have carried.
+        case_token = recovery_link.mint(case.id)
+        invoices.append({
+            "ref": case.subject_ref,
+            "amount": _money(owed),
+            "part_paid": _money(case.amount_recovered) if case.amount_recovered else None,
+            "due_when": due_when,
+            "days_overdue": days_overdue,
+            "disputed": case.id in disputed_ids,
+            "link": f"/recover/{case_token}" if case_token else None,
+        })
+
+    return templates.TemplateResponse(
+        request, "statement.html",
+        {
+            "t": t,
+            "lang": lang,
+            "merchant_name": settings.merchant_name,
+            "account_name": account.display_name or account.account_ref,
+            "invoices": invoices,
+            "outstanding": _money(outstanding),
+            "page_path": f"/statement/{token}",
+            "whatsapp": settings.support_whatsapp or None,
+            # The opt-out form posts to the OLDEST open invoice's own case
+            # route. Not a shortcut: cases.record_opt_out withdraws consent
+            # for the customer and closes every open case of theirs, so
+            # opting out from one invoice already opts out of the account.
+            # Minting an account-scoped write endpoint to reach the same
+            # outcome would be new attack surface for no new behaviour.
+            "optout_token": (
+                recovery_link.mint(cases[0].id) if cases else None
+            ),
+        },
     )

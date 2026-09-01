@@ -541,7 +541,13 @@ def test_page_rate_limit_stops_token_guessing(
         page_client.get(f"/recover/garbage{i}").status_code for i in range(8)
     ]
     assert 429 in codes, "unlimited token probing is free"
-    assert all(c in (200, 429) for c in codes)
+    # 404 is what a garbage token gets before the limiter trips — the same
+    # single response every invalid token gets. 200 was in this list because
+    # the limiter's process-global bucket used to arrive here already full
+    # from earlier tests, so every probe 429'd and the un-throttled code was
+    # never actually observed. It is a throttle or an honest refusal, never
+    # a crash and never a page.
+    assert all(c in (404, 429) for c in codes)
 
 
 # ══════════════════════════════════════════════════════════════════════════

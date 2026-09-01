@@ -140,6 +140,87 @@ def verify_with_expiry(token: str) -> tuple[uuid.UUID, datetime] | None:
         return None
 
 
+# ── Account scope: the same scheme, one field wider ──────────────────────
+#
+# A statement page shows every open invoice on ONE buyer account, so its
+# token names an account, not a case. Minting that as a bare id would make
+# the two tokens indistinguishable — verify() would happily read an account
+# id as a case id and serve the wrong page, which is scope confusion, not a
+# typo.
+#
+# So an account payload carries an explicit scope marker and is one field
+# longer: "acct.<hex>.<expiry>" against a case's "<hex>.<expiry>". Both
+# verifiers pin the exact field count, so each rejects the other's tokens
+# without either needing to know the other exists. Same secret, same
+# signature, same fail-closed-on-no-secret rule — nothing new to get wrong.
+ACCOUNT_SCOPE = "acct"
+
+
+def mint_account(account_id: uuid.UUID, *, ttl_hours: int | None = None) -> str | None:
+    """A token for one AR account's statement page, or None if unconfigured."""
+    settings = get_settings()
+    secret = reveal(settings.recovery_link_secret)
+    if not secret:
+        return None
+    # Same consent-window cap as a case token: the statement page links into
+    # per-case pages the engine may no longer act on, and a statement that
+    # outlived that authority would keep offering them.
+    ttl_hours = min(
+        ttl_hours if ttl_hours is not None else settings.recovery_link_ttl_hours,
+        settings.consent_window_hours,
+    )
+    payload = (
+        f"{ACCOUNT_SCOPE}{SEP}{account_id.hex}{SEP}{int(time.time()) + ttl_hours * 3600}"
+    )
+    return f"{b64(payload.encode())}{SEP}{sign(payload, secret)}"
+
+
+def verify_account(token: str) -> uuid.UUID | None:
+    """
+    The account this token names, or None if forged, expired, malformed, or
+    scoped to something else. One return value for every failure, same
+    reasoning as verify().
+    """
+    secret = reveal(get_settings().recovery_link_secret)
+    if not secret or not token or token.count(SEP) != 1:
+        return None
+
+    encoded, signature = token.split(SEP)
+    try:
+        payload = unb64(encoded).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+    if not hmac.compare_digest(
+        sign(payload, secret).encode("ascii"), signature.encode("utf-8", "replace")
+    ):
+        return None
+
+    parts = payload.split(SEP)
+    if len(parts) != 3 or parts[0] != ACCOUNT_SCOPE:
+        return None
+    _, account_hex, expiry = parts
+    try:
+        if int(expiry) < int(time.time()):
+            return None
+    except ValueError:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{32}", account_hex):
+        return None
+    return uuid.UUID(hex=account_hex)
+
+
+def url_for_account(account_id: uuid.UUID) -> str | None:
+    """The absolute statement link to put in a consolidated message."""
+    token = mint_account(account_id)
+    if token is None:
+        return None
+    base = get_settings().public_base_url.rstrip("/")
+    if not base:
+        return None
+    return f"{base}/statement/{token}"
+
+
 def url_for(case_id: uuid.UUID) -> str | None:
     """The absolute link to put in a message, or None if unconfigured."""
     token = mint(case_id)

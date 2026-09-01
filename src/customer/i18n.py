@@ -96,6 +96,11 @@ CATALOGS: dict[str, dict[str, str]] = {
         # register labels
         "register_attempted": "Attempted",
         "register_opened": "Opened",
+        # Invoice aging — computed from the case's own due_at, the same
+        # figure the ladder escalates on. Never rendered before the date
+        # passes: there is no honest "0 days overdue".
+        "register_due": "Due",
+        "days_overdue": "{days} days overdue",
         # actions
         "pay_securely": "Pay {amount} securely",
         "pay_upi": "Pay {amount} by UPI",
@@ -129,6 +134,11 @@ CATALOGS: dict[str, dict[str, str]] = {
         "help_whatsapp": "Talk to us on WhatsApp",
         "help_footer": "Trouble with this payment? Reply to the message we sent you and quote",
         "opt_out": "Don't contact me about this payment",
+        # The statement page stops contact about the whole account — the
+        # underlying opt-out always did (record_opt_out closes every open
+        # case for the customer), so the per-payment wording understated it
+        # wherever the reader is looking at more than one invoice.
+        "opt_out_account": "Don't contact me about this account",
         "opt_out_done": "We've stopped contacting you",
         # language names, shown in the toggle
         "lang_name": "English",
@@ -180,6 +190,8 @@ CATALOGS: dict[str, dict[str, str]] = {
         "sequence_call_made": "हमने आपको {when} को कॉल किया था।",
         "register_attempted": "कोशिश की गई",
         "register_opened": "खोला गया",
+        "register_due": "देय तिथि",
+        "days_overdue": "{days} दिन बीत चुके हैं",
         "pay_securely": "{amount} सुरक्षित रूप से भुगतान करें",
         "pay_upi": "{amount} UPI से भुगतान करें",
         "pay_opening": "Razorpay खुल रहा है…",
@@ -200,6 +212,7 @@ CATALOGS: dict[str, dict[str, str]] = {
         "help_whatsapp": "WhatsApp पर हमसे बात करें",
         "help_footer": "भुगतान में दिक्कत है? हमारे भेजे संदेश का जवाब दें और यह हवाला दें",
         "opt_out": "इस भुगतान के बारे में मुझे संपर्क न करें",
+        "opt_out_account": "इस खाते के बारे में मुझे संपर्क न करें",
         "opt_out_done": "हमने आपसे संपर्क करना बंद कर दिया है",
         "lang_name": "हिंदी",
     },

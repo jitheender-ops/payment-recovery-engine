@@ -356,20 +356,54 @@
       resumes the follow-ups.</p>
     <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -- capability-token auth: the path secret IS the authority (see routes.py) -->
     <form method="post" action="/recover/{{ token }}/plan" class="promise-form" style="flex-direction:column;gap:.4rem">
-      <label class="small quiet" style="margin:0">Instalment 1
-        <input type="date" name="instalment_1_date" min="{{ promise_min_date }}" required
-               aria-label="Instalment 1 date">
-        <input type="number" name="instalment_1_amount" min="1" step="0.01" required
-               placeholder="Amount (₹)" aria-label="Instalment 1 amount">
+      {# Rows 3-6 exist in the markup but start hidden and un-required. The
+         form advertised "2-6 instalments" and hardcoded exactly two, so
+         nobody could ever request three. Hidden rows submit empty and the
+         server skips an empty pair, so with JS off this is the same
+         two-instalment form it has always been — the extra rows are an
+         enhancement, never a requirement. #}
+      {% for i in range(1, max_instalments + 1) %}
+      <label class="small quiet plan-row" style="margin:0"
+             {% if i > 2 %}hidden{% endif %}>Instalment {{ i }}
+        <input type="date" name="instalment_{{ i }}_date" min="{{ promise_min_date }}"
+               {% if i <= 2 %}required{% endif %}
+               aria-label="Instalment {{ i }} date">
+        <input type="number" name="instalment_{{ i }}_amount" min="1" step="0.01"
+               {% if i <= 2 %}required{% endif %}
+               placeholder="Amount (₹)" aria-label="Instalment {{ i }} amount">
       </label>
-      <label class="small quiet" style="margin:0">Instalment 2
-        <input type="date" name="instalment_2_date" min="{{ promise_min_date }}" required
-               aria-label="Instalment 2 date">
-        <input type="number" name="instalment_2_amount" min="1" step="0.01" required
-               placeholder="Amount (₹)" aria-label="Instalment 2 amount">
-      </label>
+      {% endfor %}
+      <button class="btn btn-quiet" type="button" id="addinst" hidden>Add another instalment</button>
       <button class="btn btn-quiet" type="submit">Request this plan</button>
     </form>
+    <script>
+      // Progressive enhancement: reveal one more row per click, up to the
+      // server's own cap. The button itself is hidden in markup and unhidden
+      // here, so a JS-off reader never sees a control that does nothing.
+      (function () {
+        var add = document.getElementById('addinst');
+        if (!add) return;
+        var rows = Array.prototype.slice.call(
+          document.querySelectorAll('.plan-row'));
+        add.hidden = false;
+        add.addEventListener('click', function () {
+          for (var i = 0; i < rows.length; i++) {
+            if (!rows[i].hidden) continue;
+            rows[i].hidden = false;
+            var f = rows[i].querySelectorAll('input');
+            // Required only once visible: a hidden required input blocks
+            // submission with an error the reader cannot see or reach.
+            for (var j = 0; j < f.length; j++) f[j].required = true;
+            break;
+          }
+          // The cap is the server's (MAX_INSTALMENTS); this only stops the
+          // reader from asking for a row the server would refuse anyway.
+          if (!rows.filter(function (r) { return r.hidden; }).length) {
+            add.hidden = true;
+          }
+        });
+      })();
+    </script>
   </details>
   {% endif %}
   {% if expires_line %}
@@ -387,6 +421,13 @@
   <div><dt>Reference</dt><dd>{{ order_ref }}</dd></div>
   {% if method %}<div><dt>Method</dt><dd>{{ method }}{% if bank %} · {{ bank }}{% endif %}</dd></div>{% endif %}
   {% if failed_at %}<div><dt>{{ t('register_attempted') if is_payment else t('register_opened') }}</dt><dd>{{ failed_at.strftime("%d %b %Y, %H:%M") }}</dd></div>{% endif %}
+  {% if due_when %}
+  {# Invoices only. The ladder and the console have escalated on days-past-due
+     since the receivables layer landed; the person being chased for it was
+     the only one who could not see it. Server-computed, and silent until the
+     date actually passes — same honest-deadline rule as expires_line. #}
+  <div><dt>{{ t('register_due') }}</dt><dd>{{ due_when }}{% if days_overdue %} · {{ t('days_overdue', days=days_overdue) }}{% endif %}</dd></div>
+  {% endif %}
 </dl>
 {% if state == "payable" %}
 <details>

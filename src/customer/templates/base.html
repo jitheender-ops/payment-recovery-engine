@@ -27,7 +27,7 @@
 <meta name="color-scheme" content="light dark">
 {% if auto_refresh %}{# One self-recheck for a confirming payment, then honest
    silence — a spinner that can spin for a minute is a broken promise. #}
-<meta http-equiv="refresh" content="8; url=/recover/{{ token }}?r=1">
+<meta http-equiv="refresh" content="8; url={{ page_path }}?r=1">
 {% endif %}
 <title>{% block title %}Your payment{% endblock %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -291,8 +291,17 @@
 <div class="masthead">
   {% if merchant_name %}<span class="who">{{ merchant_name }}</span><span>·</span>{% endif %}
   <span>{{ t('masthead') if t else 'Payment recovery' }}</span>
-  {% if t %}
-  <span class="langtoggle"><a href="/recover/{{ token }}?lang={{ t.other[0] }}" hreflang="{{ t.other[0] }}" rel="nofollow">{{ t.other[1] }}</a></span>
+  {% if t and page_path %}
+  {# page_path, not a hardcoded /recover/{{ token }}: this shell is shared and
+     the statement page has no case token — the old form rendered a dead
+     "/recover/?lang=hi" there. NOT request.url.path either: the error page
+     is served for whatever a probe typed, and echoing that back would make
+     two failed lookups render differently, which is the oracle
+     test_garbage_tokens_all_fail_identically exists to prevent. A route that
+     verified a token supplies its own path; the error page supplies none and
+     drops the toggle, which was inert there anyway — expired.html carries no
+     translated string. #}
+  <span class="langtoggle"><a href="{{ page_path }}?lang={{ t.other[0] }}" hreflang="{{ t.other[0] }}" rel="nofollow">{{ t.other[1] }}</a></span>
   {% endif %}
 </div>
 <main>{% block content %}{% endblock %}</main>

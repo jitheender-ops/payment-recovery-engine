@@ -1052,6 +1052,7 @@ async def chase_due_accounts(
     # the top): it is the one name here that is a wall-clock RULE rather than a
     # helper, and a function-local import gives tests no seam to hold it open
     # without rewiring next_b2b_window() for everyone else.
+    from src import recovery_link
     from src.receivables.ladder import (
         next_b2b_window,
         next_stage_gap_hours,
@@ -1189,11 +1190,14 @@ async def chase_due_accounts(
             statement_cases,
             tone=stage.tone,
             merchant_name=get_settings().merchant_name or "the merchant",
-            # The customer-facing link is the carrier case's recovery page,
-            # minted by the per-case chase this tick. The statement page for
-            # whole accounts is the named upgrade (docs/receivables-
-            # integration-plan.md); an empty link renders a plain reminder.
-            statement_link="",
+            # The account statement page: every open invoice on this
+            # account in one place, each row deep-linking to its own
+            # recovery page. This message consolidates several invoices, so
+            # a single-invoice link was always the wrong destination for it.
+            # Still degrades to a plain reminder when link minting is
+            # unconfigured (no secret, no public base URL) — the compose
+            # layer already handles an empty link.
+            statement_link=recovery_link.url_for_account(account_id) or "",
             now=now,
         )
         session.add(

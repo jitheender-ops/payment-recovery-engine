@@ -74,6 +74,25 @@ class RealTimingRules(NamedTuple):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_rate_limit_buckets() -> Any:
+    """
+    The customer page's rate limiter is a process-global dict, deliberately
+    (one uvicorn worker, no Redis). Under pytest that makes it shared state
+    between tests: page views spent by one test count against the next one's
+    budget, so adding a test that GETs the page a dozen times could tip an
+    unrelated test into a 429 — a failure with nothing to do with the code
+    it was testing. Individual tests used to clear it by hand, which only
+    protects the tests that remember to. Clearing before every test is the
+    isolation the limiter's design gives up on purpose in production.
+    """
+    from src.customer import routes as customer_routes
+
+    customer_routes._RATE_LIMIT_BUCKETS.clear()
+    yield
+    customer_routes._RATE_LIMIT_BUCKETS.clear()
+
+
+@pytest.fixture(autouse=True)
 def chaseable_clock(monkeypatch: Any) -> RealTimingRules:
     """
     Hold chase_case's two wall-clock gates open for every test.

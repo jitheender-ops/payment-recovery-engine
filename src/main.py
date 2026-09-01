@@ -187,11 +187,15 @@ if not _docs_public:
 # opt-out buttons, and nothing stopped a shared browser or an intermediate
 # cache keeping a copy of a page reached by a token. base.html already sets
 # `referrer: no-referrer` and `noindex` in markup; these are the two that only
-# a header can say. Scoped to /recover so the API surface is untouched.
+# a header can say. Scoped to /recover and /statement so the API surface is
+# untouched.
 @app.middleware("http")
 async def _recovery_page_headers(request: Request, call_next: Any) -> Response:
     response: Response = await call_next(request)
-    if request.url.path.startswith("/recover"):
+    # /statement carries the same properties as /recover — a capability token
+    # in the URL, a money page a stranger can reach — so it needs the same
+    # four headers. One tuple, not a second copy of the block.
+    if request.url.path.startswith(("/recover", "/statement")):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         response.headers["Cache-Control"] = "no-store, private"

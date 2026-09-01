@@ -1,0 +1,100 @@
+{#
+  The account statement: every open invoice for one buyer, in one place.
+
+  src/receivables/statement.py's SMS copy has promised this page since the
+  receivables layer landed — "Statement: {link}" — and scheduler.py sent an
+  empty link because it did not exist. A buyer with four overdue invoices
+  got one consolidated message whose every link resolved to one invoice's
+  isolated page.
+
+  Same passbook/register language as /recover, with no adaptation needed:
+  this literally IS a statement of account, which is what that visual
+  vocabulary was borrowed from in the first place.
+
+  It shows and links, and does nothing else. No pay button, no dispute form,
+  no plan form — each row deep-links to that invoice's own recovery page,
+  which is the tested money path. See routes.py::statement_page.
+#}
+{% extends "base.html" %}
+{% block title %}Your account with {{ merchant_name or 'us' }}{% endblock %}
+{% block content %}
+
+{% if merchant_name %}
+<div class="hero">
+  <p class="to">Your account with <strong>{{ merchant_name }}</strong></p>
+  <p class="sub">{{ account_name }}</p>
+</div>
+{% endif %}
+
+{# The one figure the buyer opened this for. Part-payments are already
+   subtracted per invoice, so this is what is actually still owed — never
+   the gross billed, which would overstate the ask. #}
+<p class="amount{% if outstanding|length > 9 %} amount-long{% endif %}">{{ outstanding }}</p>
+<p class="quiet small" style="margin:calc(-1 * var(--sp-3)) 0 0">
+  {% if invoices %}Open across {{ invoices|length }} invoice{{ '' if invoices|length == 1 else 's' }}.
+  {% else %}Nothing is open on this account right now.{% endif %}
+</p>
+
+{% if invoices %}
+<div class="sec"><h2>Open invoices</h2></div>
+<dl class="register">
+  {% for inv in invoices %}
+  <div>
+    <dt>
+      <span class="mono">{{ inv.ref }}</span>
+      {% if inv.due_when %}
+      <span class="quiet small" style="display:block">
+        Due {{ inv.due_when }}{% if inv.days_overdue %} · {{ inv.days_overdue }} days overdue{% endif %}
+      </span>
+      {% endif %}
+      {% if inv.disputed %}
+      {# Shown, not hidden: an invoice missing from the list would make the
+         total above unexplainable. Reminders on it are paused until the
+         team answers — the same fact the ladder acts on when it excludes a
+         disputed case from the chase. #}
+      <span class="quiet small" style="display:block">Under review — reminders paused</span>
+      {% endif %}
+    </dt>
+    <dd>
+      {{ inv.amount }}
+      {% if inv.part_paid %}
+      <span class="quiet small" style="display:block; font-family:var(--body)">
+        {{ inv.part_paid }} already paid</span>
+      {% endif %}
+      {% if inv.link %}
+      <span class="small" style="display:block">
+        <a href="{{ inv.link }}">View &amp; pay this invoice</a></span>
+      {% endif %}
+    </dd>
+  </div>
+  {% endfor %}
+</dl>
+<p class="quiet small" style="margin-top:var(--sp-3)">
+  Each invoice opens its own page, where you can pay it, tell us something is
+  wrong with it, or ask to pay it in parts. Nothing is charged from this page.
+</p>
+{% endif %}
+
+<div class="sec"><h2>{{ t('sec_help') }}</h2></div>
+{% if whatsapp %}
+<div class="helprow">
+  <a class="btn btn-quiet" href="https://wa.me/{{ whatsapp }}" rel="nofollow noopener" target="_blank">{{ t('help_whatsapp') }}</a>
+</div>
+{% endif %}
+{% if optout_token %}
+<div class="optout">
+  {# Posts to the oldest open invoice's own case route. cases.record_opt_out
+     withdraws consent for the customer and closes every open case of theirs,
+     so this already stops contact about the whole account — minting an
+     account-scoped write endpoint to reach the same outcome would be new
+     attack surface for no new behaviour. See routes.py::statement_page. #}
+  <form method="post" action="/recover/{{ optout_token }}/optout">
+    <button type="submit">{{ t('opt_out_account') }}</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block footer %}
+  Questions about this account? Reply to the message we sent you.
+{% endblock %}

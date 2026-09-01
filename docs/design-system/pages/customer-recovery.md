@@ -196,6 +196,50 @@ It is a `.note` and not part of `detail.next` on purpose: that paragraph
 explains the decline, this is a recommendation about what to do next, and
 folding one into the other blurs which of the two the engine is asserting.
 
+## Sibling surface: the account statement (2026-09-01)
+
+`/statement/{token}` shows one B2B buyer every invoice they have open. It
+inherits this page's rules wholesale — same shell, same passbook register,
+same masthead trust anchor, same opt-out — and needs no adaptation of the
+metaphor, because it literally *is* the statement of account that metaphor
+was borrowed from.
+
+**It shows and links; it does nothing else.** No pay button, no dispute
+form, no plan form. Each row deep-links to that invoice's own
+`/recover/{token}` page, minted with that case's own token. Two reasons,
+both about the money path: a second surface with its own pay handling is a
+second place to get double-charging wrong, and the statement then grants no
+authority it did not already have — it hands out exactly the credential
+that invoice's own SMS would have carried.
+
+Rules that hold on it:
+
+- **Every figure is what is still owed.** Part-payments are subtracted per
+  invoice before the total, and the amount already paid is shown next to
+  the row. Neither hiding a payment nor billing the gross.
+- **A disputed invoice is listed and labelled, never dropped.** Removing it
+  would make the total above unexplainable. "Under review — reminders
+  paused" is the same fact the ladder acts on when it excludes a disputed
+  case from the chase.
+- **Aging is computed, never dramatised.** Days overdue appears once the
+  date has actually passed, in IST on both sides of the subtraction. Before
+  then only the due date shows — there is no honest "0 days overdue".
+- **The opt-out is real, and account-wide.** It posts to the oldest open
+  invoice's own case route: `cases.record_opt_out` withdraws consent for
+  the customer and closes every open case of theirs, so that already stops
+  contact about the whole account. An account-scoped write endpoint would
+  be new attack surface for identical behaviour.
+
+The same aging line was added to the single-invoice register for
+`invoice_overdue` cases, under the same rule.
+
+**Token scope.** The statement token is account-scoped and carries an
+explicit `acct` marker, one field wider than a case token. Both verifiers
+pin their exact field count, so each rejects the other's tokens — an
+account id read as a case id would serve the wrong page under a valid
+signature, which is scope confusion, not a typo. Same secret, same expiry
+cap, same fail-closed-without-a-secret rule, same four security headers.
+
 ## Constraints inherited from the master prompt
 
 - Never display success from a client signal. `recovered` comes from the
