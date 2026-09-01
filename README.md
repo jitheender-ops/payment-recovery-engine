@@ -259,8 +259,11 @@ This is the first question a fintech panel will ask. Here's the answer:
 ./run.sh --demo
 ```
 
-That is the whole thing. No `.env`, no Razorpay account, no Postgres, no
-tunnel. It runs the same verification the normal path does, then starts the
+Then open **one page — `http://127.0.0.1:8000/demo`**. Every capability, the
+B2B account statements, the merchant console and the analytics dashboard are
+all linked from it.
+
+No `.env`, no Razorpay account, no Postgres, no tunnel. It runs the same verification the normal path does, then starts the
 engine against a SQLite file with the payment gateway replaced by a local
 fake (`src/demo.py`), seeds a few dozen realistic cases, and prints every URL
 worth opening — one per customer-page state, the B2B account statement, and

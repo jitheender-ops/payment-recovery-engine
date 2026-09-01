@@ -459,20 +459,22 @@ fi
 if $DEMO; then
   cat <<BANNER
 
-    Console      http://127.0.0.1:$APP_PORT/console/login
-    Password     $DASHBOARD_PASSWORD
+  ────────────────────────────────────────────────────────────────
+   OPEN THIS ONE PAGE — everything is on it:
 
-  Every customer-facing URL worth opening, below. The tokens ARE the
-  credential, so these are the real links a customer would receive.
+       http://127.0.0.1:$APP_PORT/demo
+
+   Every capability, the B2B statements, the merchant console
+   (password $DASHBOARD_PASSWORD) and the analytics dashboard,
+   all linked from there.
+  ────────────────────────────────────────────────────────────────
+
+  The same links as text, if you would rather copy them:
 BANNER
   # The link printer derives each page's state by calling routes._view_state
   # itself, so these labels cannot drift from what the page actually renders.
   "$VPY" scripts/recovery_links.py || warn "could not print links"
   cat <<'BANNER'
-
-  Try the whole loop: open a PAYABLE link, press Pay, then pay on the demo
-  checkout. The page should come back reading "recovered" with a receipt,
-  and the console's recovered figure should move.
 
   Re-seed from scratch:  rm .demo.sqlite3 .demo.seeded && ./run.sh --demo
   Ctrl-C stops everything.

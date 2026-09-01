@@ -39,15 +39,19 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import uuid
+from html import escape
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings, reveal
+from src.database import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,94 @@ def captured_payload(
         "payload": {"payment": {"entity": entity}},
         "created_at": int(time.time()),
     }
+
+
+# ── The feature catalogue ────────────────────────────────────────────────
+#
+# Every capability this engine has, and the one case each is visible on.
+#
+# WHY THIS EXISTS: all of it was built and rendering, and still effectively
+# invisible. The link printer grouped by PAGE STATE (payable / confirming /
+# recovered) and printed one link per state, so every feature sat inside
+# "PAYABLE (30 cases)" behind a single link that was usually a plain card
+# decline. A state is what the page is doing; a feature is what you came to
+# look at, and they are not the same index.
+#
+# Each entry is (label, what to look at, SQL picking a case that shows it).
+# The SQL is the honest part: it selects a case genuinely exhibiting the
+# feature, so a missing link means the demo has no such case rather than the
+# feature being broken.
+#
+# Lives HERE rather than in scripts/ because it now has two readers — the
+# /demo hub page below and scripts/recovery_links.py — and two copies of
+# "what this product does" would drift within a week.
+FEATURES: list[tuple[str, str, str]] = [
+    (
+        "Checkout drop-off recovery",
+        "cart contents named back, honest 'nothing was charged' framing",
+        "SELECT id FROM recovery_cases WHERE risk_type='checkout_abandonment' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "Failed-subscription recovery",
+        "renewal copy + the retry-sequence panel (attempts made, one hollow "
+        "'upcoming' row)",
+        "SELECT id FROM recovery_cases WHERE risk_type='subscription_failure' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "Mandate retry sequencer",
+        "same panel on the RBI e-mandate path — the upcoming row states WHEN, "
+        "never WHAT",
+        "SELECT id FROM recovery_cases WHERE risk_type='mandate_failure' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "B2B receivables chaser",
+        "invoice copy, due date and computed days-overdue in the register",
+        "SELECT id FROM recovery_cases WHERE risk_type='invoice_overdue' "
+        "AND state='open' LIMIT 1",
+    ),
+    (
+        "Payment degradation → root cause → action",
+        "the decline explained in the customer's words, plus the rail "
+        "recommendation named out loud above the CTA",
+        "SELECT rc.id FROM recovery_cases rc "
+        "JOIN payment_failures pf ON pf.payment_id = rc.subject_ref "
+        "WHERE rc.state='open' AND pf.method <> 'upi' AND pf.failure_class IN "
+        "('3ds_dropoff','card_limit_exceeded','issuer_decline',"
+        "'insufficient_funds','invalid_card','expired_instrument') LIMIT 1",
+    ),
+    (
+        "Promise-to-pay tracker",
+        "'You said you'd pay by {date}. N days left.' — persistent, not a flash",
+        "SELECT rc.id FROM recovery_cases rc "
+        "JOIN promises_to_pay p ON p.recovery_case_id = rc.id "
+        "WHERE p.status='pending' AND rc.state='open' LIMIT 1",
+    ),
+    (
+        "Dispute → chase freeze",
+        "raised through open_dispute(): the invoice reads 'under review — "
+        "reminders paused' on the statement, and the console lists it",
+        "SELECT case_id FROM case_disputes WHERE status='open' LIMIT 1",
+    ),
+    (
+        "Instalment plan (4 of a possible 6)",
+        "the form shipped 2 hardcoded rows until this session — open the "
+        "'pay in parts' box to see all six reachable",
+        "SELECT case_id FROM payment_plans LIMIT 1",
+    ),
+    (
+        "Hinglish voice recovery",
+        "'We called you on {date}' in the timeline; add ?lang=hi for the "
+        "Hindi page",
+        "SELECT rc.id FROM recovery_cases rc "
+        "JOIN voice_call_queue v ON v.recovery_case_id = rc.id "
+        "WHERE v.state='done' LIMIT 1",
+    ),
+]
+
+
 
 
 class DemoBadRequestError(Exception):
@@ -306,3 +398,192 @@ async def demo_pay(link_id: str, request: Request) -> HTMLResponse:
         "the recovery page: it should now read <strong>recovered</strong> with "
         "a receipt, and the dashboard's recovered figure should have moved.</p>",
     )
+
+
+# ── The hub ──────────────────────────────────────────────────────────────
+#
+# One page holding every surface this engine has. It exists because the
+# alternative was what the demo shipped with: nine capability links printed
+# to a terminal, a password-gated console on one port, a Streamlit app on
+# another, and a statement page per B2B account. Each of those is correct on
+# its own and the set of them is not a dashboard — you cannot see the
+# product from any one of them.
+#
+# It is a DEMO surface, not a product one, and it is mounted only in demo
+# mode. It deliberately hands out live customer tokens, which is exactly
+# what must never happen on a real merchant console: those tokens are bearer
+# credentials for one customer's own page. Here every case is synthetic.
+
+
+async def _resolve_features(session: Any) -> list[dict[str, Any]]:
+    """Turn the FEATURES catalogue into openable links against this database."""
+    from sqlalchemy import text
+
+    from src import recovery_link
+
+    out: list[dict[str, Any]] = []
+    for label, blurb, query in FEATURES:
+        try:
+            case_id = (await session.execute(text(query))).scalar()
+        except Exception:
+            # A table this database has not created yet. Report the feature
+            # as unavailable rather than taking the whole page down.
+            case_id = None
+        resolved = _as_uuid(case_id)
+        out.append({
+            "label": label,
+            "blurb": blurb,
+            "url": recovery_link.url_for(resolved) if resolved else None,
+        })
+    return out
+
+
+def _as_uuid(value: Any) -> uuid.UUID | None:
+    """Raw SQL returns a UUID on Postgres and a string on SQLite."""
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+async def _resolve_statements(session: Any) -> list[dict[str, Any]]:
+    """One statement link per AR account that actually has open invoices."""
+    from sqlalchemy import text
+
+    from src import recovery_link
+
+    try:
+        rows = (await session.execute(text("""
+            SELECT a.id, a.display_name, a.account_ref, COUNT(rc.id) AS n
+            FROM ar_accounts a
+            JOIN recovery_cases rc ON rc.account_id = a.id
+            WHERE rc.risk_type = 'invoice_overdue' AND rc.state = 'open'
+            GROUP BY a.id, a.display_name, a.account_ref
+            ORDER BY n DESC
+        """))).all()
+    except Exception:
+        return []
+    out = []
+    for account_id, name, ref, count in rows:
+        resolved = _as_uuid(account_id)
+        url = recovery_link.url_for_account(resolved) if resolved else None
+        if url:
+            out.append({"name": name or ref, "url": url, "count": count})
+    return out
+
+
+_CONSOLE_PAGES = [
+    ("/console/live",
+     "the B2B half — ladder rung per account, promises, disputes, instalment "
+     "plans, aging, voice, merchant alerts"),
+    ("/console/pipeline",
+     "payment degradation — where money leaves, what the gateway blamed, and "
+     "what each failure class recovers once chased"),
+    ("/console/routing", "which bank on which rail — the switch_rail evidence"),
+    ("/console/cases", "every case, filterable by state"),
+    ("/console/ops", "is the machinery running — sweeps, heartbeat, what fires next"),
+    ("/console/evidence", "the audit trail behind a recovered rupee"),
+]
+
+
+@router.get("/demo", response_class=HTMLResponse)
+async def demo_hub(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> HTMLResponse:
+    """Every surface this engine has, on one page."""
+    settings = get_settings()
+    features = await _resolve_features(session)
+    statements = await _resolve_statements(session)
+    base = str(request.base_url).rstrip("/")
+    password = reveal(settings.dashboard_password) or "(unset)"
+    streamlit = f"http://127.0.0.1:{os.environ.get('STREAMLIT_PORT', '8501')}"
+
+    def card(label: str, blurb: str, url: str | None) -> str:
+        if url is None:
+            return (f'<div class="row dim"><div><b>{escape(label)}</b>'
+                    f'<span>{escape(blurb)}</span></div>'
+                    f'<em>no case in this database shows it yet</em></div>')
+        return (f'<a class="row" href="{escape(url)}" target="_blank" rel="noopener">'
+                f'<div><b>{escape(label)}</b><span>{escape(blurb)}</span></div>'
+                f'<em>open &rarr;</em></a>')
+
+    feature_rows = "".join(card(f["label"], f["blurb"], f["url"]) for f in features)
+    statement_rows = "".join(
+        card(s["name"], f"{s['count']} open invoice"
+             f"{'s' if s['count'] != 1 else ''} — totals, aging, per-row pay links",
+             s["url"])
+        for s in statements
+    ) or '<div class="row dim"><div><b>No AR account has open invoices</b>'\
+         '<span>run the seed again</span></div></div>'
+    console_rows = "".join(
+        card(path, blurb, base + path) for path, blurb in _CONSOLE_PAGES
+    )
+
+    return HTMLResponse(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Recovery engine — demo</title>
+<style>
+ :root{{--bg:#0e1013;--card:#16191d;--line:#262b31;--ink:#e8eaed;
+        --dim:#8b939c;--brass:#c9a227;--green:#3fb950}}
+ *{{box-sizing:border-box}}
+ body{{margin:0;background:var(--bg);color:var(--ink);
+   font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}
+ .wrap{{max-width:60rem;margin:0 auto;padding:2.5rem 1.25rem 4rem}}
+ h1{{font-size:1.5rem;margin:0 0 .3rem}}
+ .sub{{color:var(--dim);margin:0 0 .6rem;font-size:.92rem}}
+ .flag{{background:#2a2412;border:1px solid #5c4a12;border-radius:7px;
+   padding:.7rem .9rem;color:#e8d9a0;font-size:.85rem;margin:1.2rem 0 2rem}}
+ h2{{font-size:.72rem;text-transform:uppercase;letter-spacing:.13em;
+   color:var(--dim);margin:2.2rem 0 .7rem;font-weight:600}}
+ .row{{display:flex;gap:1rem;align-items:center;justify-content:space-between;
+   background:var(--card);border:1px solid var(--line);border-radius:8px;
+   padding:.8rem 1rem;margin-bottom:.5rem;text-decoration:none;color:inherit}}
+ a.row:hover{{border-color:var(--brass)}}
+ .row b{{display:block;font-size:.95rem;font-weight:600}}
+ .row span{{display:block;color:var(--dim);font-size:.84rem;margin-top:.15rem}}
+ .row em{{font-style:normal;color:var(--brass);font-size:.82rem;white-space:nowrap}}
+ .dim{{opacity:.55}} .dim em{{color:var(--dim)}}
+ code{{background:#0a0c0e;border:1px solid var(--line);border-radius:4px;
+   padding:.12rem .4rem;font-size:.85rem}}
+ ol{{color:var(--dim);font-size:.9rem;padding-left:1.2rem}}
+ ol b{{color:var(--ink)}}
+</style></head><body><div class="wrap">
+<h1>Payment recovery engine</h1>
+<p class="sub">Every surface, on one page. Links open in a new tab.</p>
+
+<div class="flag"><b>Demo mode.</b> The payment gateway is a local fake and
+no money can move. Every recovered rupee below is fictional. The customer
+links are live capability tokens — that is what a customer receives, and it
+is why a real merchant console would never list them.</div>
+
+<h2>The customer's page, one per capability</h2>
+{feature_rows}
+
+<h2>Account statements &mdash; every open invoice for one B2B buyer</h2>
+{statement_rows}
+
+<h2>Merchant console &mdash; password <code>{escape(password)}</code></h2>
+{console_rows}
+
+<h2>Analytics dashboard</h2>
+<a class="row" href="{escape(streamlit)}" target="_blank" rel="noopener">
+  <div><b>Streamlit &mdash; {escape(streamlit)}</b><span>recovery funnel, bank
+  &times; rail heatmap, chaser effectiveness, promises, receivables, voice,
+  audit</span></div><em>open &rarr;</em></a>
+
+<h2>See the money loop close</h2>
+<ol>
+  <li>Open any <b>customer page</b> above that offers a pay button.</li>
+  <li>Press <b>Pay</b> &mdash; you land on the fake gateway's checkout.</li>
+  <li>Press <b>Pay (pretend)</b>. It sends a genuinely HMAC-signed
+      <code>payment.captured</code> to the real webhook endpoint.</li>
+  <li>Reload the customer page: it reads <b>recovered</b> with a receipt, and
+      the console's recovered figure has moved.</li>
+</ol>
+</div></body></html>""")

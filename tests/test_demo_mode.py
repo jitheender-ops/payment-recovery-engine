@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import Settings, get_settings
 
@@ -193,3 +194,80 @@ def test_the_demo_signature_is_one_the_engine_actually_accepts() -> None:
     body = b'{"event":"payment.captured"}'
     assert verify_webhook_signature(body, sign(body, "s3cret"), "s3cret")
     assert not verify_webhook_signature(body, sign(body, "s3cret"), "different")
+
+
+# ── The hub ──────────────────────────────────────────────────────────────
+
+
+def test_the_feature_catalogue_covers_the_product(_demo_settings: Any) -> None:
+    """
+    The catalogue is the demo's index of what this engine does, so a
+    capability missing from it is invisible however well it works. Pins the
+    ones the product is described by.
+    """
+    from src.demo import FEATURES
+
+    labels = " ".join(label for label, _, _ in FEATURES).lower()
+    for capability in (
+        "checkout drop-off", "subscription", "mandate", "b2b receivables",
+        "degradation", "promise-to-pay", "dispute", "instalment", "voice",
+    ):
+        assert capability in labels, f"{capability} missing from the demo hub"
+
+
+def test_every_catalogue_entry_names_a_case_by_query(_demo_settings: Any) -> None:
+    """Each entry must select a case that genuinely exhibits the feature —
+    a hand-written link would drift the moment the seed changed."""
+    from src.demo import FEATURES
+
+    for label, blurb, query in FEATURES:
+        assert query.lower().startswith("select"), label
+        assert blurb, label
+
+
+async def test_the_hub_lists_every_surface(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    One page holding the whole product. The alternative it replaces was nine
+    terminal links, a console on one port and Streamlit on another — each
+    correct alone, and not a dashboard between them.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.database import get_session
+    from src.demo import router as demo_router
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DEMO_MODE", "true")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("RECOVERY_LINK_SECRET", "hub-test-secret")
+    get_settings.cache_clear()
+
+    app = FastAPI()
+    app.include_router(demo_router)
+
+    async def override() -> Any:
+        async with db_sessionmaker() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override
+    try:
+        body = TestClient(app).get("/demo").text
+    finally:
+        get_settings.cache_clear()
+
+    # Every console page is reachable without needing to know the URLs.
+    for path in ("/console/live", "/console/pipeline", "/console/routing",
+                 "/console/cases", "/console/ops", "/console/evidence"):
+        assert path in body, f"{path} missing from the hub"
+
+    # Says plainly that nothing is real. A page that lists a recovered rupee
+    # without that line is the failure demo mode exists to avoid.
+    assert "no money can move" in body
+    assert "fictional" in body
+
+    # An empty database must still render — every feature row simply reports
+    # that no case shows it yet, rather than 500ing.
+    assert "no case in this database shows it yet" in body

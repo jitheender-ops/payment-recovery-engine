@@ -35,6 +35,7 @@ from src import recovery_link  # noqa: E402
 from src.config import get_settings, reveal  # noqa: E402
 from src.customer.explain import explain  # noqa: E402
 from src.customer.routes import _view_state  # noqa: E402
+from src.demo import FEATURES  # noqa: E402
 from src.models import PaymentFailure, RecoveryCase, RetryAttempt  # noqa: E402
 
 # The seeded buyer account. A stable ref so re-running is idempotent —
@@ -188,93 +189,12 @@ def _as_uuid(value: object) -> uuid.UUID | None:
     return None
 
 
-# The seven capabilities, and the one case each is visible on.
-#
-# WHY THIS EXISTS: everything below was already built and rendering, and it
-# was still effectively invisible — this script grouped links by PAGE STATE
-# (payable / confirming / recovered / ...) and printed one per state, so all
-# seven features were buried inside "PAYABLE (30 cases)" behind a single
-# link that was almost always a plain card decline. A state is what the page
-# is doing; a feature is what you came to look at, and they are not the same
-# index.
-#
-# Each entry is (label, what to look at, SQL picking the case that shows it).
-# The SQL is the honest part: it selects a case that genuinely exhibits the
-# feature, so a missing link means the demo has no such case rather than the
-# feature being broken.
-_FEATURES: list[tuple[str, str, str]] = [
-    (
-        "Checkout drop-off recovery",
-        "cart contents named back, honest 'nothing was charged' framing",
-        "SELECT id FROM recovery_cases WHERE risk_type='checkout_abandonment' "
-        "AND state='open' LIMIT 1",
-    ),
-    (
-        "Failed-subscription recovery",
-        "renewal copy + the retry-sequence panel (attempts made, one hollow "
-        "'upcoming' row)",
-        "SELECT id FROM recovery_cases WHERE risk_type='subscription_failure' "
-        "AND state='open' LIMIT 1",
-    ),
-    (
-        "Mandate retry sequencer",
-        "same panel on the RBI e-mandate path — the upcoming row states WHEN, "
-        "never WHAT",
-        "SELECT id FROM recovery_cases WHERE risk_type='mandate_failure' "
-        "AND state='open' LIMIT 1",
-    ),
-    (
-        "B2B receivables chaser",
-        "invoice copy, due date and computed days-overdue in the register",
-        "SELECT id FROM recovery_cases WHERE risk_type='invoice_overdue' "
-        "AND state='open' LIMIT 1",
-    ),
-    (
-        "Payment degradation → root cause → action",
-        "the decline explained in the customer's words, plus the rail "
-        "recommendation named out loud above the CTA",
-        "SELECT rc.id FROM recovery_cases rc "
-        "JOIN payment_failures pf ON pf.payment_id = rc.subject_ref "
-        "WHERE rc.state='open' AND pf.method <> 'upi' AND pf.failure_class IN "
-        "('3ds_dropoff','card_limit_exceeded','issuer_decline',"
-        "'insufficient_funds','invalid_card','expired_instrument') LIMIT 1",
-    ),
-    (
-        "Promise-to-pay tracker",
-        "'You said you'd pay by {date}. N days left.' — persistent, not a flash",
-        "SELECT rc.id FROM recovery_cases rc "
-        "JOIN promises_to_pay p ON p.recovery_case_id = rc.id "
-        "WHERE p.status='pending' AND rc.state='open' LIMIT 1",
-    ),
-    (
-        "Dispute → chase freeze",
-        "raised through open_dispute(): the invoice reads 'under review — "
-        "reminders paused' on the statement, and the console lists it",
-        "SELECT case_id FROM case_disputes WHERE status='open' LIMIT 1",
-    ),
-    (
-        "Instalment plan (4 of a possible 6)",
-        "the form shipped 2 hardcoded rows until this session — open the "
-        "'pay in parts' box to see all six reachable",
-        "SELECT case_id FROM payment_plans LIMIT 1",
-    ),
-    (
-        "Hinglish voice recovery",
-        "'We called you on {date}' in the timeline; add ?lang=hi for the "
-        "Hindi page",
-        "SELECT rc.id FROM recovery_cases rc "
-        "JOIN voice_call_queue v ON v.recovery_case_id = rc.id "
-        "WHERE v.state='done' LIMIT 1",
-    ),
-]
-
-
 def _feature_urls(url: str) -> list[tuple[str, str, str | None]]:
     """(label, what to look at, URL or None) — one openable page per feature."""
     engine = sa.create_engine(url)
     out: list[tuple[str, str, str | None]] = []
     with engine.connect() as conn:
-        for label, blurb, query in _FEATURES:
+        for label, blurb, query in FEATURES:
             try:
                 case_id = conn.execute(sa.text(query)).scalar()
             except Exception:
