@@ -437,6 +437,7 @@ async def _console_data() -> dict[str, Any] | None:
             outstanding = await console_data.outstanding_total(session)
             flight = await console_data.in_flight(session)
             activity = await console_data.activity_feed(session)
+            stopping = await console_data.stopping_rules(session)
 
             alert_rows = (
                 await session.execute(
@@ -569,6 +570,7 @@ async def _console_data() -> dict[str, Any] | None:
         "outstanding": outstanding,
         "flight": flight,
         "activity": activity,
+        "stopping": stopping,
         # The worklist, assembled from the panels above rather than re-read:
         # everything the engine deliberately stopped short of and cannot
         # resolve without a person. Empty is a real answer the page states.
@@ -743,11 +745,61 @@ def _eval_summary() -> dict[str, Any]:
     best = max(r["net_raw"] for r in rows)
     for r in rows:
         r["best"] = r["net_raw"] == best and best > 0
+
+    # The paired comparison, which is the part that makes any of this a
+    # claim rather than a number. Each scenario is run under every policy
+    # with the identical random sequence, so outcomes are differenced
+    # one-to-one and a difference is only called real when the 95% CI
+    # excludes zero. The page showed the per-policy rates and dropped this
+    # entirely — the rates alone cannot tell you whether the gap is signal.
+    paired: list[dict[str, Any]] = []
+    for name, metrics in (raw.get("paired_vs_baseline") or {}).items():
+        if not isinstance(metrics, dict):
+            continue
+        rr = metrics.get("recovery_rate_pp") or {}
+        cost = metrics.get("retry_cost") or {}
+        ci = rr.get("ci95") or [None, None]
+        if rr.get("mean_delta") is None:
+            continue
+        paired.append({
+            "name": name,
+            "delta_pp": round(float(rr["mean_delta"]), 2),
+            "ci_low": round(float(ci[0]), 2) if ci[0] is not None else None,
+            "ci_high": round(float(ci[1]), 2) if ci[1] is not None else None,
+            "n": int(rr.get("n_paired") or 0),
+            "significant": bool(rr.get("significant")),
+            "attempts_delta": (
+                round(float(cost["mean_delta"]), 2)
+                if cost.get("mean_delta") is not None else None
+            ),
+        })
+    paired.sort(key=lambda r: r["delta_pp"], reverse=True)
+
+    # Retry economics. break_even is None when a policy wins even if a retry
+    # is free — which is a stronger statement than any particular cost
+    # assumption, and the reason the harness reports it that way.
+    economics: list[dict[str, Any]] = []
+    for name, e in (raw.get("economics_vs_baseline") or {}).items():
+        if not isinstance(e, dict):
+            continue
+        economics.append({
+            "name": name,
+            "delta_revenue": _money(
+                int(float(e.get("delta_revenue_per_crore") or 0.0) * 100)
+            ),
+            "delta_attempts": int(float(e.get("delta_attempts_per_crore") or 0.0)),
+            "break_even": e.get("break_even_cost_per_retry_inr"),
+            "verdict": e.get("verdict") or "—",
+        })
+
     return {
         "available": True,
         "policies": rows,
         "max_recovery": max(r["recovery_raw"] for r in rows) or 1.0,
         "retry_cost": raw.get("retry_cost_inr", "—"),
+        "paired": paired,
+        "economics": economics,
+        "n_paired": max((p["n"] for p in paired), default=0),
     }
 
 

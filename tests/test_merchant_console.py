@@ -506,3 +506,60 @@ async def test_failure_causes_separates_never_chased_from_never_recovered(
     assert untouched["chased"] == 0
     assert untouched["recovery_rate"] is None, "never chased is not 0%"
     assert untouched["thin"] is False
+
+
+# ── Where the engine has stopped ─────────────────────────────────────────
+
+
+async def test_stopping_rules_counts_refusals_not_just_successes(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    Automation refusing to act is this product's most load-bearing claim, and
+    the console never counted it. `cases.stop_reason()` decides it per case;
+    this is the same branches in aggregate.
+
+    The invariant worth pinning: a case is either actionable or stopped, and
+    an open case with its budget spent must land in the stopped column — that
+    is the one an operator would otherwise read as "still being chased".
+    """
+    from src.merchant import console_data
+
+    now = datetime.now(UTC)
+    async with db_sessionmaker() as s:
+        live = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_live",
+            amount_at_risk=10_000, max_attempts=3,
+        )
+        spent = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_spent",
+            amount_at_risk=20_000, max_attempts=3,
+        )
+        spent.attempts_used = 3
+        held = await open_case(
+            s, risk_type="invoice_overdue", subject_ref="INV-held",
+            amount_at_risk=30_000, max_attempts=4,
+        )
+        held.next_action_at = now + timedelta(days=2)
+        done = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_done",
+            amount_at_risk=40_000, max_attempts=3,
+        )
+        done.state = "recovered"
+        done.amount_recovered = 40_000
+        await s.commit()
+        assert live is not None
+
+    async with db_sessionmaker() as s:
+        data = await console_data.stopping_rules(s)
+
+    kinds = {b["kind"]: b for b in data["buckets"]}
+    assert kinds["budget"]["cases"] == 1, "an open case with no budget left is stopped"
+    assert kinds["waiting"]["cases"] == 1, "a case held by backoff is stopped"
+    assert kinds["recovered"]["cases"] == 1
+
+    # Only the genuinely touchable case is counted as actionable. Getting
+    # this wrong in the other direction would overstate what the engine is
+    # about to do, which is the number an operator plans around.
+    assert data["actionable_cases"] == 1
+    assert data["has_data"] is True

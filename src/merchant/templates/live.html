@@ -87,6 +87,44 @@
         </div>
       </section>
 
+      {# ── Where the engine has stopped ────────────────────────────────────
+         Directly under the money, because it is the other half of the same
+         sentence: this is the money the engine is deliberately NOT chasing,
+         and why. cases.stop_reason() decides it per case; console_data.
+         stopping_rules() is the same branches in aggregate. Automation
+         refusing to act is the product's most load-bearing claim and the
+         console never counted it. #}
+      {% if data.stopping and data.stopping.has_data %}
+      <section class="sec" data-stage="2">
+        <h2 class="sec-t">Where the engine has stopped</h2>
+        <p class="sec-s">{{ data.stopping.actionable_cases }} case{{ '' if data.stopping.actionable_cases == 1 else 's' }}
+          are actionable right now, holding {{ data.stopping.actionable }}.
+          Everything below is money the engine is deliberately not chasing —
+          each line a rule it applied, not a queue it failed to clear.
+          {% if data.stopping.opted_out_customers %}
+          {{ data.stopping.opted_out_customers }} customer{{ '' if data.stopping.opted_out_customers == 1 else 's' }}
+          have withdrawn consent, which outlives any single case.{% endif %}</p>
+        <div class="tablewrap" style="margin-top:.9rem">
+          <table>
+            <thead><tr>
+              <th>Stopped because</th><th class="n">Cases</th>
+              <th class="n">Amount</th><th>Rule</th>
+            </tr></thead>
+            <tbody>
+            {% for b in data.stopping.buckets %}
+              <tr>
+                <td>{{ b.label }}</td>
+                <td class="n">{{ "{:,}".format(b.cases) }}</td>
+                <td class="n">{{ b.amount }}</td>
+                <td class="sec-s" style="margin:0">{{ b.why }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+
       {# ── 3. The worklist ────────────────────────────────────────────────
          The spine. Empty is a real answer and gets said out loud. #}
       <section class="needs" data-stage="3">

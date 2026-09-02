@@ -33,6 +33,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy import or_ as sa_or
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.formatting import ist as _ist
@@ -960,3 +961,142 @@ async def case_states(session: AsyncSession) -> list[dict[str, Any]]:
         )
     ).all()
     return [{"state": r.state, "n": r.n} for r in rows]
+
+
+async def stopping_rules(session: AsyncSession) -> dict[str, Any]:
+    """
+    Where the engine has deliberately stopped, and what it is holding.
+
+    Automation refusing to act is this product's most load-bearing claim and
+    the console never counted it. `cases.stop_reason()` is the authority for
+    a single case; this is the same four branches in aggregate, in the same
+    precedence order, so a merchant can see the shape of what the engine will
+    not do without opening cases one at a time.
+
+    Deliberately NOT a per-case loop over stop_reason(): that is one ledger
+    read per case, and this page now runs against thousands. The branches are
+    mirrored here in SQL and the docstring is the contract — if stop_reason()
+    grows a fifth branch, this must grow one too.
+    """
+    from src.cases import _TERMINAL
+    from src.models import RetryLedger
+
+    now = datetime.now(UTC)
+    buckets: list[dict[str, Any]] = []
+
+    # 1. Terminal, split by how it ended. "recovered" is a stop too — the
+    # case closed because the money came back — and showing it beside the
+    # refusals is what makes the refusals legible as a choice rather than a
+    # failure rate.
+    rows = (
+        await session.execute(
+            select(
+                RecoveryCase.state,
+                func.count(RecoveryCase.id),
+                func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0),
+            )
+            .where(RecoveryCase.state.in_(tuple(_TERMINAL)))
+            .group_by(RecoveryCase.state)
+        )
+    ).all()
+    why_closed = {
+        "recovered": "the money came back — nothing left to chase",
+        "exhausted": "attempt budget spent",
+        "abandoned": "the guardrail refused, or the class is not retryable",
+        "expired": "the consent window closed",
+        "opted_out": "the customer asked us to stop",
+    }
+    for state, n, paise in rows:
+        buckets.append({
+            "kind": state, "label": state.replace("_", " "),
+            "why": why_closed.get(state, "closed"),
+            "cases": int(n), "amount": _money(int(paise)),
+            "acting": False,
+        })
+
+    # 2. Open but held: budget spent, or waiting on next_action_at. Both are
+    # "we may not act right now" rather than "we are done", so they are
+    # counted apart from the terminal set above.
+    held_budget = (
+        await session.execute(
+            select(
+                func.count(RecoveryCase.id),
+                func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0),
+            ).where(
+                RecoveryCase.state == "open",
+                RecoveryCase.attempts_used >= RecoveryCase.max_attempts,
+            )
+        )
+    ).one()
+    if held_budget[0]:
+        buckets.append({
+            "kind": "budget", "label": "budget spent",
+            "why": "open, but every permitted attempt has been used",
+            "cases": int(held_budget[0]), "amount": _money(int(held_budget[1])),
+            "acting": False,
+        })
+
+    waiting = (
+        await session.execute(
+            select(
+                func.count(RecoveryCase.id),
+                func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0),
+            ).where(
+                RecoveryCase.state == "open",
+                RecoveryCase.attempts_used < RecoveryCase.max_attempts,
+                RecoveryCase.next_action_at.is_not(None),
+                RecoveryCase.next_action_at > now,
+            )
+        )
+    ).one()
+    if waiting[0]:
+        buckets.append({
+            "kind": "waiting", "label": "waiting",
+            "why": "backoff or a promise-to-pay is holding the next touch",
+            "cases": int(waiting[0]), "amount": _money(int(waiting[1])),
+            "acting": False,
+        })
+
+    # 3. Consent withdrawn at the LEDGER, which outlives any one case: the
+    # customer said stop, so every case of theirs is off limits whatever its
+    # own state says.
+    opted_out_ledgers = int(
+        await session.scalar(
+            select(func.count(RetryLedger.id)).where(
+                RetryLedger.consent_status == "opted_out"
+            )
+        )
+        or 0
+    )
+
+    # 4. What is left is what the engine may actually touch.
+    actionable = (
+        await session.execute(
+            select(
+                func.count(RecoveryCase.id),
+                func.coalesce(
+                    func.sum(
+                        RecoveryCase.amount_at_risk - RecoveryCase.amount_recovered
+                    ),
+                    0,
+                ),
+            ).where(
+                RecoveryCase.state == "open",
+                RecoveryCase.attempts_used < RecoveryCase.max_attempts,
+                sa_or(
+                    RecoveryCase.next_action_at.is_(None),
+                    RecoveryCase.next_action_at <= now,
+                ),
+            )
+        )
+    ).one()
+
+    buckets.sort(key=lambda b: b["cases"], reverse=True)
+    return {
+        "buckets": buckets,
+        "stopped_cases": sum(b["cases"] for b in buckets),
+        "opted_out_customers": opted_out_ledgers,
+        "actionable_cases": int(actionable[0]),
+        "actionable": _money(max(0, int(actionable[1]))),
+        "has_data": bool(buckets or actionable[0]),
+    }

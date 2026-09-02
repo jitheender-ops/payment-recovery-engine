@@ -57,6 +57,69 @@
       </div>
     </section>
 
+    {% if data.eval.paired %}
+    <section class="sec">
+      <h2 class="sec-t">Is the gap real?</h2>
+      <p class="sec-s">Paired against Fixed 3-Retry over
+        {{ "{:,}".format(data.eval.n_paired) }} comparisons. Every scenario runs
+        under every policy with the identical random sequence, so outcomes are
+        differenced one-to-one rather than compared as averages of separate
+        runs. A difference counts only when the 95% confidence interval
+        excludes zero — the rates above cannot tell you that on their own.</p>
+      <div class="tablewrap" style="margin-top:.9rem">
+        <table>
+          <thead><tr>
+            <th>Policy</th><th class="n">Δ recovery</th><th class="n">95% CI</th>
+            <th class="n">Δ attempts</th><th>Real?</th>
+          </tr></thead>
+          <tbody>
+          {% for p in data.eval.paired %}
+            <tr>
+              <td>{{ p.name }}</td>
+              <td class="n">{{ "%+.2f"|format(p.delta_pp) }}pp</td>
+              <td class="n">
+                {% if p.ci_low is not none %}[{{ "%+.2f"|format(p.ci_low) }},
+                {{ "%+.2f"|format(p.ci_high) }}]{% else %}—{% endif %}</td>
+              <td class="n">{% if p.attempts_delta is not none %}{{ "%+.2f"|format(p.attempts_delta) }}{% else %}—{% endif %}</td>
+              {# Word, not colour alone — the console's non-colour-only rule. #}
+              <td>{% if p.significant %}<span class="pill pill-g">yes</span>{% else %}<span class="pill">not shown</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if data.eval.economics %}
+    <section class="sec">
+      <h2 class="sec-t">Retry economics</h2>
+      <p class="sec-s">What each policy is worth per ₹1Cr of failed payments,
+        against the same baseline. The break-even column removes the cost
+        assumption: it is the per-retry price at which the two policies tie,
+        so where there is none the conclusion holds without anyone agreeing
+        on what a retry actually costs.</p>
+      <div class="tablewrap" style="margin-top:.9rem">
+        <table>
+          <thead><tr>
+            <th>Policy</th><th class="n">Δ revenue /Cr</th>
+            <th class="n">Δ attempts /Cr</th><th>Verdict</th>
+          </tr></thead>
+          <tbody>
+          {% for e in data.eval.economics %}
+            <tr>
+              <td>{{ e.name }}</td>
+              <td class="n">{{ e.delta_revenue }}</td>
+              <td class="n">{{ "{:+,}".format(e.delta_attempts) }}</td>
+              <td>{% if e.break_even is none %}{{ e.verdict }}{% else %}ties at ₹{{ e.break_even }}/retry{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
     <p class="sec-s" style="margin-top:1.6rem">
       Retry cost is priced at ₹{{ data.eval.retry_cost }} per attempt — a floor, since it
       covers gateway and ops cost but not decline-ratio penalties or customer goodwill,
