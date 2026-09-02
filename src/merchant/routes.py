@@ -876,6 +876,16 @@ async def console_cases(request: Request) -> Any:
     return await _render_console(request, "console_cases.html", build, state=state)
 
 
+@router.get("/console/case/{case_id}", response_class=HTMLResponse)
+async def console_case(request: Request, case_id: str) -> Any:
+    """One case as the whole decision chain, over its audit trail."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"case": await console_data.case_detail(session, case_id)}
+
+    return await _render_console(request, "console_case.html", build)
+
+
 @router.get("/console/ops", response_class=HTMLResponse)
 async def console_ops(request: Request) -> Any:
     """Is the machinery running — sweeps, heartbeat, and what fires next."""

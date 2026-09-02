@@ -563,3 +563,121 @@ async def test_stopping_rules_counts_refusals_not_just_successes(
     # about to do, which is the number an operator plans around.
     assert data["actionable_cases"] == 1
     assert data["has_data"] is True
+
+
+# ── The decision chain ───────────────────────────────────────────────────
+
+
+async def test_case_detail_renders_the_whole_chain(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The centrepiece screen. Every link it shows already existed as a column
+    and none of it was readable — so what this pins is that the page reports
+    the engine's own words rather than a paraphrase of them.
+    """
+    from src.models import RetryAttempt
+
+    async with db_sessionmaker() as s:
+        case = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_chain",
+            customer_id="email:chain@buyer.in", amount_at_risk=250_000,
+            max_attempts=3,
+        )
+        await s.flush()
+        attempt = RetryAttempt(
+            payment_id="pay_chain", idempotency_key="k_chain", attempt_number=1,
+            recovery_case_id=case.id, action_type="switch_rail",
+            target_rail="upi", agent_type="xgboost",
+            agent_reasoning="OTP step is the drop-off; UPI skips it",
+            agent_confidence=0.87, guardrail_passed=True, result="success",
+            executed_at=datetime.now(UTC),
+        )
+        s.add(attempt)
+        await s.flush()
+        case.state = "recovered"
+        case.amount_recovered = 250_000
+        # The attribution link. Without it the money came back WITHOUT us,
+        # and the page must not claim it — asserted in the next test.
+        case.recovered_via_attempt_id = attempt.id
+        await s.commit()
+        case_id = str(case.id)
+
+    html = console.get(f"/console/case/{case_id}").text
+
+    # The agent's own reasoning and confidence, not a restatement.
+    assert "OTP step is the drop-off" in html
+    assert "87%" in html
+    assert "switch_rail" in html
+    # Attribution: money the engine earned must be distinguishable from
+    # money that merely arrived.
+    assert "Attributed to an attempt this engine made" in html
+    # And still PII-free — the case carries an email the page must not show.
+    assert "chain@buyer.in" not in html
+
+
+async def test_case_detail_shows_a_refusal_verbatim(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    A blocked attempt is the more important rendering. The gate deliberately
+    never short-circuits so it can collect every violation; a page that
+    printed "blocked" would throw that away.
+    """
+    from src.models import RetryAttempt
+
+    async with db_sessionmaker() as s:
+        case = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_refused",
+            amount_at_risk=99_000, max_attempts=3,
+        )
+        await s.flush()
+        s.add(RetryAttempt(
+            payment_id="pay_refused", idempotency_key="k_refused",
+            attempt_number=1, recovery_case_id=case.id, action_type="retry_now",
+            agent_type="xgboost", guardrail_passed=False,
+            guardrail_rejection_reason=(
+                "Time-of-day blackout: hour 2 is within 23:00-07:00 IST"
+            ),
+            result="rejected",
+        ))
+        await s.commit()
+        case_id = str(case.id)
+
+    html = console.get(f"/console/case/{case_id}").text
+    assert "Time-of-day blackout" in html
+    assert "23:00-07:00 IST" in html
+    assert "Refused" in html
+
+
+async def test_an_unknown_case_id_says_so_rather_than_500ing(console: Any) -> None:
+    for bad in ("not-a-uuid", "00000000-0000-0000-0000-000000000000"):
+        r = console.get(f"/console/case/{bad}")
+        assert r.status_code == 200, bad
+        assert "No such case" in r.text
+
+
+async def test_an_unattributed_recovery_is_not_claimed_by_the_engine(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The distinction the whole headline rests on. A case can recover because
+    the customer paid the original order themselves — real revenue, and not
+    the engine's to take credit for. `recovered_via_attempt_id` is the only
+    thing separating the two, and a console that collapsed them would be
+    reporting a control group as a result.
+    """
+    async with db_sessionmaker() as s:
+        case = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_selfpaid",
+            amount_at_risk=180_000, max_attempts=3,
+        )
+        case.state = "recovered"
+        case.amount_recovered = 180_000
+        case.recovered_via_attempt_id = None   # nobody earned it
+        await s.commit()
+        case_id = str(case.id)
+
+    html = console.get(f"/console/case/{case_id}").text
+    assert "the customer paid directly" in html
+    assert "Attributed to an attempt this engine made" not in html

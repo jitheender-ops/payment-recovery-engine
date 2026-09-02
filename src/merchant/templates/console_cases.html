@@ -50,7 +50,9 @@
         <tbody>
         {% for c in data.cases %}
           <tr>
-            <td class="ref">{{ c.case_ref }}</td>
+            {# The reference is the link into the decision chain. It was the
+               only page listing cases and there was nowhere to go from it. #}
+            <td class="ref"><a href="/console/case/{{ c.case_id }}">{{ c.case_ref }}</a></td>
             <td>{{ c.risk_type.replace("_", " ") }}</td>
             <td><span class="pill {% if c.state == 'recovered' %}pill-g{% elif c.state in ('exhausted','abandoned','expired') %}pill-r{% endif %}">{{ c.state }}</span></td>
             <td class="n">{{ c.at_risk }}</td>

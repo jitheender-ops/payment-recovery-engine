@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, recovery_decision %}
+{% block title %}{{ data.case.ref if data.case else "Case" }} · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}
+<style>
+  .chain{{ '{' }}border-left:2px solid var(--line);margin:1rem 0 0;padding:0 0 0 1.25rem{{ '}' }}
+  .chain > li{{ '{' }}list-style:none;position:relative;padding:0 0 1.15rem{{ '}' }}
+  .chain > li::before{{ '{' }}content:"";position:absolute;left:-1.68rem;top:.42rem;
+    width:9px;height:9px;border-radius:50%;background:var(--line);
+    box-shadow:0 0 0 3px var(--bg){{ '}' }}
+  .chain > li.on::before{{ '{' }}background:var(--green){{ '}' }}
+  .chain > li.off::before{{ '{' }}background:var(--red){{ '}' }}
+  .chain-k{{ '{' }}font-size:.7rem;text-transform:uppercase;letter-spacing:.12em;
+    color:var(--ink-3);font-weight:600{{ '}' }}
+  .chain-v{{ '{' }}margin:.15rem 0 0;font-size:.95rem{{ '}' }}
+</style>
+{% endblock %}
+
+{% block body %}
+{{ console_nav("cases", merchant_name) }}
+<main class="wrap">
+{% if not db_ok %}
+  <div class="empty"><b>Can't reach the database.</b>
+  <p>Every figure here is read live, so there is nothing cached to fall back on.</p></div>
+{% elif not data.case %}
+  <div class="empty"><b>No such case.</b>
+  <p>The id in the URL does not match a recovery case. It may have been from
+  a different database — the demo's SQLite file is rebuilt from scratch each
+  time you reseed.</p></div>
+{% else %}
+  {% set c = data.case %}
+  <header class="phead">
+    <div class="peyebrow">Recovery case · {{ c.risk_type }}</div>
+    <h1 class="ptitle mono">{{ c.ref }}</h1>
+    <p class="psub">Opened {{ c.opened }} IST ·
+      attempt {{ c.attempts_used }} of {{ c.max_attempts }} ·
+      state <strong>{{ c.state }}</strong></p>
+  </header>
+
+  {# ── Money first, and the distinction the headline depends on ──────── #}
+  <section class="money">
+    <div class="money-half">
+      <span class="money-label">{{ "Recovered" if c.recovered else "Still owed" }}</span>
+      <span class="money-value {{ 'green' if c.recovered else 'red' }}">{{ c.recovered or c.outstanding }}</span>
+      <span class="money-foot">
+        {% if c.recovered and c.attributed %}
+          Attributed to an attempt this engine made{% if c.recovered_ref %},
+          paid as <span class="mono">{{ c.recovered_ref }}</span>{% endif %}.
+        {% elif c.recovered %}
+          The money arrived without us — the customer paid directly, so this
+          is revenue but <strong>not</strong> the engine's to claim.
+        {% else %}
+          of {{ c.at_risk }} at risk when the case opened.
+        {% endif %}
+      </span>
+    </div>
+  </section>
+
+  {# ── The loop, end to end ───────────────────────────────────────────── #}
+  <section class="sec">
+    <h2 class="sec-t">The decision chain</h2>
+    <p class="sec-s">Every link below is read from the row the engine wrote at
+      the time. Nothing here is reconstructed or inferred.</p>
+    <ul class="chain">
+      <li class="on">
+        <div class="chain-k">Signal</div>
+        <p class="chain-v">{{ c.risk_type }} on <span class="mono">{{ c.ref }}</span>,
+          {{ c.at_risk }} at risk.</p>
+      </li>
+
+      {% if c.diagnosis %}
+      <li class="{{ 'on' if c.diagnosis.retryable else 'off' }}">
+        <div class="chain-k">Diagnosis</div>
+        <p class="chain-v">
+          <strong>{{ c.diagnosis.failure_class }}</strong> —
+          {{ "retryable" if c.diagnosis.retryable else "not retryable" }}.
+          Classified deterministically from the gateway's own 5-tuple:
+          <span class="mono">{{ c.diagnosis.error_reason or "—" }}</span>
+          ({{ c.diagnosis.error_code }}{% if c.diagnosis.error_source %},
+          source {{ c.diagnosis.error_source }}{% endif %}{% if c.diagnosis.error_step %},
+          step {{ c.diagnosis.error_step }}{% endif %}).
+          {% if c.diagnosis.method %}Paid by {{ c.diagnosis.method }}{% if c.diagnosis.bank %}
+          · {{ c.diagnosis.bank }}{% endif %}.{% endif %}
+        </p>
+      </li>
+      {% endif %}
+
+      {% for a in c.attempts %}
+      {{ recovery_decision(a) }}
+      {% endfor %}
+
+      {% if not c.attempts %}
+      <li class="off">
+        <div class="chain-k">Execution</div>
+        <p class="chain-v">No attempt was ever made. Either the guardrail
+          refused before one could be, or the agent chose to abandon —
+          the stopping rule below says which.</p>
+      </li>
+      {% endif %}
+
+      <li class="{{ 'off' if c.stop_reason else 'on' }}">
+        <div class="chain-k">Stopping rule</div>
+        <p class="chain-v">
+          {% if c.stop_reason %}
+            {# Verbatim from cases.stop_reason(). Re-wording it here would
+               make the console and the engine disagree about why. #}
+            <strong>Stopped.</strong> {{ c.stop_reason }}
+          {% else %}
+            The engine may act on this case right now — no rule is holding it.
+          {% endif %}
+          {% if c.disputed %}<br><strong>Disputed:</strong> chasing is frozen
+          until a person decides. That is a compliance stop, not a backlog.{% endif %}
+        </p>
+      </li>
+
+      <li class="{{ 'on' if c.recovered else 'off' }}">
+        <div class="chain-k">Outcome</div>
+        <p class="chain-v">
+          {% if c.recovered %}Recovered {{ c.recovered }}.
+          {% else %}{{ c.outstanding }} still outstanding.
+          {% if c.close_reason %}<br><span class="sec-s">{{ c.close_reason }}</span>{% endif %}
+          {% endif %}
+        </p>
+      </li>
+    </ul>
+  </section>
+
+  {# ── Account 360, where there is an account ─────────────────────────── #}
+  {% if c.account %}
+  <section class="sec">
+    <h2 class="sec-t">{{ c.account.name }}</h2>
+    <p class="sec-s">Everything else open on this buyer's account. B2B
+      collection runs on the account, not the invoice — one ladder position,
+      one contact budget.</p>
+    {% if c.account.siblings %}
+    <div class="tablewrap" style="margin-top:.9rem">
+      <table><thead><tr><th>Invoice</th><th>State</th><th class="n">Outstanding</th></tr></thead>
+      <tbody>
+      {% for s in c.account.siblings %}
+        <tr>
+          <td><a class="mono" href="/console/case/{{ s.case_id }}">{{ s.ref }}</a></td>
+          <td>{{ s.state }}</td><td class="n">{{ s.amount }}</td>
+        </tr>
+      {% endfor %}
+      </tbody></table>
+    </div>
+    {% else %}<p class="sec-s">Nothing else open on this account.</p>{% endif %}
+  </section>
+  {% endif %}
+
+  {# ── The audit trail ────────────────────────────────────────────────── #}
+  <section class="sec">
+    <h2 class="sec-t">Audit trail</h2>
+    <p class="sec-s">Append-only, in order. A sealed row is inside the
+      hash chain <span class="mono">scripts/audit_chain.py --verify</span>
+      checks — so "auditable" is something you can test, not something this
+      page asserts.</p>
+    <div class="tablewrap" style="margin-top:.9rem">
+      <table>
+        <thead><tr><th>When (IST)</th><th>Event</th><th>Actor</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for e in c.events %}
+          <tr>
+            <td class="mono">{{ e.at }}</td>
+            <td>{{ e.type }}{% if e.sealed %} <span class="pill pill-g">sealed</span>{% endif %}</td>
+            <td>{{ e.actor }}</td>
+            <td class="sec-s" style="margin:0">
+              {% for k, v in e.detail.items() %}
+                <span class="mono">{{ k }}</span>={{ v }}{% if not loop.last %} · {% endif %}
+              {% endfor %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="sec-s">No events recorded for this case.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+</main>
+{% endblock %}

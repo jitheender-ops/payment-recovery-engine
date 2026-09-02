@@ -111,3 +111,42 @@
   {% endfor %}
 </div>
 {% endmacro %}
+
+{# One attempt as the AI-decision → guardrail → execution triple.
+   Shared by the case detail and the batch result so the two cannot drift
+   into describing the same rows differently. Expects the dicts
+   console_data.case_detail() builds. #}
+{% macro recovery_decision(a) %}
+<li class="{{ 'on' if a.guardrail_passed else 'off' }}">
+  <div class="chain-k">Recommendation · attempt {{ a.n }}</div>
+  <p class="chain-v">
+    <strong>{{ a.action }}</strong>{% if a.rail %} on {{ a.rail }}{% endif %}
+    <span class="sec-s">— by {{ a.agent }}{% if a.confidence is not none %},
+      {{ a.confidence }}% confidence{% endif %}</span>
+    {% if a.reason %}<br><span class="sec-s">{{ a.reason }}</span>{% endif %}
+  </p>
+</li>
+<li class="{{ 'on' if a.guardrail_passed else 'off' }}">
+  <div class="chain-k">Guardrail</div>
+  <p class="chain-v">
+    {% if a.guardrail_passed %}
+      Approved. The gate runs every rule and collects all violations rather
+      than stopping at the first, so an approval means none fired.
+    {% else %}
+      {# Verbatim. The gate's whole design is that it never short-circuits,
+         so listing the reasons is the point — a single "blocked" would
+         throw away what it went to the trouble of collecting. #}
+      <strong>Refused.</strong> {{ a.rejection }}
+    {% endif %}
+  </p>
+</li>
+{% if a.guardrail_passed %}
+<li class="{{ 'on' if a.result == 'success' else 'off' }}">
+  <div class="chain-k">Execution</div>
+  <p class="chain-v">
+    {{ a.result or "no result recorded" }}{% if a.executed %},
+    {{ a.executed }} IST{% endif %}.
+  </p>
+</li>
+{% endif %}
+{% endmacro %}

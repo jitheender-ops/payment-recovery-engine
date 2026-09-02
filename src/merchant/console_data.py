@@ -1100,3 +1100,157 @@ async def stopping_rules(session: AsyncSession) -> dict[str, Any]:
         "actionable": _money(max(0, int(actionable[1]))),
         "has_data": bool(buckets or actionable[0]),
     }
+
+
+async def case_detail(session: AsyncSession, case_id: str) -> dict[str, Any] | None:
+    """
+    One case, as the whole decision chain: signal → classification → agent
+    recommendation → guardrail → execution → stopping rule → outcome.
+
+    Every link already existed in the schema and none of it was readable.
+    RetryAttempt carries `agent_reasoning`, `agent_confidence`,
+    `guardrail_passed` and `guardrail_rejection_reason`; `case_events` is the
+    ordered trail; `stop_reason()` says why nothing more will happen. This
+    assembles them and invents nothing.
+
+    PII-free like every other console read: keyed on the case's own UUID,
+    displaying the merchant's `subject_ref`. `customer_id` is an email and
+    never leaves this function. B2B account display names are merchant data
+    and are allowed (src/receivables/models.py).
+    """
+    import uuid as _uuid
+
+    from src.cases import stop_reason
+    from src.models import CaseEvent, PaymentFailure, RetryLedger
+    from src.receivables.models import ArAccount, CaseDispute
+
+    try:
+        cid = _uuid.UUID(case_id)
+    except (ValueError, AttributeError):
+        return None
+    case = await session.get(RecoveryCase, cid)
+    if case is None:
+        return None
+
+    failure = None
+    if case.risk_type == "payment_failure":
+        failure = await session.scalar(
+            select(PaymentFailure).where(PaymentFailure.payment_id == case.subject_ref)
+        )
+
+    attempts = list((await session.execute(
+        select(RetryAttempt)
+        .where(RetryAttempt.recovery_case_id == case.id)
+        .order_by(RetryAttempt.attempt_number, RetryAttempt.created_at)
+    )).scalars().all())
+
+    events = list((await session.execute(
+        select(CaseEvent)
+        .where(CaseEvent.recovery_case_id == case.id)
+        .order_by(CaseEvent.created_at, CaseEvent.id)
+    )).scalars().all())
+
+    # The ledger is what stop_reason() consults for consent, so read it
+    # rather than guessing — an opted-out customer outranks every other
+    # reason and would otherwise be reported as merely "waiting".
+    ledger = None
+    if case.customer_id:
+        ledger = await session.scalar(
+            select(RetryLedger).where(RetryLedger.customer_id == case.customer_id)
+        )
+
+    account = None
+    siblings: list[dict[str, Any]] = []
+    if case.account_id is not None:
+        account = await session.get(ArAccount, case.account_id)
+        sib_rows = (await session.execute(
+            select(RecoveryCase)
+            .where(
+                RecoveryCase.account_id == case.account_id,
+                RecoveryCase.id != case.id,
+            )
+            .order_by(RecoveryCase.due_at, RecoveryCase.opened_at)
+            .limit(12)
+        )).scalars().all()
+        siblings = [
+            {
+                "case_id": str(c.id), "ref": c.subject_ref, "state": c.state,
+                "amount": _money(max(0, c.amount_at_risk - c.amount_recovered)),
+            }
+            for c in sib_rows
+        ]
+
+    disputed = bool(await session.scalar(
+        select(func.count()).select_from(CaseDispute).where(
+            CaseDispute.case_id == case.id, CaseDispute.status == "open"
+        )
+    ))
+
+    return {
+        "case_id": str(case.id),
+        "ref": case.subject_ref,
+        "risk_type": case.risk_type.replace("_", " "),
+        "state": case.state,
+        "at_risk": _money(case.amount_at_risk),
+        "recovered": _money(case.amount_recovered) if case.amount_recovered else None,
+        "outstanding": _money(max(0, case.amount_at_risk - case.amount_recovered)),
+        # The distinction the headline depends on: money we earned versus
+        # money that arrived anyway. Never collapse them.
+        "attributed": case.recovered_via_attempt_id is not None,
+        "recovered_ref": case.recovered_ref,
+        "opened": _ist(_aware(case.opened_at)).strftime("%d %b %Y, %H:%M"),
+        "attempts_used": case.attempts_used,
+        "max_attempts": case.max_attempts,
+        "close_reason": case.close_reason,
+        "disputed": disputed,
+        # None means "the engine may act right now" — the honest opposite of
+        # a stopping rule, and worth saying rather than leaving blank.
+        "stop_reason": stop_reason(case, ledger),
+        "diagnosis": {
+            "failure_class": failure.failure_class if failure else None,
+            "retryable": failure.is_retryable if failure else None,
+            "error_reason": failure.error_reason if failure else None,
+            "error_code": failure.error_code if failure else None,
+            "error_source": failure.error_source if failure else None,
+            "error_step": failure.error_step if failure else None,
+            "method": failure.method if failure else None,
+            "bank": (failure.bank or failure.card_issuer) if failure else None,
+        } if failure else None,
+        "attempts": [
+            {
+                "n": a.attempt_number,
+                "action": a.action_type,
+                "rail": a.target_rail,
+                "agent": a.agent_type,
+                "reason": a.agent_reasoning,
+                "confidence": (
+                    round(a.agent_confidence * 100) if a.agent_confidence else None
+                ),
+                "guardrail_passed": a.guardrail_passed,
+                "rejection": a.guardrail_rejection_reason,
+                "result": a.result,
+                "executed": (
+                    _ist(_aware(a.executed_at)).strftime("%d %b, %H:%M")
+                    if a.executed_at else None
+                ),
+            }
+            for a in attempts
+        ],
+        "events": [
+            {
+                "type": e.event_type.replace("_", " "),
+                "actor": e.actor,
+                "at": _ist(_aware(e.created_at)).strftime("%d %b, %H:%M:%S"),
+                "detail": e.detail or {},
+                # A stamped hash means this row is inside the verified chain
+                # (scripts/audit_chain.py --verify). Shown because "auditable"
+                # should be checkable, not asserted.
+                "sealed": bool(e.event_hash),
+            }
+            for e in events
+        ],
+        "account": {
+            "name": account.display_name or account.account_ref,
+            "siblings": siblings,
+        } if account else None,
+    }
