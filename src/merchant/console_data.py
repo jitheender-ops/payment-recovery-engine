@@ -902,7 +902,7 @@ async def operations_panel(session: AsyncSession) -> dict[str, Any]:
 
 
 async def case_list(
-    session: AsyncSession, *, state: str = "all", limit: int = 100
+    session: AsyncSession, *, state: str = "all", limit: int = 100, offset: int = 0
 ) -> list[dict[str, Any]]:
     """
     Every case, filterable by state. PII-free: subject_ref, not customer_id.
@@ -911,20 +911,29 @@ async def case_list(
     merchant console does not get to relax that rule, so it selects the
     merchant's own reference instead — which is what identifies a case to the
     person reading it anyway.
+
+    `offset` paginates. It was `limit=100` with no offset, which silently
+    truncated: fine against a few dozen cases and a lie against a few
+    thousand, where the page would show the newest hundred and give no hint
+    that the rest existed.
     """
     stmt = select(
+        RecoveryCase.id,
         RecoveryCase.subject_ref, RecoveryCase.risk_type, RecoveryCase.state,
         RecoveryCase.amount_at_risk, RecoveryCase.amount_recovered,
         RecoveryCase.attempts_used, RecoveryCase.max_attempts,
         RecoveryCase.escalation_level, RecoveryCase.next_action_at,
         RecoveryCase.close_reason, RecoveryCase.opened_at,
-    ).order_by(RecoveryCase.opened_at.desc()).limit(limit)
+    ).order_by(RecoveryCase.opened_at.desc()).limit(limit).offset(offset)
     if state != "all":
         stmt = stmt.where(RecoveryCase.state == state)
 
     rows = (await session.execute(stmt)).all()
     return [
         {
+            # The id is what a case-detail link needs. Not PII — an opaque
+            # UUID the engine generated, unlike customer_id which is an email.
+            "case_id": str(r.id),
             "case_ref": r.subject_ref,
             "risk_type": r.risk_type,
             "state": r.state,

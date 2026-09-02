@@ -5,6 +5,8 @@
 #   ./run.sh                 build + verify + API + dashboard + public tunnel
 #   ./run.sh --demo          everything, offline: SQLite, fake gateway, seeded,
 #                            no credentials and no Docker needed
+#   ./run.sh --demo --scale  the same, with a few thousand cases instead of
+#                            a few dozen — for the batch-recovery story
 #   ./run.sh --verify-only   build + ruff/pytest/mypy, start nothing (CI)
 #   ./run.sh --no-tunnel     build + verify + run locally, no public URL
 #
@@ -17,6 +19,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 VERIFY_ONLY=false
 TUNNEL=true
 DEMO=false
+SCALE=false
 for arg in "$@"; do
   case "$arg" in
     --verify-only) VERIFY_ONLY=true ;;
@@ -24,7 +27,11 @@ for arg in "$@"; do
     # --demo implies --no-tunnel. The whole point is that nothing leaves the
     # machine, and a public URL fronting a fake gateway is the worst of both.
     --demo)        DEMO=true; TUNNEL=false ;;
-    -h|--help)     sed -n '3,9p' "$0"; exit 0 ;;
+    # Thousands of cases rather than dozens. Off by default because the
+    # small book seeds in seconds and is enough to see every feature; the
+    # big one exists so "recovered X across N cases" is a real measurement.
+    --scale)       SCALE=true ;;
+    -h|--help)     sed -n '3,11p' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -372,6 +379,12 @@ if $DEMO && [[ ! -f .demo.seeded ]]; then
     --count 16 2>&1 | tail -20 || warn "risk-batch seed had problems (see above)"
   "$VPY" scripts/recovery_links.py --seed-states >/dev/null 2>&1 \
     || warn "preview-state seed had problems"
+  if $SCALE; then
+    # Routed through the real classifier, agent and guardrail — only the
+    # persistence is bulk. See scripts/seed_bulk.py.
+    "$VPY" scripts/seed_bulk.py --count 2500 2>/dev/null \
+      || warn "bulk seed had problems"
+  fi
   touch .demo.seeded
   ok "seeded"
 fi
