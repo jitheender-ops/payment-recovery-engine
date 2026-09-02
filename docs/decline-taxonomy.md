@@ -82,6 +82,39 @@ Not money lost, but a money page saying something untrue:
   classes are UPI-recommended, so the button was already right; only the
   explanation was wrong.
 
+## Second audit: the forcing test cards (2026-09-01)
+
+Razorpay publishes cards that force a **chosen** decline reason in test mode
+(`payments/payments/test-card-details.md`). Those are strings the gateway is
+*observed to emit*, where the list above is what Razorpay *documents* — two
+references, kept separate in `error_codes.yaml` so neither is mistaken for
+the other. That separation earned itself immediately: the documented-reason
+check was already passing when three test-card strings turned out to reach
+no rule at all.
+
+All three were absorbed by the priority-10 customer catch-all into a
+**retryable** `issuer_decline`. Unlike `card_declined` in the first audit
+these were therefore *chased rather than abandoned* — which is the more
+expensive failure, because the engine spent real budget doing it.
+
+| Test-card reason | Was | Now | Why it mattered |
+|---|---|---|---|
+| `insufficient_fund` **(singular)** — our rule was plural | `issuer_decline` | `insufficient_funds` | The page said *"your bank declined… call the number on your card"* instead of *"add funds or use a different card"* — the one piece of advice that resolves it. |
+| `card_number_invalid` — ours was `invalid_card_number` | `issuer_decline`, **retryable** | `invalid_card`, non-retryable | **The expensive one.** The engine retried a card whose number cannot work, spending attempt budget and contact allowance per case. That is precisely the false-retry the eval harness reports at 0%, so the gap quietly undercut that headline too. |
+| `card_disabled_for_online_payments` — no rule | `issuer_decline`, **retryable** | `hard_decline` | The card cannot be used online at all; another attempt on the same instrument is guaranteed to fail. `hard_decline`'s copy is the honest one — *"another attempt on the same method will be declined too"* — where `expired_instrument` would claim an expiry that has not happened. |
+
+### Reproducing these against the real gateway
+
+The card numbers are in `error_codes.yaml` under `razorpay_test_cards`. In
+test mode, pay a Payment Link with one and **select "failure"** on the
+success/failure screen; the payment fails carrying that exact
+`error_reason`. Two word-order traps to note, since both bit here:
+Razorpay writes `card_number_invalid` and `insufficient_fund`, not
+`invalid_card_number` and `insufficient_funds`.
+
+`scripts/seed_error_codes.py` now checks this second list too, and reports
+it on its own line. A missing mapping fails the build.
+
 ## Deliberate disagreements with Razorpay
 
 Both are printed by `scripts/seed_error_codes.py` on every run, so neither can

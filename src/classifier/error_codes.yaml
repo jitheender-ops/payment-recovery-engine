@@ -71,6 +71,30 @@ rules:
     retryable: false
     priority: 85
 
+  # Razorpay's own spelling, confirmed from the forcing test cards
+  # (test-card-details.md). Ours above is the reverse word order, so this
+  # string reached no rule and the priority-10 customer catch-all absorbed
+  # it into issuer_decline — RETRYABLE. The engine therefore retried cards
+  # whose number is invalid: attempts that cannot ever succeed, spending
+  # attempt budget and contact allowance on each one. That is precisely the
+  # false-retry the eval harness reports at 0%, so the gap also quietly
+  # undercut the headline. audit 2026-09-01 (test cards)
+  - error_reason: "card_number_invalid"
+    failure_class: "invalid_card"
+    retryable: false
+    priority: 85
+
+  # The card cannot be used online at all, so another attempt on the same
+  # instrument is guaranteed to fail. hard_decline's copy is the honest one
+  # here — "another attempt on the same method will be declined too. Use a
+  # different card or UPI" — where expired_instrument would claim an expiry
+  # that has not happened. Matched nothing before; caught by the catch-all
+  # as a retryable issuer_decline. audit 2026-09-01 (test cards)
+  - error_reason: "card_disabled_for_online_payments"
+    failure_class: "hard_decline"
+    retryable: false
+    priority: 85
+
   - error_reason: "invalid_cvv"
     failure_class: "invalid_card"
     retryable: false
@@ -127,6 +151,17 @@ rules:
     priority: 75
 
   - error_reason: "insufficient_balance"
+    failure_class: "insufficient_funds"
+    retryable: true
+    priority: 75
+
+  # SINGULAR. Razorpay's forcing test card emits "insufficient_fund"; the
+  # rule above is plural, so the real string fell to the catch-all and the
+  # page told the customer their bank had declined and to call the number on
+  # their card — instead of "add funds or use a different card", which is
+  # the one piece of advice that actually resolves it.
+  # audit 2026-09-01 (test cards)
+  - error_reason: "insufficient_fund"
     failure_class: "insufficient_funds"
     retryable: true
     priority: 75
@@ -378,6 +413,32 @@ razorpay_unmapped_deliberately:
     the engine will not chase these on its own, while Razorpay calls them
     retryable. Closing it properly means a new FailureClass with its own
     customer copy, which is a product decision rather than a mapping fix.
+
+# ── The forcing test cards ───────────────────────────────────────────────
+#
+# razorpay.com/docs/build/llm-docs/payments/payments/test-card-details.md —
+# cards that force a CHOSEN decline reason in test mode. A second, separate
+# reference from the failure-analysis list below, and kept separate on
+# purpose: these are strings the gateway is *observed* to emit, while that
+# list is what Razorpay *documents*. Conflating them would lose the
+# provenance that makes either worth checking against.
+#
+# No retryable verdict is recorded here because that page publishes none —
+# the coverage check only asserts each string reaches a real class. Three of
+# them did not on 2026-09-01, and all three were absorbed by a catch-all
+# into a RETRYABLE issuer_decline: see the rules marked "(test cards)".
+#
+# The card numbers are the reproduction steps. Pay one in test mode and the
+# payment fails with that exact error_reason.
+razorpay_test_cards:
+  payment_timed_out: "4100 2800 0009 0000"
+  insufficient_fund: "4100 2800 0008 0001"
+  payment_cancelled: "4100 2800 0007 0002"
+  card_declined: "4100 2800 0006 0003"
+  card_disabled_for_online_payments: "4100 2800 0003 0006"
+  card_number_invalid: "4100 2800 0001 0008"
+  gateway_technical_error: "4100 2800 0002 0007"
+  authentication_failed: "4100 2800 0000 0009"
 
 razorpay_documented:
   # Customer drop-offs

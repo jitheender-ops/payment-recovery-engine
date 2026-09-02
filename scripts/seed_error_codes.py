@@ -34,6 +34,7 @@ def main() -> int:
     rules = data.get("rules", [])
     documented: dict[str, bool] = data.get("razorpay_documented", {})
     acknowledged: dict[str, str] = data.get("razorpay_unmapped_deliberately", {})
+    test_cards: dict[str, str] = data.get("razorpay_test_cards", {})
     valid_classes = {fc.value for fc in FailureClass}
     errors: list[str] = []
     class_coverage = set()
@@ -81,7 +82,24 @@ def main() -> int:
                 f"Razorpay says {rzp_retryable}"
             )
 
+    # The forcing test cards are a SECOND reference, checked the same way but
+    # reported separately — they are strings the gateway is observed to emit,
+    # where `documented` is what Razorpay publishes. Three of these reached
+    # no rule on 2026-09-01 while the documented list was already complete,
+    # so one source does not stand in for the other.
+    card_unmapped: list[str] = []
+    for reason in sorted(test_cards):
+        fc, _ = mapper.classify("", None, None, None, reason)
+        if fc is FailureClass.UNKNOWN and reason not in acknowledged:
+            card_unmapped.append(reason)
+    if card_unmapped:
+        errors.append(
+            "these forcing-test-card reasons reach no rule, so a real test "
+            "payment would be misclassified: " + ", ".join(card_unmapped)
+        )
+
     print(f"Razorpay-documented reasons: {len(documented)}")
+    print(f"Forcing test-card reasons:   {len(test_cards)}")
     if unmapped:
         errors.append(
             "these documented reasons classify as UNKNOWN, so cases carrying "

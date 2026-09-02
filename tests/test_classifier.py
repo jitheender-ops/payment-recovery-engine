@@ -206,3 +206,81 @@ def test_the_deliberate_disagreements_stay_deliberate() -> None:
     # product decision rather than a mapping one.
     fc, retryable = mapper.classify("", error_reason="payment_risk_check_failed")
     assert fc is FailureClass.FRAUD_BLOCK and retryable is False
+
+
+# ── Forcing test cards, 2026-09-01 ───────────────────────────────────────
+#
+# Razorpay publishes cards that force a CHOSEN decline reason in test mode.
+# Three of those strings reached no rule and were absorbed by the priority-10
+# customer catch-all into a RETRYABLE issuer_decline — so unlike the earlier
+# audit's findings these cases were chased rather than abandoned, which is
+# the more expensive failure of the two. They are the literal strings the
+# gateway emits, so any real integration produces them.
+
+
+def test_a_card_whose_number_is_invalid_is_never_retried() -> None:
+    """
+    The expensive one. As issuer_decline it was RETRYABLE, so the engine
+    spent attempt budget and contact allowance retrying a card whose number
+    cannot work. That is exactly the false-retry the eval harness reports at
+    0%, so the gap also quietly undercut that headline.
+    """
+    fc, retryable = mapper.classify(
+        "BAD_REQUEST_ERROR", error_source="customer",
+        error_step="payment_authorization", error_reason="card_number_invalid",
+    )
+    assert fc is FailureClass.INVALID_CARD
+    assert retryable is False
+
+
+def test_insufficient_fund_singular_gets_the_funds_advice() -> None:
+    """
+    Razorpay's card emits the SINGULAR "insufficient_fund"; our rule was
+    plural. The customer was told their bank declined and to call the number
+    on their card, instead of "add funds or use a different card" — the one
+    piece of advice that actually resolves it.
+    """
+    fc, retryable = mapper.classify(
+        "BAD_REQUEST_ERROR", error_source="customer",
+        error_step="payment_authorization", error_reason="insufficient_fund",
+    )
+    assert fc is FailureClass.INSUFFICIENT_FUNDS
+    assert retryable is True
+
+
+def test_a_card_disabled_for_online_payments_is_not_retried() -> None:
+    """Another attempt on the same instrument is guaranteed to fail."""
+    fc, retryable = mapper.classify(
+        "BAD_REQUEST_ERROR", error_source="customer",
+        error_step="payment_authorization",
+        error_reason="card_disabled_for_online_payments",
+    )
+    assert fc is FailureClass.HARD_DECLINE
+    assert retryable is False
+
+
+def test_every_forcing_test_card_reason_is_matched_by_name() -> None:
+    """
+    The guard for this second reference.
+
+    Probed with an empty error_code and no source/step so only error_reason
+    rules can fire — a realistic 5-tuple proves nothing, because the
+    catch-alls swallow everything, which is how all three hid while the
+    documented-reason check was already passing. One source does not stand
+    in for the other.
+    """
+    data = yaml.safe_load(_YAML_PATH.read_text())
+    cards = data.get("razorpay_test_cards", {})
+    acknowledged = data.get("razorpay_unmapped_deliberately", {})
+    assert cards, "the forcing test-card reference went missing"
+
+    unmapped = [
+        reason
+        for reason in cards
+        if mapper.classify("", error_reason=reason)[0] is FailureClass.UNKNOWN
+        and reason not in acknowledged
+    ]
+    assert not unmapped, (
+        f"{unmapped} reach no rule — a real test payment on that card would "
+        "be misclassified by the catch-all"
+    )
