@@ -876,6 +876,67 @@ async def console_cases(request: Request) -> Any:
     return await _render_console(request, "console_cases.html", build, state=state)
 
 
+@router.get("/console/batch", response_class=HTMLResponse)
+async def console_batch(request: Request) -> Any:
+    """Preview a cohort: eligible, blocked, and why — before anything runs."""
+    fclass = request.query_params.get("class") or None
+
+    async def build(session: Any) -> dict[str, Any]:
+        from src import recovery_batch
+
+        data: dict[str, Any] = {"cohorts": await recovery_batch.cohorts(session)}
+        if fclass:
+            plan = await recovery_batch.plan(session, failure_class=fclass)
+            data["plan"] = plan.summary()
+            # A sample, not the cohort: the point is to show the SHAPE of the
+            # decisions, and a page rendering 500 identical rows shows less.
+            data["approved_sample"] = [
+                {"ref": c.ref, "action": c.action, "rail": c.rail,
+                 "confidence": round(c.confidence * 100) if c.confidence else None,
+                 "reason": c.reason, "case_id": str(c.case_id)}
+                for c in plan.approved[:8]
+            ]
+            data["blocked_sample"] = [
+                {"ref": c.ref, "reasons": c.blocked_by, "case_id": str(c.case_id)}
+                for c in plan.blocked[:8]
+            ]
+        return data
+
+    return await _render_console(
+        request, "console_batch.html", build,
+        fclass=fclass, demo_mode=get_settings().demo_mode,
+    )
+
+
+@router.post("/console/batch/run", response_class=HTMLResponse)
+async def console_batch_run(request: Request) -> Any:
+    """
+    Execute the approved half of a cohort.
+
+    POST, not GET: this spends attempt budget and calls the gateway. It also
+    re-validates every case against the guardrail rather than trusting the
+    preview — see recovery_batch.execute().
+    """
+    form = await request.form()
+    fclass = str(form.get("class") or "") or None
+
+    async def build(session: Any) -> dict[str, Any]:
+        from src import recovery_batch
+
+        plan = await recovery_batch.plan(session, failure_class=fclass)
+        result = await recovery_batch.execute(session, plan)
+        return {
+            "cohorts": await recovery_batch.cohorts(session),
+            "plan": plan.summary(),
+            "result": result,
+        }
+
+    return await _render_console(
+        request, "console_batch.html", build,
+        fclass=fclass, demo_mode=get_settings().demo_mode,
+    )
+
+
 @router.get("/console/case/{case_id}", response_class=HTMLResponse)
 async def console_case(request: Request, case_id: str) -> Any:
     """One case as the whole decision chain, over its audit trail."""

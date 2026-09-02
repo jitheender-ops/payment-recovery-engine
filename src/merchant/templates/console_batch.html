@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, bar %}
+{% block title %}Batch recovery · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("batch", merchant_name) }}
+<main class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Batch recovery</div>
+    <h1 class="ptitle">Recover across a cohort, not one case at a time</h1>
+    <p class="psub">"We recovered a payment" is an anecdote. This runs the same
+    agent and the same guardrail over every eligible case and reports what the
+    money actually did — including everything it refused to touch.</p>
+  </header>
+
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>Nothing here is cached; every figure is read live.</p></div>
+  {% else %}
+
+  {# ── Result first, when there is one ─────────────────────────────────── #}
+  {% if data.result %}
+  <section class="sec">
+    <h2 class="sec-t">Result</h2>
+    <p class="sec-s">Ran {{ data.result.ran_at }} over
+      <strong>{{ data.plan.cohort }}</strong>.</p>
+    <section class="money" style="margin-top:.9rem">
+      <div class="money-half">
+        <span class="money-label">Recovery attempts made</span>
+        <span class="money-value">{{ "{:,}".format(data.result.attempted) }}</span>
+        <span class="money-foot">
+          {{ data.result.accepted }} accepted by the gateway
+          ({{ data.result.accept_rate }}%), reaching
+          {{ data.result.at_risk_touched }} of exposure.
+        </span>
+      </div>
+      <div class="money-rule" aria-hidden="true"></div>
+      <div class="money-half">
+        <span class="money-label">Money recovered</span>
+        <span class="money-value {{ 'green' if data.result.recovered_paise else '' }}">{{ data.result.recovered }}</span>
+        <span class="money-foot">
+          {{ data.result.recovered_cases }} case{{ '' if data.result.recovered_cases == 1 else 's' }}
+          paid and attributed to <em>this run's</em> attempts. An accepted
+          attempt means a payment link EXISTS — the customer has not paid
+          yet, and captures arrive over hours. Recovery is counted only
+          when the webhook lands and joins back to the attempt that earned
+          it, so this figure grows after the run and never guesses.
+        </span>
+      </div>
+    </section>
+    <p class="sec-s" style="margin-top:.9rem">
+      {{ data.plan.blocked }} case{{ '' if data.plan.blocked == 1 else 's' }}
+      holding {{ data.plan.blocked_value }} were never attempted — the
+      guardrail or a stopping rule refused them. Refusing is the feature.</p>
+    {% if demo_mode and data.result.attempted %}
+    {# Demo only. The batch cannot show recovery because nobody has paid the
+       links it just minted — in production that arrives over hours. This
+       fires real signed captures through the real attribution path; what is
+       simulated is customers deciding to pay, not the accounting. #}
+    <form method="post" action="/demo/pay-batch" style="margin-top:1.2rem">
+      <input type="hidden" name="share" value="0.45">
+      <button class="btn btn-ghost" type="submit">
+        Simulate 45% of these customers paying &rarr;</button>
+      <p class="sec-s" style="margin-top:.6rem"><strong>Demo only.</strong>
+        Sends genuinely HMAC-signed <span class="mono">payment.captured</span>
+        events to the real webhook endpoint, so each one passes signature
+        verification, the idempotency guard and the attribution join. Come
+        back and re-run to see the recovered figure move.</p>
+    </form>
+    {% endif %}
+
+    {% if data.result.stale %}
+    <p class="sec-s" style="margin-top:.9rem">
+      {{ data.result.stale }} approved case{{ '' if data.result.stale == 1 else 's' }}
+      changed between the preview and the run and were re-refused at execution
+      time. Counted rather than hidden — that is the guardrail catching a stale
+      approval, which is exactly what re-validating is for.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {# ── Pick a cohort ───────────────────────────────────────────────────── #}
+  <section class="sec">
+    <h2 class="sec-t">Cohorts</h2>
+    <p class="sec-s">Open payment-rail cases that still have attempt budget,
+      by what the gateway blamed. Everything else has already stopped.</p>
+    {% if data.cohorts %}
+    <div class="tablewrap" style="margin-top:.9rem">
+      <table>
+        <thead><tr><th>Failure class</th><th class="n">Cases</th>
+          <th class="n">Outstanding</th><th></th></tr></thead>
+        <tbody>
+        {% for c in data.cohorts %}
+          <tr>
+            <td>{{ c.failure_class }}</td>
+            <td class="n">{{ "{:,}".format(c.cases) }}</td>
+            <td class="n">{{ c.value }}</td>
+            <td><a href="/console/batch?class={{ c.failure_class }}">Preview &rarr;</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="sec-s">No open case has budget left — there is nothing to batch.</p>
+    {% endif %}
+  </section>
+
+  {# ── The preview: what WOULD happen ──────────────────────────────────── #}
+  {% if data.plan %}
+  <section class="sec">
+    <h2 class="sec-t">Preview · {{ data.plan.cohort }}</h2>
+    <p class="sec-s">Scored without touching anything. Every case ran through
+      the real agent and the real guardrail; nothing below has been executed.</p>
+
+    <div style="margin-top:.9rem">
+      {{ bar("Approved", data.plan.approved ~ " · " ~ data.plan.approved_value,
+             data.plan.approved / (data.plan.eligible or 1)) }}
+      {{ bar("Refused", data.plan.blocked ~ " · " ~ data.plan.blocked_value,
+             data.plan.blocked / (data.plan.eligible or 1), "red") }}
+    </div>
+
+    {% if data.plan.block_reasons %}
+    <p class="sec-s" style="margin-top:.9rem">Refused because:</p>
+    <div class="tablewrap">
+      <table><thead><tr><th>Rule</th><th class="n">Cases</th></tr></thead><tbody>
+      {% for r in data.plan.block_reasons %}
+        <tr><td>{{ r.rule }}</td><td class="n">{{ r.cases }}</td></tr>
+      {% endfor %}
+      </tbody></table>
+    </div>
+    {% endif %}
+
+    {% if data.approved_sample %}
+    <p class="sec-s" style="margin-top:1.2rem">A sample of what the agent
+      decided — the shape of the batch, not all {{ data.plan.approved }} rows:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Case</th><th>Action</th><th class="n">Confidence</th>
+          <th>Reasoning</th></tr></thead>
+        <tbody>
+        {% for a in data.approved_sample %}
+          <tr>
+            <td><a class="mono" href="/console/case/{{ a.case_id }}">{{ a.ref }}</a></td>
+            <td>{{ a.action }}{% if a.rail %} → {{ a.rail }}{% endif %}</td>
+            <td class="n">{% if a.confidence is not none %}{{ a.confidence }}%{% else %}—{% endif %}</td>
+            <td class="sec-s" style="margin:0">{{ a.reason or "—" }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if data.blocked_sample %}
+    <p class="sec-s" style="margin-top:1.2rem">And a sample of what it refused:</p>
+    <div class="tablewrap">
+      <table><thead><tr><th>Case</th><th>Refused because</th></tr></thead><tbody>
+      {% for b in data.blocked_sample %}
+        <tr>
+          <td><a class="mono" href="/console/case/{{ b.case_id }}">{{ b.ref }}</a></td>
+          <td class="sec-s" style="margin:0">{{ b.reasons | join("; ") }}</td>
+        </tr>
+      {% endfor %}
+      </tbody></table>
+    </div>
+    {% endif %}
+
+    {% if data.plan.approved and not data.result %}
+    <form method="post" action="/console/batch/run" style="margin-top:1.4rem">
+      <input type="hidden" name="class" value="{{ fclass or '' }}">
+      <button class="btn" type="submit">
+        Run recovery on {{ data.plan.approved }} approved case{{ '' if data.plan.approved == 1 else 's' }}
+      </button>
+      <p class="sec-s" style="margin-top:.6rem">Spends attempt budget and calls
+        the gateway. Each case is re-checked against the guardrail at execution
+        time rather than trusting this preview — it may be minutes old, and a
+        budget or a blackout boundary can have moved under it.</p>
+    </form>
+    {% endif %}
+  </section>
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

@@ -587,3 +587,73 @@ is why a real merchant console would never list them.</div>
       the console's recovered figure has moved.</li>
 </ol>
 </div></body></html>""")
+
+
+@router.post("/demo/pay-batch", response_class=HTMLResponse)
+async def demo_pay_batch(request: Request) -> HTMLResponse:
+    """
+    Have a share of the customers actually pay — demo only.
+
+    Why this exists: a batch run reports attempts ACCEPTED, which honestly
+    means "a payment link now exists", not "the money came back". Recovery is
+    only counted when a capture webhook lands and is attributed. In
+    production that happens over hours as real customers pay; in a demo
+    nobody pays, so the batch would forever read ₹0 recovered and the loop
+    would never visibly close.
+
+    This fires genuinely HMAC-signed `payment.captured` events at the real
+    webhook endpoint for a share of the outstanding demo links — the same
+    path a real payment takes, through signature verification, the
+    idempotency guard and the attribution join. Nothing about the
+    measurement is faked; what is simulated is customers deciding to pay.
+    """
+    settings = get_settings()
+    try:
+        share = float(str((await request.form()).get("share") or "0.45"))
+    except (TypeError, ValueError):
+        share = 0.45
+    share = min(max(share, 0.0), 1.0)
+
+    unpaid = [r for r in _LINKS.values() if r["status"] != "paid"]
+    # Deterministic, not random: a demo that reports a different figure on
+    # every click is one nobody can check against the console afterwards.
+    take = unpaid[: int(len(unpaid) * share)]
+
+    target = f"{request.base_url}".rstrip("/") + "/webhooks/razorpay"
+    paid = 0
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for record in take:
+            payload = captured_payload(
+                int(record["amount"] or 0),
+                idempotency_key=record.get("notes", {}).get("retry_idempotency_key"),
+            )
+            body = json.dumps(payload).encode()
+            try:
+                resp = await client.post(
+                    target, content=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Razorpay-Signature": sign(
+                            body, reveal(settings.razorpay_webhook_secret)
+                        ),
+                    },
+                )
+            except Exception:
+                logger.exception("DEMO: capture delivery failed for %s", record["id"])
+                continue
+            if resp.status_code == 200:
+                record["status"] = "paid"
+                paid += 1
+
+    logger.info("DEMO: %d of %d outstanding links paid", paid, len(unpaid))
+    return _page(
+        "Payments simulated",
+        f"""<h1>{paid} customers paid</h1>
+<p class="sub">Each sent a signed <code>payment.captured</code> to the real
+webhook endpoint, so every rupee went through signature verification, the
+idempotency guard and the attribution join — exactly as a real payment
+would. What was simulated is customers <em>deciding</em> to pay, not the
+accounting.</p>
+<p class="sub">Go back to <code>/console/batch</code> and re-run, or open
+<code>/console/live</code>: the recovered figure has moved.</p>""",
+    )
