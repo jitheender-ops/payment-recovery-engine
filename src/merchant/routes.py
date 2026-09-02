@@ -438,6 +438,8 @@ async def _console_data() -> dict[str, Any] | None:
             flight = await console_data.in_flight(session)
             activity = await console_data.activity_feed(session)
             stopping = await console_data.stopping_rules(session)
+            from src import downtime as _downtime
+            live_downtime = await _downtime.current()
 
             alert_rows = (
                 await session.execute(
@@ -571,6 +573,12 @@ async def _console_data() -> dict[str, Any] | None:
         "flight": flight,
         "activity": activity,
         "stopping": stopping,
+        "downtime": {
+            "available": live_downtime.available,
+            # NOT "items": Jinja resolves `data.downtime.items` to dict.items,
+            # the bound method, and renders a TypeError instead of the rows.
+            "rails": live_downtime.summary(),
+        },
         # The worklist, assembled from the panels above rather than re-read:
         # everything the engine deliberately stopped short of and cannot
         # resolve without a person. Empty is a real answer the page states.

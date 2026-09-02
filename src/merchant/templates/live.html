@@ -87,6 +87,31 @@
         </div>
       </section>
 
+      {# ── What the gateway says is down right now ────────────────────────
+         The engine otherwise learns about downtime only AFTER a decline has
+         already cost an attempt. With a feed it routes around the rail
+         first. src/downtime.py; Razorpay ships this as an on-demand
+         feature, so an unavailable feed is normal and says so. #}
+      {% if data.downtime and data.downtime.available and data.downtime.rails %}
+      <section class="sec" data-stage="2">
+        <h2 class="sec-t">Rails reported down right now</h2>
+        <p class="sec-s">Straight from the gateway, not inferred from our own
+          declines. A rail listed here is dropped from switch_rail's choices
+          before an attempt is spent finding out.</p>
+        <div class="tablewrap" style="margin-top:.9rem">
+          <table>
+            <thead><tr><th>Method</th><th>Issuer</th><th>Severity</th><th>Status</th></tr></thead>
+            <tbody>
+            {% for d in data.downtime.rails %}
+              <tr><td>{{ d.method }}</td><td>{{ d.issuer }}</td>
+                  <td>{{ d.severity }}</td><td>{{ d.status }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+
       {# ── Where the engine has stopped ────────────────────────────────────
          Directly under the money, because it is the other half of the same
          sentence: this is the money the engine is deliberately NOT chasing,

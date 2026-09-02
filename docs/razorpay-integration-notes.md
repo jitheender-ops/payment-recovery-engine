@@ -144,15 +144,36 @@ reachable so far:
 Resolve with the CLI's Smart Collect commands against a test account, not by
 reading more overview pages.
 
-### Live downtime feed
+### Live downtime feed — BUILT
 
-The CLI lists a `downtime` command group, and
-`payments/payments/downtime-updates.md` confirms Razorpay publishes downtime
-grouped by payment method. Today this engine infers `bank_downtime` *after the
-fact*, from a decline that already happened. A live feed would let
-`src/executor/rail_selector.py` switch rails **before** spending an attempt on
-a rail that is known to be down. Genuinely new capability; needs the same
-spike as Smart Collect.
+`GET /v1/payments/downtimes` and `/v1/payments/downtimes/:id`. Implemented in
+`src/downtime.py`, consumed by `src/executor/rail_selector.py`, surfaced on
+`/console/live`.
+
+It resolves a `ponytail:` note that had stood in the rail selector asking for
+exactly this — *"real downtime-aware routing needs a bank-health source we
+don't have; wire one in and take `bank` as an argument when it exists."*
+Previously `bank_downtime` was inferred only AFTER a decline had already
+cost an attempt; now a rail the gateway reports as impaired is dropped from
+`switch_rail`'s choices first.
+
+Two caveats, both in the code:
+
+- **It is an on-demand Razorpay feature** — the docs say support must enable
+  it, so a fresh test account gets 401/404. Every failure path degrades to
+  "nothing is known to be down" rather than raising. A health feed that can
+  talk the engine out of chasing is a liability, not a feature. Logged at
+  info, not error: it is a configuration fact.
+- **The response schema was not in the reachable documentation.** Endpoints
+  are confirmed; field names follow Razorpay's usual collection shape and are
+  parsed defensively, ignoring anything unrecognised. `_parse` is the single
+  place to correct if the real payload differs.
+
+An issuer-scoped outage matches only that issuer; matching it against every
+bank would route the whole book off a rail because one bank is down. A
+`resolved` row never steers routing. In demo mode `src/demo.py` serves the
+same shape locally, so the client, the parsing and the routing decision are
+all the real ones.
 
 ### `payment_risk_check_failed`
 

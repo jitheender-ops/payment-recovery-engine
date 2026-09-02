@@ -657,3 +657,56 @@ accounting.</p>
 <p class="sub">Go back to <code>/console/batch</code> and re-run, or open
 <code>/console/live</code>: the recovered figure has moved.</p>""",
     )
+
+
+def demo_downtime_payload() -> dict[str, Any]:
+    """
+    A downtime feed, in Razorpay's documented collection shape.
+
+    The real endpoint is an ON-DEMAND feature — their docs say it must be
+    enabled by contacting support — so a fresh test account cannot call it
+    and the integration would be undemonstrable. This serves the same shape
+    locally, exactly as this module serves Payment Links: the client, the
+    parsing and the routing decision are all the real ones, and only the
+    data source is local.
+
+    One method-wide outage and one issuer-scoped one, because those are the
+    two cases `DowntimeSnapshot.is_down()` has to tell apart — an
+    issuer-scoped outage matching every bank would route the whole book off
+    a rail because one bank is down.
+    """
+    return {
+        "entity": "collection",
+        "count": 2,
+        "items": [
+            {
+                "id": "down_demo_netbanking",
+                "entity": "payment.downtime",
+                "method": "netbanking",
+                "status": "started",
+                "severity": "high",
+                "instrument": {"bank": "PNB"},
+                "created_at": int(time.time()) - 1800,
+            },
+            {
+                "id": "down_demo_wallet",
+                "entity": "payment.downtime",
+                "method": "wallet",
+                "status": "started",
+                "severity": "medium",
+                "instrument": {},
+                "created_at": int(time.time()) - 600,
+            },
+            {
+                # Resolved rows must never steer routing — included so the
+                # parser's status filter is exercised by the demo itself.
+                "id": "down_demo_resolved",
+                "entity": "payment.downtime",
+                "method": "upi",
+                "status": "resolved",
+                "severity": "low",
+                "instrument": {},
+                "created_at": int(time.time()) - 7200,
+            },
+        ],
+    }

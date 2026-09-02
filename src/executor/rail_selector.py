@@ -8,7 +8,7 @@ proposes a rail, this decides whether that proposal survives.
 
 from __future__ import annotations
 
-from typing import get_args
+from typing import Any, get_args
 
 from src.agent.actions import PaymentRail
 
@@ -26,6 +26,9 @@ def get_available_rails(current_method: str) -> list[PaymentRail]:
 def select_alternative_rail(
     current_method: str,
     failure_class: str = "",
+    *,
+    downtime: Any = None,
+    bank: str | None = None,
 ) -> PaymentRail | None:
     """
     Select the best alternative payment rail based on failure context.
@@ -44,6 +47,20 @@ def select_alternative_rail(
     if not alternatives:
         return None
 
+    # Live downtime, when a feed is available (src/downtime.py). This is the
+    # bank-health source the note below used to ask for: drop any rail the
+    # gateway itself reports as impaired right now, so an attempt is not
+    # spent learning it the expensive way.
+    #
+    # If that would leave nothing, keep the original list. A degraded rail
+    # is a worse bet than a healthy one and a better bet than not trying —
+    # and a health feed that can talk the engine out of chasing entirely is
+    # a liability rather than a feature.
+    if downtime is not None:
+        healthy = [r for r in alternatives if not downtime.is_down(r, bank)]
+        if healthy:
+            alternatives = healthy
+
     # Prefer UPI as the default alternative (highest success rate, simplest flow)
     prefer_upi = "upi" in alternatives
 
@@ -54,10 +71,12 @@ def select_alternative_rail(
         return "card" if "card" in alternatives else alternatives[0]
 
     if failure_class == "bank_downtime":
-        # ponytail: bank identity is ignored — every rail here can route back to
-        # the same down bank (a UPI VPA on it, netbanking into it). Real
-        # downtime-aware routing needs a bank-health source we don't have; wire
-        # one in and take `bank` as an argument when it exists.
+        # The ponytail note that stood here asked for a bank-health source so
+        # this could stop ignoring bank identity. src/downtime.py is it, and
+        # the filter above consumes it — when a feed is available a rail that
+        # routes back into the same down bank is already gone from
+        # `alternatives`. Without a feed (the endpoint is an on-demand
+        # Razorpay feature) the old heuristic still applies, unchanged.
         if current_method == "netbanking":
             return "upi" if prefer_upi else alternatives[0]
         return alternatives[0]
