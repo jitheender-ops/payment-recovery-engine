@@ -322,6 +322,8 @@ means the build is actually clean. Ctrl-C stops everything.
 | | |
 |---|---|
 | `./run.sh --demo` | everything, offline: SQLite, fake gateway, seeded, no credentials |
+| `./run.sh --demo --scale` | the same with ~2,500 cases, for the batch-recovery story |
+| `./run.sh --sandbox` | the real Razorpay test API on a local SQLite database; add `--tunnel` to close the webhook loop |
 | `./run.sh --verify-only` | build + all three checks, start nothing (needs no Postgres) |
 | `./run.sh --no-tunnel` | run locally without a public URL |
 | `PY=python3.12 ./run.sh` | pin the interpreter, when `python3` isn't the one with working wheels |

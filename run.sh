@@ -7,6 +7,8 @@
 #                            no credentials and no Docker needed
 #   ./run.sh --demo --scale  the same, with a few thousand cases instead of
 #                            a few dozen — for the batch-recovery story
+#   ./run.sh --sandbox       the REAL Razorpay sandbox (rzp_test_ keys) on a
+#                            local SQLite database. Add --tunnel for webhooks.
 #   ./run.sh --verify-only   build + ruff/pytest/mypy, start nothing (CI)
 #   ./run.sh --no-tunnel     build + verify + run locally, no public URL
 #
@@ -20,6 +22,7 @@ VERIFY_ONLY=false
 TUNNEL=true
 DEMO=false
 SCALE=false
+SANDBOX=false
 for arg in "$@"; do
   case "$arg" in
     --verify-only) VERIFY_ONLY=true ;;
@@ -31,7 +34,15 @@ for arg in "$@"; do
     # small book seeds in seconds and is enough to see every feature; the
     # big one exists so "recovered X across N cases" is a real measurement.
     --scale)       SCALE=true ;;
-    -h|--help)     sed -n '3,11p' "$0"; exit 0 ;;
+    # The real Razorpay API with test keys. There is no separate sandbox
+    # host — razorpay.com/docs/api/sandbox-setup is explicit that "the base
+    # URL for the Razorpay Sandbox and production API is the same"; the key
+    # prefix is the whole difference. So this is the ordinary production
+    # code path, packaged with the demo's SQLite and seeding so it needs no
+    # Postgres. Tunnel stays off unless asked: see the banner.
+    --sandbox)     SANDBOX=true; TUNNEL=false ;;
+    --tunnel)      TUNNEL=true ;;
+    -h|--help)     sed -n '3,13p' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -60,7 +71,44 @@ ok "$($PY -V) at $(command -v "$PY")"
 # Values are never printed — a leaked webhook secret lets anyone forge a
 # payment failure, and a leaked key secret moves money.
 say "Configuration"
-if $DEMO; then
+if $SANDBOX; then
+  # Real credentials required — this talks to Razorpay. Everything else is
+  # borrowed from the demo path so a laptop needs no Postgres and no Docker.
+  #
+  # .env is sourced (it is where the keys live) but must not beat a value
+  # the caller exported: `source` overwrites, so RAZORPAY_KEY_ID=... ./run.sh
+  # would silently use .env's key instead of the one just named. Snapshot
+  # the caller's values first and put them back afterwards.
+  _pre_key="${RAZORPAY_KEY_ID:-}"; _pre_secret="${RAZORPAY_KEY_SECRET:-}"
+  _pre_hook="${RAZORPAY_WEBHOOK_SECRET:-}"
+  [[ -f .env ]] && { set -a; source ./.env; set +a; }
+  [[ -n "$_pre_key"    ]] && export RAZORPAY_KEY_ID="$_pre_key"
+  [[ -n "$_pre_secret" ]] && export RAZORPAY_KEY_SECRET="$_pre_secret"
+  [[ -n "$_pre_hook"   ]] && export RAZORPAY_WEBHOOK_SECRET="$_pre_hook"
+  for k in RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET; do
+    [[ -n "${!k:-}" ]] || die "$k is empty. --sandbox calls the real Razorpay API; put your rzp_test_ keys in .env."
+  done
+  case "${RAZORPAY_KEY_ID}" in
+    rzp_test_*) ok "test-mode key (${RAZORPAY_KEY_ID:0:12}...)" ;;
+    rzp_live_*) die "RAZORPAY_KEY_ID is a LIVE key. --sandbox refuses to run against live: it seeds synthetic cases and would mint real Payment Links against real customers." ;;
+    *)          warn "RAZORPAY_KEY_ID has an unfamiliar prefix — expected rzp_test_" ;;
+  esac
+  set -a
+  APP_ENV=development
+  DEMO_MODE=false        # the REAL gateway, not the fake
+  DATABASE_URL="sqlite+aiosqlite:///$PWD/.sandbox.sqlite3"
+  DATABASE_URL_SYNC="sqlite:///$PWD/.sandbox.sqlite3"
+  RECOVERY_LINK_SECRET="${RECOVERY_LINK_SECRET:-sandbox_recovery_link_secret_local}"
+  RISK_WEBHOOK_SECRET="${RISK_WEBHOOK_SECRET:-sandbox_risk_secret_local}"
+  AUDIT_CHAIN_SECRET="${AUDIT_CHAIN_SECRET:-sandbox_audit_secret_local}"
+  MERCHANT_NAME="${MERCHANT_NAME:-Kirana Supply Co}"
+  DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD:-sandbox-console-password}"
+  APP_PORT="${APP_PORT:-8000}"
+  PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://127.0.0.1:$APP_PORT}"
+  set +a
+  STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
+  ok "sandbox mode — real Razorpay test API, SQLite at .sandbox.sqlite3"
+elif $DEMO; then
   # Demo mode answers for itself. It needs no .env, no Razorpay account and
   # no Postgres: the gateway is a local fake (src/demo.py) and the database
   # is a file. The secrets below are real HMAC keys — the engine genuinely
@@ -226,7 +274,7 @@ fi
 # should not need Postgres to type-check. Skipped for --demo too: that path
 # runs on a SQLite file precisely so a laptop needs no Postgres and no Docker,
 # and this block would die on a machine that has neither.
-if ! $VERIFY_ONLY && ! $DEMO; then
+if ! $VERIFY_ONLY && ! $DEMO && ! $SANDBOX; then
 say "Database"
 DB_NAME="${DB_NAME:-payment_recovery}"
 DB_USER="${DB_USER:-recovery}"
@@ -318,14 +366,14 @@ fi
 # Alembic, not init_db()'s create_all — which is development-only in
 # src/main.py now, and which never added a missing COLUMN anyway, so it was
 # never an upgrade path for a database that already existed.
-if $DEMO; then
+if $DEMO || $SANDBOX; then
   # Not alembic: the migrations carry Postgres JSONB columns SQLite cannot
   # compile. The demo takes the app's own development path instead —
   # src/main.py runs create_all when APP_ENV=development, and the JSONB
   # shim in src/database.py makes the schema portable. Deleting
   # .demo.sqlite3 is the whole reset story.
   say "Database"
-  ok "SQLite at .demo.sqlite3 — tables created on startup, no migrations to run"
+  ok "SQLite — tables created on startup, no migrations to run"
 else
   say "Applying migrations"
   "$VPY" -m alembic upgrade head || die "alembic upgrade failed"
@@ -367,14 +415,22 @@ fi
 # Only once: a re-run of --demo reuses the database it already built, so the
 # links printed last time keep working and the recovered figures do not reset
 # under you mid-demo. Delete .demo.sqlite3 to start over.
-if $DEMO && [[ ! -f .demo.seeded ]]; then
+SEED_STAMP=".demo.seeded"
+$SANDBOX && SEED_STAMP=".sandbox.seeded"
+if ($DEMO || $SANDBOX) && [[ ! -f "$SEED_STAMP" ]]; then
   say "Seeding demo data"
+  # In sandbox mode this mints REAL Razorpay test-mode Payment Links, one
+  # per chased case. They are test-mode objects on a test account — no money
+  # can move — but they are real API calls, so the seed is deliberately
+  # small here and the batch page is where volume comes from.
+  $SANDBOX && warn "seeding against the real Razorpay test API — this makes live API calls"
   # Payment rail first (it opens cases the chasers do not), then the four
   # chaser risk types, then the preview rows for page states and the B2B
   # account the statement page needs. Output is summarised, not silenced —
   # a seed that half-failed should be visible.
+  SEED_N=24; $SANDBOX && SEED_N=8
   "$VPY" scripts/simulate_webhooks.py --host "http://127.0.0.1:$APP_PORT" \
-    --count 24 2>&1 | tail -20 || warn "payment-rail seed had problems (see above)"
+    --count "$SEED_N" 2>&1 | tail -20 || warn "payment-rail seed had problems (see above)"
   "$VPY" scripts/run_risk_batch.py --host "http://127.0.0.1:$APP_PORT" \
     --count 16 2>&1 | tail -20 || warn "risk-batch seed had problems (see above)"
   "$VPY" scripts/recovery_links.py --seed-states >/dev/null 2>&1 \
@@ -385,7 +441,7 @@ if $DEMO && [[ ! -f .demo.seeded ]]; then
     "$VPY" scripts/seed_bulk.py --count 2500 2>/dev/null \
       || warn "bulk seed had problems"
   fi
-  touch .demo.seeded
+  touch "$SEED_STAMP"
   ok "seeded"
 fi
 
@@ -447,7 +503,7 @@ if [[ "${APP_ENV:-development}" == "development" ]]; then
 else
   DOCS_LINE="    API docs     disabled (APP_ENV=$APP_ENV); /openapi.json needs X-API-Key"
 fi
-if $DEMO; then DASH_HINT="password below"; else DASH_HINT="password from .env"; fi
+if $DEMO || $SANDBOX; then DASH_HINT="password below"; else DASH_HINT="password from .env"; fi
 cat <<BANNER
 
   $(printf '\033[1;32m●\033[0m') Payment Failure Recovery Engine is up
@@ -469,7 +525,54 @@ if [[ -n "$PUBLIC_URL" ]]; then
   and a mismatch is rejected with 401 before the payload is read.
 BANNER
 fi
-if $DEMO; then
+if $SANDBOX; then
+  cat <<BANNER
+
+  ────────────────────────────────────────────────────────────────
+   SANDBOX MODE — the real Razorpay API, with test keys.
+
+   There is no separate sandbox host: the base URL is the same as
+   production and the rzp_test_ prefix is the whole difference. So
+   this is the ordinary production code path. Payment Links minted
+   here are REAL test-mode objects and open Razorpay's own hosted
+   checkout.
+
+   Console      http://127.0.0.1:$APP_PORT/console/login
+   Password     $DASHBOARD_PASSWORD
+  ────────────────────────────────────────────────────────────────
+BANNER
+  if $TUNNEL && [[ -n "$PUBLIC_URL" ]]; then
+    cat <<BANNER
+  Webhooks: paste this into the Razorpay dashboard
+  (Settings → Webhooks), subscribing to payment.failed and
+  payment.captured, using RAZORPAY_WEBHOOK_SECRET as the secret:
+
+      $PUBLIC_URL/webhooks/razorpay
+
+  With that in place the loop closes for real: pay a link with a
+  test card and the capture comes back and is attributed.
+BANNER
+  else
+    cat <<'BANNER'
+  NO TUNNEL, so the loop does not close. Links mint and open
+  Razorpay's checkout, but Razorpay cannot reach this machine to
+  deliver the capture — so paying one will NOT show as recovered.
+  That is a missing public URL, not a broken engine.
+
+  Re-run with --sandbox --tunnel to close it.
+
+  To check the decline taxonomy against the real gateway, pay a
+  link with a forcing test card (numbers in
+  src/classifier/error_codes.yaml under razorpay_test_cards) and
+  choose "failure" on the success/failure screen.
+BANNER
+  fi
+  cat <<'BANNER'
+
+  Reset:  rm .sandbox.sqlite3 .sandbox.seeded
+  Ctrl-C stops everything.
+BANNER
+elif $DEMO; then
   cat <<BANNER
 
   ────────────────────────────────────────────────────────────────

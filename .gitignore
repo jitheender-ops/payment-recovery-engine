@@ -85,3 +85,5 @@ eval/results/.llm_decision_cache.jsonl
 # Local demo (./run.sh --demo)
 .demo.sqlite3
 .demo.seeded
+.sandbox.sqlite3
+.sandbox.seeded

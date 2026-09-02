@@ -41,6 +41,42 @@ this vocabulary — it previously used six invented reason strings and none of
 the two that were being abandoned, so the demo could not have surfaced the
 bug it was ostensibly exercising.
 
+### The sandbox, and running against it
+
+`razorpay.com/docs/api/sandbox-setup`, verbatim: **"The base URL for the
+Razorpay Sandbox and production API is the same — `https://api.razorpay.com/v1/`."**
+The key prefix (`rzp_test_` vs `rzp_live_`) is the entire difference. There
+is no separate host, and nothing to run locally — it is the live API with
+test credentials, so it needs an account and a network and can never
+replace demo mode.
+
+The code already supported it: `DEMO_MODE=false` with test keys is the
+ordinary production path. Only packaging was missing, so `./run.sh --sandbox`
+borrows the demo's SQLite and seeding while using the **real** gateway.
+
+Two guards, because this one can reach the outside world:
+
+- A `rzp_live_` key is **refused outright**. The mode seeds synthetic cases,
+  and against live credentials that would mint real Payment Links addressed
+  to real customers.
+- `.env` is sourced (the keys live there) but cannot beat a value the caller
+  exported — `source` overwrites, so `RAZORPAY_KEY_ID=... ./run.sh --sandbox`
+  would otherwise silently use a different key than the one just named.
+
+**Webhooks need a public URL.** Without `--tunnel`, links mint and open
+Razorpay's real checkout but the capture cannot come back, so paying one
+will not show as recovered. The banner says so rather than letting it look
+like a broken engine.
+
+### Checking the taxonomy against the real gateway
+
+The forcing test cards (`razorpay_test_cards` in `error_codes.yaml`) each
+produce a chosen `error_reason`. Pay a sandbox Payment Link with one, choose
+**failure** on the success/failure screen, and the decline arrives carrying
+that exact string — which is how a mapping is verified against the gateway
+rather than against documentation. That check found three wrong mappings on
+2026-09-01; see `docs/decline-taxonomy.md`.
+
 ### Webhook source IPs
 
 `security.md` is mostly Razorpay's own posture (PCI-DSS Level 1, ISO 27001,
