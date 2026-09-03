@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from src.agent.actions import ActionType, FailureContext, PaymentRail, RetryAction
 from src.classifier.taxonomy import FailureClass
+from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +35,21 @@ ACTION_LABELS: list[ActionType] = list(get_args(ActionType))
 FAILURE_CLASSES = [fc.value for fc in FailureClass]
 METHODS = ["upi", "card", "netbanking", "wallet"]
 
+# Classes the trained model has never seen. Training scenarios are drawn from
+# eval/scenario_generator.py's FAILURE_WEIGHTS; a class added to the taxonomy
+# afterwards gets an all-zero one-hot, which is not a "no" the model can reason
+# about — it is a row outside the training distribution, and the prediction is
+# whatever the trees do with an unfamiliar corner. Route them to the rule
+# heuristic, exactly as the chaser risk types already are.
+UNTRAINED_CLASSES = {FailureClass.RISK_CHECK_FAILED.value}
+
 
 def extract_features(context: FailureContext) -> NDArray[np.float32]:
     """
     Convert a FailureContext into a feature vector for XGBoost.
 
     Features:
-        - failure_class one-hot (14 dims)
+        - failure_class one-hot (one per FailureClass member)
         - method one-hot (4 dims)
         - hour_of_day (1 dim, normalized 0-1)
         - day_of_week (1 dim, normalized 0-1)
@@ -48,7 +57,12 @@ def extract_features(context: FailureContext) -> NDArray[np.float32]:
         - retry_count_24h (1 dim)
         - is_retryable (1 dim)
         - bank_hash (1 dim, hashed to 0-1)
-    Total: 23 dims
+
+    Total: len(FAILURE_CLASSES) + len(METHODS) + 6 — NOT a constant, because
+    the first term is derived from a live enum. The docstring used to claim a
+    fixed 23 (it was 24), which is the sort of number that stays plausible
+    while the model on disk stops matching it. __init__ checks the real width
+    against the loaded model rather than trusting either number.
     """
     features = []
 
@@ -102,20 +116,55 @@ class XGBoostBaseline:
         # "the XGBoost baseline" in the README was the rule heuristic below,
         # every time. Pass "" to force the rules explicitly.
         if model_path is None:
-            from src.config import get_settings
             model_path = get_settings().xgboost_model_path
 
         if model_path and Path(model_path).exists():
             try:
+                # joblib.load is pickle — it executes whatever the file says.
+                # Refuse to unpickle anything that is not the exact bytes the
+                # operator pinned (XGBOOST_MODEL_SHA256): the moment a model
+                # arrives from outside the build (registry, bucket, upload),
+                # a swapped file becomes arbitrary code execution without
+                # this check. Unset pin keeps today's trust model: the path
+                # is operator-set and the file ships inside the image.
+                expected_sha = get_settings().xgboost_model_sha256
+                if expected_sha:
+                    digest = hashlib.sha256()
+                    with open(model_path, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(65536), b""):
+                            digest.update(chunk)
+                    actual_sha = digest.hexdigest()
+                    if actual_sha != expected_sha:
+                        logger.warning(
+                            "XGBoost: model at %r has sha256 %s, pinned is %s "
+                            "— refusing to load unverified pickle. Retrain: "
+                            "scripts/train_xgboost.py.",
+                            model_path, actual_sha, expected_sha,
+                        )
+                        raise ValueError("model sha256 mismatch")
+
                 import joblib
-                # ponytail: joblib.load is pickle, so this executes whatever
-                # the file says. Accepted because the path is operator-set
-                # (XGBOOST_MODEL_PATH) and the file ships inside the image —
-                # anyone who can write there already has the process. If a
-                # model ever arrives from outside the build (a registry, a
-                # bucket, a user upload), pin a checksum before this line.
-                self._model = joblib.load(model_path)
-                logger.info("XGBoost model loaded from %s", model_path)
+                model = joblib.load(model_path)
+                # The one-hot width is derived live from FailureClass, but a
+                # pickled model is frozen at the width it was trained on. Add
+                # a failure class and every prediction raises "Feature shape
+                # mismatch" — from inside the ML path, at decision time, which
+                # for the LLM fallback means it raises exactly when the LLM is
+                # already down. Refuse the stale model instead: the rules are
+                # a worse decision than the model and a far better one than an
+                # exception.
+                width = len(FAILURE_CLASSES) + len(METHODS) + 6
+                trained_width = getattr(model, "n_features_in_", width)
+                if trained_width != width:
+                    logger.warning(
+                        "XGBoost: model at %r expects %d features, the taxonomy "
+                        "now produces %d — refusing the stale model and using "
+                        "rule heuristics. Retrain: scripts/train_xgboost.py.",
+                        model_path, trained_width, width,
+                    )
+                else:
+                    self._model = model
+                    logger.info("XGBoost model loaded from %s", model_path)
             except Exception:
                 logger.exception("Failed to load XGBoost model from %s", model_path)
 
@@ -158,8 +207,13 @@ class XGBoostBaseline:
         # driven risk type (abandoned_checkout, invoice_overdue, …) is outside
         # its training distribution — its one-hot is all zeros — so those go
         # to the rule heuristic, which has explicit branches for them, even
-        # when a real model is loaded.
-        if self._model is not None and context.failure_class in FAILURE_CLASSES:
+        # when a real model is loaded. UNTRAINED_CLASSES are real taxonomy
+        # members with the same problem, and take the same route.
+        if (
+            self._model is not None
+            and context.failure_class in FAILURE_CLASSES
+            and context.failure_class not in UNTRAINED_CLASSES
+        ):
             return self._predict_ml(context, self._model)
         return self._predict_heuristic(context)
 
@@ -253,6 +307,16 @@ class XGBoostBaseline:
                 action="abandon",
                 reason=f"Rule-based: {fc.value} is a hard decline",
                 confidence=0.95,
+            )
+
+        # Risk-screened instruments — recoverable, but only off this rail.
+        # retry_now/retry_at are refused by the guardrail for this class.
+        if fc == FailureClass.RISK_CHECK_FAILED:
+            return RetryAction(
+                action="switch_rail",
+                rail="upi" if context.method != "upi" else "netbanking",
+                reason="Rule-based: risk check refused this instrument, switch rail",
+                confidence=0.5,
             )
 
         # Network errors — immediate retry
@@ -361,6 +425,11 @@ class XGBoostBaseline:
         joblib.dump(model, save_path)
         self._model = model
         logger.info("XGBoost model trained and saved to %s", save_path)
+        # The digest the operator pins in XGBOOST_MODEL_SHA256. Printed, not
+        # set, on purpose: the pin is the trust decision and belongs to the
+        # deployment's .env, not to a training run.
+        sha = hashlib.sha256(Path(save_path).read_bytes()).hexdigest()
+        logger.info("Pin this in XGBOOST_MODEL_SHA256: %s", sha)
         # Returned so callers can score without reaching into self._model, which
         # is Optional and would need a None-check they have no way to satisfy.
         return model

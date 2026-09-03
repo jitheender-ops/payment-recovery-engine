@@ -211,3 +211,54 @@ async def test_stamping_is_idempotent_and_only_chains_new_rows(
     result = await verify_chain(session)
     assert result.intact is True
     assert result.events_checked == 2
+
+
+# ── the scheduler stamps it, because nothing else deployed does ──────────
+
+
+async def test_the_scheduler_tick_stamps_new_events(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    Stamping used to be CLI-only, so a deployed instance never ran it and
+    event_hash stayed NULL on every row — a tamper-evident audit trail that
+    existed only on a laptop. The tick is the heartbeat that makes it real.
+    """
+    from src import scheduler
+
+    case_id = uuid.uuid4()
+    async with db_sessionmaker() as s:
+        await _add_event(s, case_id, "opened")
+        await s.commit()
+
+    async with db_sessionmaker() as s:
+        counts = await scheduler.tick(s)
+    assert counts["events_stamped"] == 1
+
+    async with db_sessionmaker() as s:
+        unhashed = (
+            await s.execute(
+                sa.select(sa.func.count()).select_from(CaseEvent).where(
+                    CaseEvent.event_hash.is_(None)
+                )
+            )
+        ).scalar_one()
+        assert unhashed == 0, "the tick left events unstamped"
+        assert (await verify_chain(s)).intact
+
+
+async def test_an_unkeyed_chain_does_not_break_the_tick(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Production requires the key (Settings.require_production_integrity). A dev
+    run without one must keep ticking rather than fail every sweep behind it.
+    """
+    from src import scheduler
+
+    monkeypatch.setenv("AUDIT_CHAIN_SECRET", "")
+    get_settings.cache_clear()
+    async with db_sessionmaker() as s:
+        assert (await scheduler.tick(s))["events_stamped"] == 0
+    get_settings.cache_clear()

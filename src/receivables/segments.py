@@ -1,5 +1,21 @@
 """Payment-behaviour segments — adaptive intensity INSIDE the frozen envelope.
 
+NOT WIRED, as of 2026-09-03. `classify`, `entry_stage_level` and
+`gap_multiplier` are exported from src/receivables/__init__.py, unit-tested in
+tests/test_receivables.py, and called by NOTHING. No account is classified, no
+ladder consults a segment, and no chase cadence differs because of this file.
+
+Written down here rather than only in a plan, because the gap is invisible from
+inside the module: the rules are complete and the tests pass, so it reads as a
+live feature to anyone who opens it. It was nearly given a console panel on that
+reading — which would have shown a merchant a segment label that changes nothing
+about how their customer is actually chased.
+
+Wiring it is a real product change to contact cadence, not a refactor: it moves
+which rung accounts enter at and how far their gaps stretch. Make that decision
+deliberately, then delete this notice. Until then, do not surface segments in
+any UI — a label the engine does not act on is a lie on a money page.
+
 Every mature AR platform (Gaviti's credit-risk tiers, Upflow's customer
 insights) adapts HOW it chases per buyer: a chronically-late payer and a
 first-time-slow payer get different ladders. The research is equally clear

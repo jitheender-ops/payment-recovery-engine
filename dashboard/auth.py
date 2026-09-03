@@ -26,41 +26,41 @@ _MAX_FAILURES = 6
 _FAILURE_WINDOW_SECONDS = 60.0
 _LOCKOUT_SECONDS = 300.0
 
-# ponytail: process-global, not per-client. Streamlit gives this predicate no
-# reliable client identity (the websocket session id is whatever a reconnecting
-# client asks for), and there is exactly ONE password here — so the thing worth
-# rate-limiting is guesses against that password, not guesses per visitor. The
-# cost is that a burst of wrong entries locks out the legitimate operator for
-# five minutes too. If that becomes a real irritation, move to per-IP buckets
-# behind a proxy that supplies one.
-_FAILURES: deque[float] = deque()
-_LOCKED_UNTIL = 0.0
+# Per-key buckets, not one shared counter. A global lockout let anyone burn
+# six guesses and lock the operator out of their own dashboard for five
+# minutes — a free "annoy the admin" button. Keyed per client; an empty key
+# (no proxy header and no socket peer) still gets its own bucket so it can
+# never lock out everyone either.
+# ponytail: process-global dict, unbounded key count — a flood of spoofed
+# keys grows it. Cap with an LRU (or move behind a session store) if the
+# dashboard is ever exposed beyond the operator's tunnel.
+_FAILURES: dict[str, deque[float]] = {}
+_LOCKED_UNTIL: dict[str, float] = {}
 
 
-def _locked_out(now: float) -> bool:
-    return now < _LOCKED_UNTIL
+def _locked_out(key: str, now: float) -> bool:
+    return now < _LOCKED_UNTIL.get(key, 0.0)
 
 
-def _record_failure(now: float) -> None:
-    global _LOCKED_UNTIL
-    while _FAILURES and now - _FAILURES[0] > _FAILURE_WINDOW_SECONDS:
-        _FAILURES.popleft()
-    _FAILURES.append(now)
-    if len(_FAILURES) >= _MAX_FAILURES:
-        _LOCKED_UNTIL = now + _LOCKOUT_SECONDS
-        _FAILURES.clear()
+def _record_failure(key: str, now: float) -> None:
+    bucket = _FAILURES.setdefault(key, deque())
+    while bucket and now - bucket[0] > _FAILURE_WINDOW_SECONDS:
+        bucket.popleft()
+    bucket.append(now)
+    if len(bucket) >= _MAX_FAILURES:
+        _LOCKED_UNTIL[key] = now + _LOCKOUT_SECONDS
+        bucket.clear()
 
 
-def lockout_seconds_remaining() -> int:
+def lockout_seconds_remaining(key: str = "") -> int:
     """Seconds until sign-in reopens, 0 when it is open. For the UI message."""
-    return max(0, int(_LOCKED_UNTIL - time.monotonic()))
+    return max(0, int(_LOCKED_UNTIL.get(key, 0.0) - time.monotonic()))
 
 
-def reset_throttle() -> None:
+def reset_throttle(key: str = "") -> None:
     """Clear the failure history. For tests and for a successful sign-in."""
-    global _LOCKED_UNTIL
-    _FAILURES.clear()
-    _LOCKED_UNTIL = 0.0
+    _FAILURES.pop(key, None)
+    _LOCKED_UNTIL.pop(key, None)
 
 
 def dashboard_password() -> str:
@@ -68,7 +68,7 @@ def dashboard_password() -> str:
     return os.getenv("DASHBOARD_PASSWORD", "")
 
 
-def password_is_correct(supplied: str | None) -> bool:
+def password_is_correct(supplied: str | None, key: str = "") -> bool:
     """
     True only when DASHBOARD_PASSWORD is set AND `supplied` matches it exactly.
 
@@ -76,6 +76,10 @@ def password_is_correct(supplied: str | None) -> bool:
     runs alongside a service published through a public tunnel; a gate that
     waves everyone through when unconfigured is the exact failure it exists to
     prevent, and "someone forgot to set it" is the likeliest way that happens.
+
+    `key` is the per-client identity (X-Forwarded-For entry behind the tunnel
+    proxy) that failures are bucketed under — one attacker's guesses no longer
+    lock the operator out.
     """
     expected = dashboard_password()
     if not expected or not supplied:
@@ -84,13 +88,13 @@ def password_is_correct(supplied: str | None) -> bool:
     # Refuse to even compare while locked out. Checking first and rejecting
     # after would still answer the question the attacker is asking.
     now = time.monotonic()
-    if _locked_out(now):
+    if _locked_out(key, now):
         return False
 
     # Bytes, not str: compare_digest raises TypeError on a str containing
     # non-ASCII, and the input here is whatever a visitor chose to type.
     if hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
-        reset_throttle()
+        reset_throttle(key)
         return True
-    _record_failure(now)
+    _record_failure(key, now)
     return False

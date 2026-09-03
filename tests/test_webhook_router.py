@@ -216,3 +216,32 @@ async def test_distinct_payments_produce_distinct_events(
         rows = (await reader.execute(select(WebhookEvent))).scalars().all()
     assert len(rows) == 2
     assert len(client.queued) == 2
+
+
+async def test_two_idless_failures_in_the_same_second_are_both_processed(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    EXPLOIT: two distinct failures with no payment entity id, delivered in
+    the same second. The constructed event_id used to key both on
+    "payment.failed_unknown_<created_at>", so the second one was answered
+    "Already processed" and the failure was silently lost — no case, no
+    nudge, no retry. Keying on a digest of the raw body keeps two distinct
+    payloads distinct, while a byte-identical redelivery still dedupes.
+    """
+    first = _payload()
+    first["payload"]["payment"]["entity"].pop("id")
+    second = _payload()
+    second["payload"]["payment"]["entity"].pop("id")
+    second["payload"]["payment"]["entity"]["error_code"] = "GATEWAY_ERROR"
+    assert first["created_at"] == second["created_at"]
+
+    assert _post(client, first).status_code == 200
+    assert _post(client, second).status_code == 200
+    assert len(client.queued) == 2, "the second distinct failure was dropped as a duplicate"
+
+    assert _post(client, first).status_code == 200
+    assert len(client.queued) == 2, "a byte-identical redelivery was re-processed"
+    async with db_sessionmaker() as reader:
+        rows = (await reader.execute(select(WebhookEvent))).scalars().all()
+    assert len(rows) == 2, "the redelivery must dedupe, not store a third row"

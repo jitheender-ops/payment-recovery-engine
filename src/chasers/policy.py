@@ -111,10 +111,21 @@ RISK_POLICIES: dict[str, RiskPolicy] = {
         failure_class="invoice_overdue",
         subject_noun="invoice",
     ),
-    # A pre-approved autopay debit failed. The mandate IS standing consent to
-    # collect, so this is the one type where the engine may simply present the
-    # charge again — but not same-day: a failed debit usually means funds or a
-    # bank problem that hours will not fix, so the first retry waits a day.
+    # A pre-approved autopay debit failed, and the merchant told us about it.
+    #
+    # This comment used to say the mandate is standing consent, so "this is the
+    # one type where the engine may simply present the charge again". That was
+    # never true and is worth stating plainly, because it is the kind of claim
+    # that reads as a specification. The engine holds NO token for a
+    # merchant-reported mandate failure — `subject_ref` is an opaque string
+    # from their system — so every action here mints a Payment Link, exactly
+    # like the other chasers (retry_executor.py: "there is no instrument to
+    # re-present"). The engine can only debit a mandate IT holds, which today
+    # means one a customer authorised against their own promise to pay
+    # (orchestrator.charge_promise_mandate).
+    #
+    # The 24h first_action stands on its own reasoning: a failed debit usually
+    # means funds or a bank problem that hours will not fix.
     "mandate_failure": RiskPolicy(
         max_attempts=3,
         consent_window_hours=168,  # 7 days

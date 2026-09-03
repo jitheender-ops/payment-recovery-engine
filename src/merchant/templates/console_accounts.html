@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
+{% block title %}Buyers · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("accounts", merchant_name) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Buyers</div>
+    <h1 class="ptitle">Who owes you, and who you can reach</h1>
+    <p class="psub">
+      B2B collection runs on the account, not the invoice: one buyer with four
+      overdue invoices is one chase carrying four lines, not four messages to
+      the same desk. A rung that escalates to a role nobody has recorded
+      escalates to nobody.
+    </p>
+  </header>
+
+  {% if not data.accounts.has_data %}
+  <section class="sec">
+    <p class="sec-s">No buyer accounts yet. They are created by the first
+    signed <span class="mono">/risks</span> event carrying an account ref.</p>
+  </section>
+  {% else %}
+  <section class="sec">
+    <div class="card">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Buyer</th><th>Reference</th>
+              <th class="num">Open</th><th class="num">Outstanding</th>
+              <th class="num">Rung</th><th>Contacts on file</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in data.accounts.accounts %}
+            <tr>
+              <td><a href="/console/account/{{ a.id }}">{{ a.name }}</a></td>
+              <td class="mono ref">{{ a.ref }}</td>
+              <td class="num mono">{{ a.open_cases }}</td>
+              <td class="num red">{{ a.outstanding }}</td>
+              <td class="num mono">{{ a.rung or "—" }}</td>
+              <td class="faint">
+                {% if a.no_contacts %}
+                <span class="red">nobody on file</span>
+                {% else %}{{ a.roles }}{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+</main>
+{% endblock %}

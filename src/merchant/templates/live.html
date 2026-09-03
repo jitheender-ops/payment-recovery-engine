@@ -44,7 +44,7 @@
 </div>
 {% endif %}
 
-<main class="section" style="padding-top:clamp(2rem,5vh,3rem)">
+<main id="main" class="section" style="padding-top:clamp(2rem,5vh,3rem)">
   <div class="wrap">
 
     {% if not db_ok %}
@@ -183,7 +183,17 @@
       {% if data.ladder.accounts %}
       <section class="block" data-reveal>
         <h2 class="block-title">The ladder</h2>
-        <p class="block-sub">Where each buyer account sits right now. One contact per account per rung — a buyer with four overdue invoices gets one statement, not four messages.</p>
+        <p class="block-sub">Where each buyer account sits right now. One contact per account per rung — a buyer with four overdue invoices gets one statement, not four messages.
+          {# Read from is_b2b_contact_time/next_b2b_window, never restated:
+             a quiet ladder on a Saturday evening should say it is quiet on
+             purpose rather than look broken. #}
+          {% if data.ladder.window_open %}
+          B2B contact hours are open now.
+          {% else %}
+          Outside B2B contact hours (Mon–Fri, 09:30–18:30 IST). Nothing fires
+          until {{ data.ladder.next_window }}.
+          {% endif %}
+        </p>
         <ol class="ladder">
           {% for stage in data.ladder.stages | reverse %}
           <li class="rung {% if stage.accounts %}rung-live{% endif %}">
@@ -194,17 +204,121 @@
             <span class="rung-count">
               {% if stage.accounts %}{{ stage.accounts }} account{{ "s" if stage.accounts != 1 }}{% else %}—{% endif %}
             </span>
+            {# What actually happens on this rung. All of it is enforced by
+               src/receivables/ladder.py and none of it was legible: a
+               merchant could see WHERE accounts sat and nothing about what
+               the engine does when it gets there. #}
+            <span class="rung-detail">
+              {{ stage.channels }}{% if not stage.spends_budget %} · no contact budget spent{% endif %}
+              {% if stage.gap_hours %} · next rung in {{ stage.gap_hours | round | int }}h{% endif %}
+              · a broken promise here resumes at rung {{ stage.after_break }}
+            </span>
           </li>
           {% endfor %}
         </ol>
         {% if data.ladder.open_call_tasks %}
         <p class="block-note">{{ data.ladder.open_call_tasks }} call task{{ "s" if data.ladder.open_call_tasks != 1 }} raised for your team at the urgent rung. These never spend a customer's contact budget.</p>
+        {# The tasks themselves. A bare count said work existed and nothing
+           about which work — no account, no reason, no way to close it. #}
+        {% if data.ladder.tasks %}
+        <div class="card" style="margin-top:.75rem">
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>Account</th><th>Raised</th><th>Why</th><th>Done?</th></tr></thead>
+              <tbody>
+                {% for t in data.ladder.tasks %}
+                <tr>
+                  <td>{{ t.account }}</td>
+                  <td class="faint nowrap">{{ t.raised }}</td>
+                  <td class="faint">{{ t.why or t.kind }}</td>
+                  <td class="verdict">
+                    <form method="post" action="/console/task/done">
+                      <input type="hidden" name="task_id" value="{{ t.id }}">
+                      <button class="btn-mini" type="submit">Called them</button>
+                    </form>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
         {% endif %}
       </section>
       {% endif %}
 
       {# ── 4b. Promises and plans ─────────────────────────────────────── #}
       <div class="pair">
+        {# The voice queue. This panel's data has been computed on every render
+           since voice_panel() was written and displayed nowhere — the only
+           voice signal a merchant ever saw was a one-line attention item, and
+           only when queued>0 and claimed==0. A queue whose `failed` count is
+           climbing was completely invisible, which is the exact shape of an
+           outage this console exists to surface. #}
+        {% if data.voice.total %}
+        <section class="block" data-reveal>
+          <h2 class="block-title">Voice calls</h2>
+          <p class="block-sub">
+            The engine queues calls; the telephony leg claims them. Nothing
+            claiming a growing queue means the call leg is down.
+          </p>
+          <table class="mini">
+            <caption class="mini-cap">
+              {{ data.voice.total }} in the queue{% if data.voice.oldest_queued %} · oldest waiting since {{ data.voice.oldest_queued }}{% endif %}
+            </caption>
+            <tbody>
+              <tr>
+                <td class="faint">Waiting to be placed</td>
+                <td class="num mono">{{ data.voice.queued }}</td>
+              </tr>
+              <tr>
+                <td class="faint">Being called now</td>
+                <td class="num mono">{{ data.voice.claimed }}</td>
+              </tr>
+              <tr>
+                <td class="faint">Completed</td>
+                <td class="num mono">{{ data.voice.done }}</td>
+              </tr>
+              <tr>
+                <td class="faint">Failed</td>
+                <td class="num mono{% if data.voice.failed %} red{% endif %}">{{ data.voice.failed }}</td>
+              </tr>
+              <tr>
+                <td class="faint">Ended in opt-out</td>
+                <td class="num mono">{{ data.voice.opted_out }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+
+        {# Merchant alerts queued for delivery to MERCHANT_WEBHOOK_URL. Same
+           story as the voice panel: queried every render, rendered never. The
+           panel's own code comment records fixing a Postgres bug that had made
+           it permanently empty in production; the fix landed, the render did
+           not. #}
+        {% if data.ar_alerts %}
+        <section class="block" data-reveal>
+          <h2 class="block-title">Alerts waiting to reach you</h2>
+          <p class="block-sub">
+            Queued for your webhook and not yet delivered. If this list only
+            grows, MERCHANT_WEBHOOK_URL is not answering.
+          </p>
+          <table class="mini">
+            <tbody>
+              {% for a in data.ar_alerts %}
+              <tr>
+                <td class="mono nowrap">{{ a.when }}</td>
+                <td class="faint">{{ a.event_type }}</td>
+                <td class="mono ref">{{ a.case_ref or a.account_ref }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+
         {% if data.promises.total %}
         <section class="block" data-reveal>
           <h2 class="block-title">Promises to pay</h2>
@@ -214,7 +328,8 @@
             {% else %}
               Nothing has resolved yet.
             {% endif %}
-            A pending promise keeps the case quiet until its date.
+            A pending promise keeps the case quiet until its date. One marked
+            autopay collects itself on that date; the rest wait to be paid.
           </p>
 
           {% set resolved = data.promises.kept + data.promises.broken %}
@@ -238,7 +353,7 @@
               <tr>
                 <td class="mono nowrap">{{ p.due }}</td>
                 <td class="mono ref">{{ p.subject_ref }}</td>
-                <td class="faint">{{ p.channel }}{% if p.reminded %} · reminded{% endif %}</td>
+                <td class="faint">{{ p.channel }}{% if p.reminded %} · reminded{% endif %}{% if p.autopay %} · <span class="green">autopay</span>{% endif %}</td>
                 <td class="num">{{ p.amount }}</td>
               </tr>
               {% endfor %}
@@ -284,7 +399,7 @@
         <div class="card" style="margin-top:1rem">
           <div class="table-wrap">
             <table class="table">
-              <thead><tr><th>Reference</th><th class="num">Outstanding</th><th>Raised</th><th>What they said</th></tr></thead>
+              <thead><tr><th>Reference</th><th class="num">Outstanding</th><th>Raised</th><th>What they said</th><th>Your verdict</th></tr></thead>
               <tbody>
                 {% for d in data.disputes.disputes %}
                 <tr>
@@ -292,6 +407,22 @@
                   <td class="num red">{{ d.outstanding }}</td>
                   <td class="faint nowrap">{{ d.opened }} · {{ d.days_open }}d</td>
                   <td class="faint">{{ d.reason }}</td>
+                  <td class="verdict">
+                    {# Two forms, not one with a select: the choice IS the
+                       action, and each button says what it does. Upholding
+                       closes the case; rejecting resumes the chase on the
+                       aging clock it was already on. #}
+                    <form method="post" action="/console/dispute/resolve">
+                      <input type="hidden" name="dispute_id" value="{{ d.id }}">
+                      <input type="hidden" name="outcome" value="rejected">
+                      <button class="btn-mini" type="submit">Invoice stands</button>
+                    </form>
+                    <form method="post" action="/console/dispute/resolve">
+                      <input type="hidden" name="dispute_id" value="{{ d.id }}">
+                      <input type="hidden" name="outcome" value="upheld">
+                      <button class="btn-mini btn-mini-quiet" type="submit">They're right</button>
+                    </form>
+                  </td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -507,6 +638,10 @@
   .rung-who{font-size:.82rem;color:var(--ink-3);text-transform:capitalize}
   .rung-count{font-size:.85rem;font-weight:600;white-space:nowrap}
   .rung-live .rung-count{color:var(--green-deep)}
+  /* Spans the whole row under the five columns: it is a sentence about the
+     rung, not a sixth column of it. */
+  .rung-detail{grid-column:1 / -1;font-size:.76rem;color:var(--ink-3);
+               padding-left:.1rem}
 
   /* ── Shared block chrome ───────────────────────────────────────────── */
   .block{margin-top:clamp(2.5rem,6vh,3.5rem)}
@@ -565,6 +700,7 @@
     .rung-day{grid-column:2}
     .rung-who{grid-column:2;grid-row:3}
     .rung-count{grid-column:3;grid-row:1}
+    .rung-detail{grid-column:1 / -1;grid-row:4}
     .feed-row{grid-template-columns:1fr auto;row-gap:.15rem}
     .feed-when{grid-column:1}
     .feed-actor{grid-column:2;grid-row:1}

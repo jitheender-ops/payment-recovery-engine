@@ -58,7 +58,7 @@ Two things make a gap hard to see, and both bit here:
 | `bank_technical_error` | yes | `bank_downtime` | unchanged |
 | `server_error` | yes | `network_error` *(via `SERVER_ERROR`)* | `network_error`, by name |
 | `mobile_number_invalid` | yes | `issuer_decline` *(catch-all)* | **deliberately unmapped**, below |
-| `payment_risk_check_failed` | yes | `fraud_block` | unchanged — **deliberate disagreement**, below |
+| `payment_risk_check_failed` | yes | `fraud_block` | `risk_check_failed` — resolved 2026-09-02, **switch-only**, below |
 
 ### The expensive one
 
@@ -117,8 +117,8 @@ it on its own line. A missing mapping fails the build.
 
 ## Deliberate disagreements with Razorpay
 
-Both are printed by `scripts/seed_error_codes.py` on every run, so neither can
-quietly become an accident.
+Printed by `scripts/seed_error_codes.py` on every run, so it cannot quietly
+become an accident. There is one left.
 
 **`payment_cancelled` → `customer_cancelled`, non-retryable.** Razorpay marks
 it retryable. The customer explicitly cancelled; chasing them for a payment
@@ -127,15 +127,45 @@ still offers payment (`Explanation.retryable` is true — *the page* stays open)
 but the engine does not pursue it on its own. Respecting stated intent outranks
 a recoverable rupee.
 
-**`payment_risk_check_failed` → `fraud_block`, non-retryable.** Razorpay marks
-it retryable and advises *"The customer must retry with a different card or
-method"* — note that is a **rail switch**, not a retry of the same instrument.
-Kept conservative for now: this is fraud-adjacent, the engine's `fraud_block`
-copy correctly tells the customer only their bank can clear it, and loosening
-it is a product decision about chasing risk-flagged declines rather than a
-mapping correction. **Open question, deliberately left open** — if it should
-become a switch-rail class instead of an abandon, that is a decision to make
-on purpose.
+`payment_risk_check_failed` used to be the second one. It is now resolved —
+see below.
+
+## Resolved: `payment_risk_check_failed` (2026-09-02)
+
+It was mapped to `fraud_block` and therefore **abandoned without an attempt**,
+while Razorpay documents it retryable and advises *"The customer must retry
+with a different card or method"*. Both halves of that sentence matter, and
+the old mapping got the first half wrong while the obvious correction would
+have got the second half wrong:
+
+- **Abandoning is too strict.** The payment is recoverable on another
+  instrument; closing the case throws it away.
+- **Plain "retryable" is too loose.** A risk screen refused *this
+  instrument*. Re-presenting the same card walks straight back into the same
+  screen — a certain decline that still spends one of three attempt slots and
+  a contact allowance. That is the same false-retry the `card_number_invalid`
+  fix removed.
+
+So the class is `risk_check_failed`: **retryable, switch-only.**
+
+| Layer | Behaviour |
+|---|---|
+| `src/classifier/taxonomy.py` | `is_retryable` true, new `is_switch_only` true, `is_hard_decline` false |
+| `src/guardrail/rules.py:check_switch_only_class` | `retry_now` and `retry_at` are **rejected**; `switch_rail` and `nudge_customer` pass |
+| `src/executor/rail_selector.py` | routes to UPI, alongside `3ds_dropoff` / `issuer_decline` / `card_limit_exceeded` |
+| `src/customer/explain.py` | *"This payment was stopped by a security check"* — says plainly that the same card will be stopped again |
+| `src/customer/routes.py` | UPI-only link: the recommendation is enforced, not decorative |
+| `src/agent/prompts.py`, `xgboost_baseline.py`, `policy_agent.py` | LLM heuristic, rule baseline and LLM-failure fallback all move rails or nudge, never retry |
+
+The guardrail rule is deliberately **not** applied in `validate_self_serve`.
+A customer picking a different card on the recovery page is doing exactly what
+Razorpay's advice says; the gateway page is where they pick it.
+
+**`fraud_block` now has no rule that can produce it**, and
+`scripts/seed_error_codes.py` prints that as a warning on every run. It is
+kept rather than deleted: the classifier's LLM tail can still emit it, stored
+cases carry it, and the eval harness scores it. Deleting a class to silence a
+true warning would rewrite history that already happened.
 
 ## Deliberately unmapped
 

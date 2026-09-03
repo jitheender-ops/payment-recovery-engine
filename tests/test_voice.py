@@ -242,6 +242,27 @@ async def test_the_webhook_refuses_a_bad_signature(client: Any) -> None:
     assert r.status_code == 401
 
 
+async def test_the_webhook_has_a_volume_ceiling(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signature auth proves identity, not volume — a leaked secret or a
+    provider loop would burn Sarvam/LLM quota unbounded. 429 past the cap."""
+    from src.voice import webhook as voice_webhook
+
+    monkeypatch.setenv("VOICE_WEBHOOK_SECRET", SECRET)
+    get_settings.cache_clear()
+    monkeypatch.setattr(voice_webhook, "_VOICE_TURN_LIMIT", 3)
+    try:
+        body = b'{"transcript": "kya ye payment safe hai?"}'
+        for _ in range(3):
+            r = client.post("/voice/turn", content=body, headers=_signed(body))
+            assert r.status_code == 200
+        r = client.post("/voice/turn", content=body, headers=_signed(body))
+        assert r.status_code == 429
+    finally:
+        get_settings.cache_clear()
+
+
 async def test_the_webhook_answers_a_signed_turn(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

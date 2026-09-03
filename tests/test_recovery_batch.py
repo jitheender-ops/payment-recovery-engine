@@ -37,6 +37,12 @@ def _demo(monkeypatch: Any) -> Any:
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("DEMO_MODE", "true")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+    # Blackout off: this file asserts on execution counts, not on quiet-hours
+    # behaviour (test_blackout_clamp.py owns that). Without this, every test
+    # here flakes between 23:00 and 07:00 IST because the guardrail defers
+    # every nudge out of the window.
+    monkeypatch.setenv("RETRY_BLACKOUT_START_HOUR", "0")
+    monkeypatch.setenv("RETRY_BLACKOUT_END_HOUR", "0")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

@@ -62,6 +62,9 @@ the optimal recovery action for a failed payment.
 - upi_collect_timeout → nudge_customer (remind them to approve the UPI request)
 - issuer_decline → switch_rail to "upi" or "netbanking"
 - card_limit_exceeded → nudge_customer (suggest a different card)
+- risk_check_failed → switch_rail to "upi", or nudge_customer. NEVER retry_now or
+  retry_at: a risk screen refused THIS instrument, so re-presenting it is a
+  guaranteed decline. The guardrail rejects those two actions for this class.
 - hard_decline, fraud_block, customer_cancelled → abandon (never retry)
 - invalid_card, expired_instrument → abandon (instrument is fundamentally broken)
 

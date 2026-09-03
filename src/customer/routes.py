@@ -80,6 +80,7 @@ CONFIRMING_WINDOW = timedelta(minutes=15)
 # decorative. Everything else stays a generic link payable by anything.
 _UPI_RECOMMENDED_CLASSES = {
     "3ds_dropoff",
+    "risk_check_failed",
     "card_limit_exceeded",
     "issuer_decline",
     "insufficient_funds",
@@ -678,6 +679,13 @@ async def recovery_page(
             "promise_max_date": (datetime.now(UTC) + timedelta(
                 days=get_settings().promise_max_horizon_days
             )).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
+            # Autopay is offered only when it can actually be honoured: the
+            # feature is on AND the amount is under the RBI unattended-debit
+            # threshold. Above it the checkbox is absent rather than present
+            # and refused, because a page that offers something it cannot do
+            # has made its own promise it will break.
+            "autopay_offerable": _mandate_offerable(_outstanding(case)),
+            "autopay_amount": _money(_outstanding(case)),
         },
     )
 
@@ -866,7 +874,135 @@ async def promise_a_date(
     await session.commit()
     logger.info("Customer promised from recovery page: case=%s due=%s",
                 case.id, due_at.isoformat())
+
+    # The customer ticked "collect it automatically on that date". The promise
+    # is already recorded, so everything below is an UPGRADE to a commitment
+    # that already stands — if authorisation fails, is abandoned halfway, or is
+    # not offered at all, the plain promise survives untouched and the reminder
+    # goes out as it always did. That is why the promise is written first.
+    if str(form.get("autopay", "")).strip() and _mandate_offerable(
+        outstanding_paise(case)
+    ):
+        auth_url = await _authorize_mandate(session, case, promise, token)
+        if auth_url:
+            await session.commit()
+            return RedirectResponse(auth_url, status_code=303)
+        # Authorisation could not be started. Say nothing about autopay rather
+        # than claiming a mandate that does not exist — the date still stands.
+        logger.info("Mandate authorisation unavailable: case=%s", case.id)
     return RedirectResponse(f"/recover/{token}?promise=ok", status_code=303)
+
+
+def _identity_for(case: RecoveryCase, event: Any) -> tuple[str | None, str | None]:
+    """
+    The payer's email and phone, for a gateway object that needs a customer.
+
+    Prefers the risk event, which carries what the merchant actually sent.
+    Falls back to the case's canonical customer key, which is `email:a@b.in` or
+    `phone:+9198...` (src/cases.py:customer_key) — the prefix says which, so a
+    case opened without a risk event still yields one usable identifier rather
+    than none.
+    """
+    email = getattr(event, "customer_email", None)
+    contact = getattr(event, "customer_contact", None)
+    if not email and not contact:
+        key = case.customer_id or ""
+        if key.startswith("email:"):
+            email = key.split(":", 1)[1] or None
+        elif key.startswith("phone:"):
+            contact = key.split(":", 1)[1] or None
+    return email, contact
+
+
+def _outstanding(case: RecoveryCase) -> int:
+    """The case's unpaid balance. Imported locally, as cases.py is elsewhere."""
+    from src.cases import outstanding_paise
+
+    return outstanding_paise(case)
+
+
+def _mandate_offerable(amount_paise: int) -> bool:
+    """
+    Whether autopay may be offered for this amount at all.
+
+    Two gates, and the amount one is regulatory rather than cautious: RBI
+    exempts unattended e-mandate debits from per-transaction authentication
+    only below a threshold, and above it every debit needs the customer
+    present — which is not something a sweep can arrange at 9 AM on the
+    promised date. So above the cap the option is not SHOWN, rather than shown
+    and then refused: a page that offers a customer something it cannot do has
+    made its own promise it will break.
+    """
+    settings = get_settings()
+    return (
+        settings.promise_mandate_enabled
+        and 0 < amount_paise <= settings.mandate_max_auto_debit_paise
+    )
+
+
+async def _authorize_mandate(
+    session: AsyncSession,
+    case: RecoveryCase,
+    promise: Any,
+    token: str,
+) -> str | None:
+    """
+    Start UPI Autopay authorisation for a promise. Returns the URL to send the
+    customer to, or None if the gateway could not be reached.
+
+    The mandate is authorised for the PROMISE's amount and expires just after
+    its date. Both bounds are deliberate: a mandate authorised for more than
+    the promise, or for longer than it, is consent the customer did not give,
+    and it would be invisible to them afterwards.
+    """
+    from src.cases import log_event
+    from src.executor.retry_executor import RetryExecutor
+
+    # Razorpay needs a customer to attach a token to. Passing None here minted
+    # an authorisation with no payer identity — the customer object could not
+    # be created, so nothing was ever chargeable. The identity is the same one
+    # every other outbound call uses: the risk event that fed this case.
+    from src.orchestrator import get_orchestrator
+
+    event = await get_orchestrator()._latest_risk_event(case, session)
+    email, contact = _identity_for(case, event)
+
+    try:
+        result = await RetryExecutor().create_mandate_authorization(
+            amount_paise=promise.amount_promised,
+            customer_email=email,
+            customer_contact=contact,
+            # A day past the promise, so a debit on the date itself is inside
+            # the mandate and a forgotten authorisation cannot outlive it.
+            expire_at=promise.due_at + timedelta(days=1),
+            idempotency_key=f"mandate_auth_{promise.id}",
+            description=f"Autopay on {promise.due_at.date().isoformat()}",
+        )
+    except Exception:
+        logger.exception("Mandate authorisation failed for case %s", case.id)
+        return None
+
+    promise.mandate_token = result.get("mandate_token")
+    promise.mandate_customer_ref = result.get("gateway_customer_id")
+    promise.mandate_authorization_ref = result.get("authorization_ref")
+    # PENDING, not active. The customer has not authorised anything yet — they
+    # are about to be sent to their UPI app to do it. Only the authorisation
+    # webhook may promote this to `active`, because only it knows the customer
+    # actually approved. Marking it active here would let the sweep debit a
+    # mandate nobody ever agreed to.
+    promise.mandate_status = "pending"
+    promise.mandate_registered_at = datetime.now(UTC)
+    log_event(
+        session,
+        case,
+        "promise_made",
+        actor="customer",
+        promise_id=str(promise.id),
+        mandate="authorization_started",
+        amount=promise.amount_promised,
+    )
+    url = result.get("short_url")
+    return str(url) if url else None
 
 
 @router.post("/recover/{token}/dispute")

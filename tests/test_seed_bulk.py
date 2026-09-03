@@ -130,3 +130,27 @@ async def test_a_seeded_batch_carries_real_verdicts_and_refusals(
             assert all(a.guardrail_passed for a in attempts)
     finally:
         await engine.dispose()
+
+
+# ── the guard that keeps synthetic money off a real console ──────────────
+
+
+def test_seeding_is_refused_outside_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    seed_bulk writes a recovered-money figure straight to the database with no
+    gateway in the path — nothing else would stop it running against
+    production, where the console would then report recovery nobody paid.
+    """
+    from scripts.seed_bulk import refuse_outside_development
+    from src.config import get_settings
+
+    for env in ("staging", "production"):
+        monkeypatch.setenv("APP_ENV", env)
+        get_settings.cache_clear()
+        refusal = refuse_outside_development()
+        assert refusal is not None and env in refusal
+
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    assert refuse_outside_development() is None
+    get_settings.cache_clear()

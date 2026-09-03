@@ -3,7 +3,7 @@
 [![CI](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/jitheender-ops/payment-recovery-engine/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-573%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-814%20passing-brightgreen)
 
 > AI-powered system that decides **whether**, **when**, and **on which rail** to retry a failed payment — with deterministic guardrails ensuring no LLM ever directly authorizes money movement.
 
@@ -22,11 +22,22 @@ a Hinglish voice call, a promise to pay, an instalment plan, a disputed
 invoice — and a B2B buyer is escalated by person rather than by volume:
 
 ```
-customer replies ──▶ promise ──▶ the case goes quiet until that date
+customer replies ──▶ promise ──▶ the case goes quiet until that date, and
+                 │                  where they authorise UPI Autopay it
+                 │                  COLLECTS ITSELF on that date
                  ├─▶ plan    ──▶ instalments, each its own promise
                  ├─▶ dispute ──▶ case frozen, escalated to a human
                  └─▶ voice   ──▶ grounded answer, or an honest "I don't know"
 ```
+
+A promise used to be a deferral plus a reminder plus a link — whether the
+money arrived was up to the customer remembering. Where they authorise a
+**UPI Autopay mandate**, the scheduler debits it on the date they named,
+inside RBI's e-mandate rules: a 24-hour pre-debit notice is enforced by the
+guardrail, and above the ₹15,000 authentication-exempt ceiling the option is
+never offered at all, because an unattended debit is not lawful there. Off by
+default (`PROMISE_MANDATE_ENABLED`) until Razorpay Recurring Payments is
+enabled on the account.
 
 ## 📊 Headline Result
 
@@ -233,7 +244,7 @@ This is the first question a fintech panel will ask. Here's the answer:
 1. **Hard-decline blocklist** — Fraud blocks, stolen cards, and permanent declines are caught *before* the LLM is ever called. No agent involvement.
 2. **Fixed action space** — The LLM outputs a JSON action from exactly 5 options: `retry_now`, `retry_at`, `switch_rail`, `nudge_customer`, `abandon`. No freeform.
 3. **Schema validation** — Pydantic validates every agent output. Malformed JSON → auto-reject.
-4. **11 business rules + schema** — Max retries per payment (3), per customer per rolling 24h (5), amount ceiling (₹50K), consent window (72h), `retry_at` inside that window, nudge rate limit (2/day), time-of-day blackout (11PM-7AM IST, computed on a true Asia/Kolkata clock), idempotency key requirement, an expected-value stopping rule, the hard-decline blocklist, and the RBI e-mandate pre-debit notice.
+4. **12 business rules + schema** — Max retries per payment (3), per customer per rolling 24h (5), amount ceiling (₹50K), consent window (72h), `retry_at` inside that window, nudge rate limit (2/day), time-of-day blackout (11PM-7AM IST, computed on a true Asia/Kolkata clock), idempotency key requirement, an expected-value stopping rule, the hard-decline blocklist, a switch-only rule (a class the gateway refused on *this instrument* may not be retried on the same rail), and the RBI e-mandate pre-debit notice.
 5. **Idempotency keys** — The key is deterministic (`retry_{payment_id}_{attempt_no}`) and
    `retry_attempts.idempotency_key` is UNIQUE. The orchestrator checks for an existing
    attempt *before* calling the Razorpay API, so a replayed webhook cannot produce a
@@ -247,8 +258,10 @@ This is the first question a fintech panel will ask. Here's the answer:
 11. **Deferred retries are clamped out of the blackout before they're parked** — A deferral approved at 22:30 that lands at 23:05 would pass decision-time validation and die at fire-time re-validation, having already spent an attempt slot. It is shifted forward to the window's edge instead — forward-only, because waiting longer is always compliant.
 12. **Write-ahead attempts can't get lost in flight** — Every execution is committed as `pending` *before* Razorpay is called. If the process dies mid-call, a scheduler sweep resolves the stale row to failed-outcome-unknown after a threshold: the slot stays spent (fail-closed), but nothing sits "in flight" forever, and a later capture still attributes through the idempotency-key breadcrumb.
 13. **An open dispute freezes the case** — A customer who says "this invoice is wrong" has raised a question no chaser can answer. The case stops dead and surfaces on the merchant's worklist; nothing automated touches it until a human resolves the dispute. Arguing about an invoice is how a customer is lost, not recovered.
-14. **A mandate debit without a pre-debit notice is downgraded, not sent** — The RBI Digital Payments E-mandate Framework requires ≥24h notice before an auto-debit. If no notice has gone out, the collection is turned into the notice instead of being attempted.
-15. **The voice agent abstains rather than invents** — Four gates: opt-out honoured first, a retrieval floor below which it says it does not know, sanitation of instructions hiding in retrieved text, and a grounding check the answer must pass against its cited passage. A confident invented number on a call about money is worse than no answer.
+14. **A mandate debit without a pre-debit notice is downgraded, not sent** — The RBI Digital Payments E-mandate Framework requires ≥24h notice before an auto-debit. If no notice has gone out, the collection is turned into the notice instead of being attempted. This covers both things that move money against a standing instruction: a merchant-reported mandate retry, and the promise-backed UPI Autopay debit on any risk type. For the second, the 48h pre-due promise reminder *is* that notice.
+15. **A promise-backed debit is authorised for one amount on one date** — The mandate is registered for the promise's own amount and expires a day after it. A mandate authorised for more, or for longer, is consent the customer did not give. Only the gateway's own token status can arm it: an unreadable or failed lookup leaves it pending and unchargeable, because consent must never be inferred from a network error.
+16. **The order id is committed before the debit is presented** — It is the only join key a mandate capture carries. Recording it afterwards meant a timeout on the charge left an attempt with no order id, and if the money had moved the capture would quote an id nothing in the database had seen. Same law as the write-ahead row, one level down.
+17. **The voice agent abstains rather than invents** — Four gates: opt-out honoured first, a retrieval floor below which it says it does not know, sanitation of instructions hiding in retrieved text, and a grounding check the answer must pass against its cited passage. A confident invented number on a call about money is worse than no answer.
 16. **Bounded contact for B2B buyers** — One contact per account per rung. A buyer with four overdue invoices gets one consolidated statement, not four messages, and the ladder escalates by *role* rather than by volume.
 
 ## 🚀 Quick Start
@@ -474,13 +487,30 @@ query cache. The gate is fail-closed: no `DASHBOARD_PASSWORD`, no dashboard.
 ### 💼 The merchant console
 
 Separate from the ops dashboard and built for a different reader: the merchant
-whose revenue is leaking, not the operator debugging the machinery. Two pages,
-two trust levels, both served by the API itself.
+whose revenue is leaking, not the operator debugging the machinery. One public
+page, eight gated ones, all served by the API itself.
 
 | Route | Who | What |
 |---|---|---|
 | `GET /console` | public | Product facts only — the five leaks with their enforced bounds, what happens when the customer replies, what the engine refuses to do, and how to feed it. Touches no database, shows no live number, safe on a public deployment |
 | `GET /console/live` | `DASHBOARD_PASSWORD` | The live ledger, aggregate and PII-free |
+| `GET /console/accounts` | gated | The buyer directory: who owes you, ranked, and which contact roles are on file. An account with nobody on file says so — a rung that escalates to a role nobody recorded escalates to nobody |
+| `GET /console/account/{id}` | gated | One buyer: contacts by role, open invoices, and what was actually sent per rung. Addresses are masked (`a…p@buyer.in`) |
+| `GET /console/messages` | gated | Every message the engine sends, rendered by the sender's own functions. Not a copy — a preview that could drift from what ships is worse than none |
+| `GET /console/pipeline` | gated | The funnel, and where the money leaves it |
+| `GET /console/routing` | gated | Which bank clears on which rail |
+| `GET /console/cases` | gated | Every unit of revenue at risk, filterable by state |
+| `GET /console/batch` | gated | Preview a cohort, approve it, execute it, measure it |
+| `GET /console/ops` | gated | Is the machinery running — sweeps, heartbeat, and whether the audit hash chain still verifies |
+| `GET /console/evidence` | gated | Does the agent beat the baseline, with paired CIs |
+
+**Every action the console names, it can perform.** That was not always true:
+the disputes panel said *"chasing is frozen until you uphold or reject"* with no
+control, the ladder showed a bare count of call tasks, and the page displayed
+outstanding balances it had no way to let anyone close. Uphold/reject, close a
+call task, and record money that arrived by NEFT or cheque are all forms on the
+page now, posting to handlers that previously existed only as HMAC-signed JSON
+a person on a laptop could not reach.
 
 The live page is ordered by the questions a merchant actually asks, in order:
 
@@ -552,12 +582,13 @@ docker compose -f docker-compose.prod.yml up -d --build   # any box you own
 defines `recovery-api` (the Razorpay webhook URL **and the whole console**) plus
 a Render Postgres. Full runbook in **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
-The console is one site with six pages under `/console/` — **Ledger** (money,
-worklist, ladder, promises, plans, disputes, voice), **Pipeline**, **Routing**,
-**Cases**, **Engine** and **Evidence**. A separate Streamlit service used to
-carry the last five; two consoles meant two hosts, two passwords and two cold
-starts, and the operator one sat silently broken for months because nobody had
-a reason to open it. `dashboard/` still runs locally for the plotly charts.
+The console is one site with nine pages under `/console/` — **Ledger** (money,
+worklist, ladder, promises, plans, disputes, voice, alerts), **Buyers**,
+**Messages**, **Pipeline**, **Routing**, **Cases**, **Batch**, **Engine** and
+**Evidence**. A separate Streamlit service used to carry several of these; two
+consoles meant two hosts, two passwords and two cold starts, and the operator
+one sat silently broken for months because nobody had a reason to open it.
+`dashboard/` still runs locally for the plotly charts.
 
 **There are no connection strings to copy.** Render injects one into both
 services, and `DATABASE_URL` / `DATABASE_URL_SYNC` deliberately receive the
@@ -658,15 +689,18 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 │   │                     #   non-payment risk types (budget, window, rail)
 │   ├── receivables/      # Layer 7: the B2B side — ladder.py (five rungs by
 │   │                     #   role), aging, disputes, plans, statements,
-│   │                     #   segments, alerts, external writeback
+│   │                     #   accounts + contacts, alerts, external writeback
+│   │                     #   (segments.py is written but NOT wired — see the
+│   │                     #    notice at the top of that file)
 │   ├── voice/            # Layer 8: pipeline.py (the 4 gates), dialogue,
 │   │                     #   knowledge, facts, sarvam.py, webhook.py
 │   ├── merchant/         # The merchant console: routes.py, console_data.py
 │   │                     #   (the read layer), receivables_api.py, templates/
 │   ├── customer/         # The public recovery page (/recover/<token>)
-│   ├── cases.py          # Recovery cases, promises to pay, audit trail
+│   ├── cases.py          # Recovery cases, promises to pay (incl. the UPI
+│   │                     #   Autopay mandate a promise may carry), audit trail
 │   ├── audit_chain.py    # Hash-chained case_events, independently verifiable
-│   ├── scheduler.py      # Layer 6: 14 sweeps on one tick — fire, reconcile
+│   ├── scheduler.py      # Layer 6: 16 sweeps on one tick — fire, reconcile
 │   │                     #   events + risk events + stale write-aheads, cancel
 │   │                     #   dead + superseded links, expire + remind promises,
 │   │                     #   reconcile plans, consolidate accounts, chase due
@@ -725,22 +759,34 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-573 tests, 80% statement coverage over `src/`. The money paths are where the
-coverage went:
+**814 tests across 57 files, 80% statement coverage over `src/`.** The money
+paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |
 |---|---|---|
+| `models.py` | 100% | Every column the money path reads |
 | `chasers/policy.py` | 100% | Per-risk chase bounds — the four chasers' contract |
 | `receivables/ladder.py` | 100% | The five rungs, the contact window, the escalation ratchet |
 | `receivables/statement.py` | 100% | One consolidated statement per buyer per rung |
+| `classifier/taxonomy.py` | 100% | Retryable / hard-decline / switch-only class sets |
 | `ingestion/idempotency.py` | 100% | The double-charge guard, including the constraint race |
 | `guardrail/gate.py` | 98% | Every rule runs; ALL violations reported |
-| `guardrail/rules.py` | 97% | The 11 rules themselves, incl. the true IST clock |
-| `cases.py` | 97% | Attribution, stopping rules, promises |
-| `orchestrator.py` | 86% | Write-ahead ordering, guardrail rejection, chase pipeline, the four `chase_case` guards |
-| `voice/pipeline.py` | 85% | The four gates, including abstention and injection refusal |
-| `scheduler.py` | 82% | Sweep order, deferred fire, re-validation, reconciliation |
+| `guardrail/rules.py` | 98% | The 12 rules themselves, incl. the true IST clock |
+| `audit_chain.py` | 98% | The hash chain, and what a broken one looks like |
+| `cases.py` | 97% | Attribution, stopping rules, promises, mandates |
+| `config.py` | 92% | Fail-closed startup, unit guards, demo-mode refusal |
+| `orchestrator.py` | 86% | Write-ahead ordering, guardrail rejection, chase pipeline, the mandate debit |
+| `scheduler.py` | 83% | Sweep order, deferred fire, re-validation, reconciliation |
+| `executor/retry_executor.py` | 82% | Every Razorpay call the engine makes |
 | `merchant/routes.py` | 76% | Console gating and every panel's query |
+| `voice/pipeline.py` | 75% | The four gates, including abstention and injection refusal |
+
+**The tests that exist because money can move without a customer present**
+live in [tests/test_promise_mandate.py](tests/test_promise_mandate.py): a debit
+without the RBI pre-debit notice is refused; a notice younger than 24h is not
+enough; a second sweep never charges twice; the off switch stops collection on
+mandates already authorised; a timeout after the charge still leaves the money
+findable; an unreadable gateway answer never arms a debit.
 
 **`tests/test_integration_seams.py` is the one to read first.** Every bug in it
 was invisible to a green suite: two modules individually right and
@@ -776,6 +822,34 @@ nothing at all once anything has already read settings.
 
 The engine's first cut could decide; it could not always be trusted about what
 it had decided. The current wave, all CI-verified.
+
+### Promise collection, and the defects found building it
+
+Adding the mandate meant touching the money path, and the review found more in
+the surrounding code than in the feature.
+
+| Sev | Defect | Consequence |
+|---|---|---|
+| P0 | `policy.yaml` published a ₹2,50,000 amount ceiling; the code enforced ₹50,000 — and `AMOUNT_CEILING_INR` was a validation alias **for the paise field** | An operator copying the published bound into that env var got a **₹2,500** ceiling, 100× too tight, silently refusing almost every retry. The alias is now refused at startup: reinterpreting it as rupees would loosen legacy deployments 100× in the other direction, and neither reading is safe to guess |
+| P0 | `/voice/demo/stt` was an unauthenticated file upload spending real Sarvam quota, mounted in production | The in-code control was a comment saying it was "not linked from the console nav". `include_in_schema=False` hides a route from `/docs`; it does not gate the URL. Now development-only |
+| P0 | `AUDIT_CHAIN_SECRET` appeared in no deploy config, and stamping was CLI-only | Every `case_events` row would keep a NULL hash while the console rendered perfectly — the tamper-evident trail the product offers a compliance reviewer would not have existed. Now stamped every scheduler tick, and the service refuses to boot without the key outside development |
+| P0 | A mandate debit would have been attributed as **self**-recovery | The capture carries only an order id, which resolved through the hop that leaves `recovered_via_attempt_id` NULL. The engine would have collected money and reported the customer paid on their own, understating the one number this product exists to prove |
+| P1 | Promise reminders never fired on the payment rail | `policy_for("payment_failure")` returns `None` and the reminder bailed with `skipped_no_policy`, so promises made on the recovery page — the biggest source of them — got no 48h reminder. This also gated collection: the reminder *is* the RBI pre-debit notice |
+| P1 | A charged promise was marked broken by the same tick that collected it | The debit succeeds; the capture lands later. A charged mandate now gets a *bounded* reprieve, so a debit that never settles still breaks normally rather than hanging pending forever |
+| P1 | The mandate authorisation was created with no payer identity | Razorpay had no customer to attach a token to; nothing would ever have been chargeable |
+| P1 | `promise_max_horizon_days` was enforced in three separate copies, and `record_promise` accepted any date | Any new caller silently got no bound at all. Now enforced at the choke point every capture surface funnels through |
+| P2 | The debit spent contact budget | It sends the customer nothing. A case could use its touches chasing and then decline to collect the mandate those touches earned |
+| — | `chasers/policy.py` and `policy.yaml` both claimed `mandate_failure` is "the one type where the engine may simply present the charge again" | Never true — the engine holds no token for a merchant-reported failure, and every action there mints a link. Corrected in both places |
+| — | `receivables/segments.py` is exported, unit-tested, and **called by nothing** | It was nearly given a console panel on the assumption it was live. A segment badge would show a merchant a label the engine does not act on. The module now says so at the top; wiring it is a deliberate product decision about contact cadence |
+
+**Confirmation asks the gateway, and that replaced a guess.** An earlier cut
+recognised Razorpay's webhook *event names* to learn a mandate had been
+authorised — but the reachable documentation never carried the event catalogue,
+so it held a candidate list that would have silently never collected if the real
+names differed, while every test still passed. That is gone.
+`reconcile_pending_mandates` polls the token's own status each tick, which is
+authoritative and needs no webhook registered at all. A guess that fails
+silently is worse than no feature.
 
 ### The seam audit
 

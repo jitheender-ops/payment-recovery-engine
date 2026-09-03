@@ -7,11 +7,15 @@ Guardrail thresholds are configurable here so they can be tuned without code cha
 
 from __future__ import annotations
 
+import logging
+import os
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -167,6 +171,25 @@ class Settings(BaseSettings):
     # Empty = the demo page shows the error; the webhook's text path keeps
     # working without it.
     sarvam_api_key: SecretStr = SecretStr("")
+    # ── Plivo call leg (src/voice/plivo_bridge.py) ──────────────────────
+    # The bridge claims queued voice calls, dials them through Plivo's REST
+    # API, and serves the XML Plivo fetches during the call. All three empty
+    # = the bridge refuses to run (fail-closed, same rule as every signed
+    # surface). PLIVO_AUTH_ID/TOKEN come from the Plivo console; the caller
+    # number is the bought/verified one in E.164.
+    plivo_auth_id: str = ""
+    plivo_auth_token: SecretStr = SecretStr("")
+    plivo_caller_number: str = ""
+    # Where Plivo fetches the bridge's XML and TTS audio — the PUBLIC https
+    # URL this service is reachable on (same value PUBLIC_BASE_URL carries,
+    # declared separately because the bridge may run on its own host).
+    plivo_bridge_base_url: str = ""
+    # Where the bridge reaches the ENGINE's signed endpoints (/voice/turn,
+    # /voice/queue/*). Empty = same host as the bridge (the single-process
+    # deployment); set it when the bridge runs beside a separate engine.
+    plivo_engine_base_url: str = ""
+    # How long the bridge polls the queue when it is empty before looping.
+    plivo_bridge_poll_seconds: int = 10
     # Gates the Streamlit dashboard. Empty means the dashboard refuses to render.
     # The dashboard itself reads DASHBOARD_PASSWORD straight from the
     # environment (dashboard/auth.py) — it is a separate process that holds no
@@ -190,14 +213,32 @@ class Settings(BaseSettings):
     # ── Guardrail Thresholds ─────────────────────────────────────────────
     max_retries_per_payment: int = 3
     max_retries_per_customer_24h: int = 5
-    # Named in PAISE and valued in paise: the previous name said INR while the
-    # number was paise — one operator-set env var away from a ₹500 ceiling.
-    # The legacy AMOUNT_CEILING_INR env var still loads (AliasChoices) so
-    # existing deployments keep working; new config should use the honest name.
-    amount_ceiling_paise: int = Field(
-        default=5_000_000,  # ₹50,000
-        validation_alias=AliasChoices("amount_ceiling_paise", "amount_ceiling_inr"),
-    )
+    # Named in PAISE and valued in paise. The old name said INR while the number
+    # was paise, and keeping it as an alias was worse than either: policy.yaml
+    # published `amount_ceiling_inr: 250000` next to it, so anyone who trusted
+    # the published bound and set that env var got 250000 PAISE — a ₹2,500
+    # ceiling, 100x tighter than the ₹2,50,000 they read. The alias is gone and
+    # the old name is now REFUSED rather than reinterpreted: silently loosening
+    # a legacy deployment 100x is the worse half of that guess. See
+    # _reject_legacy_ceiling_name below.
+    amount_ceiling_paise: int = Field(default=5_000_000)  # ₹50,000
+
+    # A sanity floor on the ceiling, because the unit is the thing people get
+    # wrong. Below ₹1,000 the value is far likelier to be rupees typed into a
+    # paise field than a real policy, and nothing downstream can tell the two
+    # apart — a ₹500 ceiling just quietly refuses every retry the engine would
+    # ever make and looks like a working deployment doing nothing. A merchant
+    # who genuinely wants to automate nothing sets MAX_RETRIES_PER_PAYMENT=0.
+    @field_validator("amount_ceiling_paise", mode="after")
+    @classmethod
+    def _ceiling_is_paise_not_rupees(cls, paise: int) -> int:
+        if 0 < paise < 100_000:
+            raise ValueError(
+                f"AMOUNT_CEILING_PAISE is {paise} paise (₹{paise / 100:,.2f}) — "
+                f"below the ₹1,000 sanity floor. The unit is PAISE: ₹50,000 is "
+                f"5000000. To automate nothing, set MAX_RETRIES_PER_PAYMENT=0."
+            )
+        return paise
     consent_window_hours: int = 72
     max_nudges_per_customer_24h: int = 2
     # The window the two rate limits above actually count over. The columns are
@@ -241,6 +282,32 @@ class Settings(BaseSettings):
     # after), so "I'll pay in six weeks" is recorded as noise about intent,
     # not as a promise that silences the case for six weeks.
     promise_max_horizon_days: int = 14
+
+    # ── Promise-backed UPI Autopay mandate ───────────────────────────────
+    # Off by default, and that is not caution for its own sake: debiting a
+    # mandate needs Razorpay's Recurring Payments explicitly enabled on the
+    # account, and an engine that offers a customer an autopay it cannot
+    # actually charge has made a promise of its own that it will break. On =
+    # the recovery page offers to authorise a mandate alongside the plain
+    # date promise; off = every promise is the trust-based one, exactly as
+    # before.
+    promise_mandate_enabled: bool = False
+    # The ceiling on a SINGLE unattended debit. RBI's e-mandate framework
+    # exempts debits below a threshold from per-transaction additional
+    # authentication; above it each debit needs the customer present, which is
+    # not something a sweep can arrange at 9 AM on the promised date.
+    #
+    # ₹15,000 is the general limit and therefore the default here. The raised
+    # ceilings apply to specific categories — card bills, insurance premiums,
+    # mutual fund subscriptions — and NOT to general merchant collection, which
+    # is what this engine does. A merchant operating in one of those categories
+    # can raise this; nobody else should, and raising it does not change what
+    # the regulator allows, only what this engine will attempt.
+    #
+    # Above the ceiling the mandate is never OFFERED, rather than offered and
+    # then refused: the fallback trust-based promise is the only lawful path
+    # for a larger amount, so the page must not imply otherwise.
+    mandate_max_auto_debit_paise: int = 1_500_000  # ₹15,000
 
     # Expected-value stopping rule: attempt only while
     # confidence * amount > retry_cost + annoyance_cost. Only enforced when
@@ -335,6 +402,14 @@ class Settings(BaseSettings):
     # instead, and the comparison the README makes is then between the LLM and
     # a pile of if-statements. Train it with scripts/train_xgboost.py.
     xgboost_model_path: str = "models/xgboost_baseline.joblib"
+    # SHA-256 of the trained model file. joblib.load is pickle — it executes
+    # whatever the file says, so a swapped-in model is arbitrary code
+    # execution. Empty means no pin is enforced (the file ships inside the
+    # image and the path is operator-set); the moment a model can arrive
+    # from outside the build, set this — xgboost_baseline.py refuses to
+    # load any file whose digest does not match. scripts/train_xgboost.py
+    # prints it after every training run.
+    xgboost_model_sha256: str = ""
 
     # ── Scheduler ────────────────────────────────────────────────────────
     # The worker that fires deferred `retry_at` attempts, reconciles webhook
@@ -407,6 +482,27 @@ class Settings(BaseSettings):
         return url
 
     @model_validator(mode="after")
+    def _reject_legacy_ceiling_name(self) -> Settings:
+        """
+        AMOUNT_CEILING_INR used to be an alias for the paise field. Refuse it.
+
+        Reinterpreting it as rupees would multiply a legacy deployment's ceiling
+        by 100 — the engine would start auto-retrying amounts a human was meant
+        to approve. Continuing to read it as paise leaves the trap that made
+        policy.yaml's published ₹2,50,000 mean ₹2,500. Neither is safe to guess,
+        so the operator says which they meant.
+        """
+        if "AMOUNT_CEILING_INR" in os.environ:
+            raise ValueError(
+                "AMOUNT_CEILING_INR is no longer read — its name said rupees "
+                "while its value was paise, and the two readings differ by 100x "
+                "on the guardrail that decides what gets auto-retried. Set "
+                "AMOUNT_CEILING_PAISE instead, in paise (₹50,000 = 5000000), "
+                "and remove AMOUNT_CEILING_INR."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _demo_mode_is_development_only(self) -> Settings:
         """
         Refuse demo mode anywhere but development.
@@ -451,6 +547,52 @@ class Settings(BaseSettings):
                 "Missing required Razorpay settings: "
                 + ", ".join(n.upper() for n in missing)
                 + ". Copy .env.example to .env and fill them in."
+            )
+
+
+    def require_production_integrity(self) -> None:
+        """
+        Fail fast on the things that are silently OFF rather than loudly broken.
+
+        `require_razorpay_credentials` catches an engine that cannot talk to the
+        gateway — obvious within a minute. This catches the opposite failure:
+        a deployment that runs, serves, recovers money, and quietly is not doing
+        one of the things it claims. Development is exempt; staging and
+        production are not.
+
+        AUDIT_CHAIN_SECRET is the one that hard-fails. The hash chain is keyed
+        on purpose, so with no key `stamp_unhashed_events` refuses and every
+        `case_events` row keeps a NULL `event_hash`. The console still renders,
+        the money still moves, and the tamper-evident trail the product offers a
+        compliance reviewer does not exist. That is exactly the class of quiet
+        untruth demo mode is refused for, so it gets the same treatment.
+        """
+        if self.app_env == "development":
+            return
+
+        if not reveal(self.audit_chain_secret).strip():
+            raise RuntimeError(
+                f"AUDIT_CHAIN_SECRET is empty with APP_ENV={self.app_env}. The "
+                "case_events hash chain is keyed, so without it every audit row "
+                "stays unstamped and the trail proves nothing — while everything "
+                "else keeps working, which is why this is a startup error rather "
+                "than a warning. Set it once and keep it: rotating invalidates "
+                "every existing stamp."
+            )
+
+        # Not fatal — the engine decides fine on the XGBoost baseline — but a
+        # missing key means the LLM policy agent never runs, and the fallback
+        # is silent by design. Say so once at boot instead.
+        provider_key = (
+            self.anthropic_api_key if self.llm_provider == "anthropic"
+            else self.openai_api_key
+        )
+        if not reveal(provider_key).strip():
+            logger.warning(
+                "%s_API_KEY is empty — every decision will fall back to the "
+                "XGBoost baseline. The engine works, but the LLM policy agent "
+                "is not running.",
+                self.llm_provider.upper(),
             )
 
 

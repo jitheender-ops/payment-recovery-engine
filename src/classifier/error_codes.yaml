@@ -24,9 +24,15 @@
 
 rules:
   # ── Fraud / Hard Decline (highest priority) ──────────────────────────
+  # Razorpay documents this retryable, advising the customer "retry with a
+  # different card or method" — a rail SWITCH, not another attempt on the
+  # instrument the risk screen just stopped. It was mapped to fraud_block and
+  # abandoned, which threw away a recoverable payment; `risk_check_failed` is
+  # retryable but switch-only (src/classifier/taxonomy.py), so the engine
+  # moves rails or nudges and never re-presents the same card.
   - error_reason: "payment_risk_check_failed"
-    failure_class: "fraud_block"
-    retryable: false
+    failure_class: "risk_check_failed"
+    retryable: true
     priority: 100
 
   - error_reason: "card_stolen"

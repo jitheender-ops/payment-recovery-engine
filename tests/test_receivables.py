@@ -15,6 +15,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
+
 from src.cases import open_case
 from src.receivables import (
     account_ref_for_case,
@@ -661,3 +663,234 @@ async def test_a_fully_paid_case_cannot_open_a_plan(
             due_dates=[now + timedelta(days=7), now + timedelta(days=21)],
         )
         assert plan is None
+
+
+# ── Aging analytics (src/receivables/aging.py) ────────────────────────────
+# The two numbers every AR platform leads with, computed honestly. These
+# pin the bucket math, the None-honesty, and the dialect-safe queries —
+# the module's own docstrings record the two silent-empty bugs this
+# module was written to never reintroduce.
+
+
+async def _invoice_case(
+    sm, ref: str, *, due_days_ago: int = 0, at_risk: int = 100_000,
+    recovered: int = 0, state: str = "open",
+) -> None:  # type: ignore[no-untyped-def]
+
+    async with sm() as session:
+        case = await open_case(
+            session, risk_type="invoice_overdue", subject_ref=ref,
+            amount_at_risk=at_risk,
+        )
+        case.due_at = datetime.now(UTC) - timedelta(days=due_days_ago)
+        case.amount_recovered = recovered
+        case.state = state
+        await session.commit()
+
+
+async def test_aging_buckets_places_each_case_in_its_own_bucket(db_sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    from src.receivables.aging import aging_buckets
+
+    # One case per bucket: not-due, 3 days, 10 days, 20 days, 45 days.
+    await _invoice_case(db_sessionmaker, "INV-AG-1", due_days_ago=-3)
+    await _invoice_case(db_sessionmaker, "INV-AG-2", due_days_ago=3)
+    await _invoice_case(db_sessionmaker, "INV-AG-3", due_days_ago=10)
+    await _invoice_case(db_sessionmaker, "INV-AG-4", due_days_ago=20)
+    await _invoice_case(db_sessionmaker, "INV-AG-5", due_days_ago=45)
+
+    async with db_sessionmaker() as session:
+        buckets = await aging_buckets(session)
+    by_label = {b["label"]: b for b in buckets}
+    assert [b["count"] for b in buckets] == [1, 1, 1, 1, 1]
+    assert by_label["1_7"]["outstanding_paise"] == 100_000
+    assert by_label["30_plus"]["outstanding_paise"] == 100_000
+
+
+async def test_aging_buckets_counts_outstanding_not_gross(db_sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    """A part-paid invoice ages by what is still owed, not the original."""
+    from src.receivables.aging import aging_buckets
+
+    await _invoice_case(
+        db_sessionmaker, "INV-AG-PART", due_days_ago=5,
+        at_risk=100_000, recovered=40_000,
+    )
+    async with db_sessionmaker() as session:
+        buckets = await aging_buckets(session)
+    assert buckets[1]["outstanding_paise"] == 60_000
+
+
+async def test_aging_buckets_skips_cases_with_no_due_date_and_closed_cases(
+    db_sessionmaker,
+) -> None:  # type: ignore[no-untyped-def]
+    """due_at=None rows are not answerable; closed rows are not outstanding
+    no matter what their due date says."""
+    from src.receivables.aging import aging_buckets
+
+    async with db_sessionmaker() as session:
+        no_due = await open_case(
+            session, risk_type="invoice_overdue", subject_ref="INV-AG-NODUE",
+            amount_at_risk=100_000,
+        )  # due_at left NULL
+        closed = await open_case(
+            session, risk_type="invoice_overdue", subject_ref="INV-AG-CLOSED",
+            amount_at_risk=100_000,
+        )
+        closed.state = "recovered"
+        await session.commit()
+        assert no_due.due_at is None
+
+    async with db_sessionmaker() as session:
+        buckets = await aging_buckets(session)
+    assert sum(b["count"] for b in buckets) == 0
+
+
+async def test_avg_days_to_pay_is_none_honest_on_no_history(db_sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    """Empty is None — 'not enough history' — never a silent 0 that reads
+    as same-day collection."""
+    from src.receivables.aging import avg_days_to_pay
+
+    async with db_sessionmaker() as session:
+        assert await avg_days_to_pay(session) is None
+
+
+async def test_avg_days_to_pay_spans_due_to_recovered(db_sessionmaker) -> None:  # type: ignore[no-untyped-def]
+    from src.receivables.aging import avg_days_to_pay
+
+    # Two recovered invoices: paid 2 and 6 days late -> mean 4.0.
+    for ref, late in (("INV-DTP-1", 2), ("INV-DTP-2", 6)):
+        async with db_sessionmaker() as session:
+            case = await open_case(
+                session, risk_type="invoice_overdue", subject_ref=ref,
+                amount_at_risk=50_000,
+            )
+            case.due_at = datetime.now(UTC) - timedelta(days=late + 10)
+            case.state = "recovered"
+            case.recovered_at = case.due_at + timedelta(days=late)
+            await session.commit()
+
+    async with db_sessionmaker() as session:
+        assert await avg_days_to_pay(session) == 4.0
+
+
+async def test_promise_effectiveness_joins_to_invoice_cases_only(
+    db_sessionmaker,
+) -> None:  # type: ignore[no-untyped-def]
+    """A promise on an abandoned cart is payer behaviour on a cart, not an
+    invoice fact — the JOIN keeps the label honest. Cancelled promises
+    never enter the denominator."""
+    from src.models import PromiseToPay
+    from src.receivables.aging import promise_effectiveness
+
+    async with db_sessionmaker() as session:
+        inv = await open_case(
+            session, risk_type="invoice_overdue", subject_ref="INV-PE-1",
+            amount_at_risk=50_000,
+        )
+        session.add(PromiseToPay(
+            recovery_case_id=inv.id, amount_promised=50_000,
+            due_at=datetime.now(UTC) + timedelta(days=3), status="kept",
+        ))
+        session.add(PromiseToPay(
+            recovery_case_id=inv.id, amount_promised=50_000,
+            due_at=datetime.now(UTC) + timedelta(days=3), status="broken",
+        ))
+        # A cancelled promise on the SAME invoice: excluded from both sides.
+        session.add(PromiseToPay(
+            recovery_case_id=inv.id, amount_promised=50_000,
+            due_at=datetime.now(UTC) + timedelta(days=3), status="cancelled",
+        ))
+        # A kept promise on a CART case: wrong population entirely.
+        cart = await open_case(
+            session, risk_type="checkout_abandonment", subject_ref="cart_pe_1",
+            amount_at_risk=10_000,
+        )
+        session.add(PromiseToPay(
+            recovery_case_id=cart.id, amount_promised=10_000,
+            due_at=datetime.now(UTC) + timedelta(days=1), status="kept",
+        ))
+        await session.commit()
+
+    async with db_sessionmaker() as session:
+        stats = await promise_effectiveness(session)
+    assert stats["kept"] == 1.0
+    assert stats["broken"] == 1.0
+    assert stats["kept_rate"] == 0.5, "the cart promise or the cancelled one leaked in"
+
+
+# ── Plan reconciliation (src/receivables/plans.py::reconcile_plans) ────────
+# The default verdict: money the customer stopped paying. Derived never
+# stored — a broken instalment promise is what PROVES a default.
+
+
+async def test_a_broken_instalment_defaults_the_plan_and_cancels_the_rest(
+    db_sessionmaker,
+) -> None:  # type: ignore[no-untyped-def]
+    from src.models import PromiseToPay
+    from src.receivables.plans import create_plan, reconcile_plans
+
+    async with db_sessionmaker() as session:
+        case = await open_case(
+            session, risk_type="invoice_overdue", subject_ref="INV-DEF-1",
+            amount_at_risk=90_000,
+        )
+        now = datetime.now(UTC)
+        plan = await create_plan(
+            session, case,
+            amounts_paise=[30_000, 30_000, 30_000],
+            due_dates=[now + timedelta(days=d) for d in (1, 7, 14)],
+        )
+        assert plan is not None
+        await session.commit()
+
+        # Instalment 1's promise breaks (the expiry sweep's job — done
+        # directly here; reconcile_plans runs after it by contract).
+        inst1 = (await session.execute(
+            select(PromiseToPay).where(PromiseToPay.status == "pending")
+        )).scalars().first()
+        inst1.status = "broken"
+        await session.commit()
+        await session.refresh(plan)
+        assert plan.status == "active", "the default must be DERIVED, not stored early"
+
+        moved = await reconcile_plans(session)
+        await session.commit()
+
+        assert moved >= 1
+        await session.refresh(plan)
+        assert plan.status == "defaulted", "a broken instalment did not default the plan"
+        # Future instalments rest cancelled, not pending-forever.
+        pending_left = (await session.execute(
+            select(PromiseToPay).where(
+                PromiseToPay.recovery_case_id == case.id,
+                PromiseToPay.status == "pending",
+            )
+        )).scalars().all()
+        assert pending_left == [], "future instalments were left dangling as pending"
+
+
+async def test_a_completed_plan_needs_the_money_to_have_arrived(
+    db_sessionmaker,
+) -> None:  # type: ignore[no-untyped-def]
+    """Completion is recovered-case + all promises resolved + the settlement
+    actually landed — not merely 'no instalment broke yet'."""
+    from src.receivables.plans import create_plan, reconcile_plans
+
+    async with db_sessionmaker() as session:
+        case = await open_case(
+            session, risk_type="invoice_overdue", subject_ref="INV-DONE-1",
+            amount_at_risk=80_000,
+        )
+        now = datetime.now(UTC)
+        plan = await create_plan(
+            session, case,
+            amounts_paise=[40_000, 40_000],
+            due_dates=[now + timedelta(days=d) for d in (1, 7)],
+        )
+        await session.commit()
+
+        # Nothing broken, but nothing paid either: no verdict.
+        moved = await reconcile_plans(session)
+        await session.commit()
+        assert moved == 0
+        await session.refresh(plan)
+        assert plan.status == "active", "an unpaid plan was marked completed"

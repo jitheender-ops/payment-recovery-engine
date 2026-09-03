@@ -87,3 +87,8 @@ eval/results/.llm_decision_cache.jsonl
 .demo.seeded
 .sandbox.sqlite3
 .sandbox.seeded
+
+# Local agent-tooling scratch (RuVector/AgentDB). Binary, machine-local, and
+# regenerated on demand — nothing here is a project artifact.
+agentdb.rvf
+agentdb.rvf.lock

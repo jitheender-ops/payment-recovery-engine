@@ -56,7 +56,12 @@ class ExternalPaymentIn(BaseModel):
     method: Literal["neft", "rtgs", "imps", "cheque", "cash", "upi_manual"] = "neft"
     note: str | None = Field(default=None, max_length=500)
 
-    @field_validator("case_id", "paid_ref")
+    # NOTE: only case_id is UUID-validated. paid_ref is the merchant's own
+    # reference for the money — a UTR, a cheque number — and forcing it
+    # through the UUID check rejected every legitimate mark-paid POST with
+    # "case_id must be a UUID" while the endpoint looked simply broken.
+    # Its shape contract is the Field bounds above.
+    @field_validator("case_id")
     @classmethod
     def _shaped(cls, value: str) -> str:
         try:

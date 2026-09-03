@@ -10,6 +10,7 @@ Handles payment.failed and payment.captured events:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -286,10 +287,19 @@ async def receive_razorpay_webhook(
         return Response(status_code=400, content="Invalid JSON")
 
     event_type = payload.get("event", "unknown")
-    # Razorpay uses the payment ID as a quasi-event-ID; construct a unique one
+    # Razorpay uses the payment ID as a quasi-event-ID; construct a unique one.
+    # A webhook without a payment id (real for some failure shapes) used to
+    # collapse every such event in the same second into one id — the second
+    # genuine failure answered "Already processed" and was never recovered.
+    # Key those on a digest of the full body instead: two distinct payloads
+    # never collide, and a byte-identical redelivery still dedupes.
     payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
-    payment_id = payment_entity.get("id", "unknown")
-    event_id = f"{event_type}_{payment_id}_{payload.get('created_at', 0)}"
+    payment_id = payment_entity.get("id")
+    if payment_id:
+        event_id = f"{event_type}_{payment_id}_{payload.get('created_at', 0)}"
+    else:
+        digest = hashlib.sha256(raw_body).hexdigest()[:16]
+        event_id = f"{event_type}_{digest}"
 
     logger.info(
         "Webhook received: type=%s, payment_id=%s, event_id=%s",

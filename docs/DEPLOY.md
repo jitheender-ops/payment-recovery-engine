@@ -90,9 +90,27 @@ Eight values, none of them a connection string.
 
 `openssl rand -hex 32` generates the two you invent.
 
-`API_KEY`, `RECOVERY_LINK_SECRET` and `PII_MASK_SECRET` are `generateValue` —
-Render mints them once and they never touch git. `DATABASE_URL`,
-`DATABASE_URL_SYNC` and `PUBLIC_BASE_URL` are injected by the platform.
+`API_KEY`, `RECOVERY_LINK_SECRET`, `PII_MASK_SECRET` and `AUDIT_CHAIN_SECRET`
+are `generateValue` — Render mints them once and they never touch git.
+`DATABASE_URL`, `DATABASE_URL_SYNC` and `PUBLIC_BASE_URL` are injected by the
+platform.
+
+**`AUDIT_CHAIN_SECRET` is a boot requirement, not a nicety.** Outside
+development the service refuses to start without it
+(`Settings.require_production_integrity`). The `case_events` hash chain is
+keyed, so an unkeyed deployment leaves every audit row unstamped while the
+console renders perfectly and money still moves — the tamper-evident trail a
+compliance reviewer is shown would not exist. Never rotate it casually:
+rotating invalidates every stamp already written, and the chain reads as broken
+until you re-stamp with `python scripts/audit_chain.py --stamp`.
+
+`ANTHROPIC_API_KEY` is wired but empty by default. The blueprint ships
+`LLM_PROVIDER=openai` against Groq's free tier; to run the policy agent on
+Claude instead, set that key, flip `LLM_PROVIDER` to `anthropic`, clear
+`LLM_BASE_URL`, and set `LLM_MODEL` to a `claude-*` id. **With no key for the
+selected provider the engine still works** — every decision falls back to the
+XGBoost baseline — so the boot log says so explicitly rather than letting it
+pass for an LLM that is running.
 
 ### Free plan: what it costs you, and how to live with it
 
@@ -167,7 +185,7 @@ code 0 only if every required check passed, so it also works in a deploy hook.
 Each of those is a promise made in this file or in PRODUCT.md, and each fails
 quietly — the page still renders either way.
 
-Then drive real traffic through it:
+Then drive traffic through it:
 
 ```bash
 python scripts/simulate_webhooks.py --host https://<recovery-api>.onrender.com --count 24
@@ -176,6 +194,64 @@ python scripts/run_risk_batch.py    --host https://<recovery-api>.onrender.com -
 
 Doing it in that order matters: if the console is ungated or `/risks` is taking
 unsigned events, you want to know before you push data in, not after.
+
+### 4a. Promise-backed autopay stays OFF until you prove it
+
+`PROMISE_MANDATE_ENABLED=false` ships in the blueprint. Turning it on needs
+exactly one thing: **Razorpay Recurring Payments enabled on the account.**
+Without it `registration_link.create` and `payment.createRecurring` fail, and a
+page that offers a customer autopay it cannot charge has made a promise of its
+own that it will break.
+
+Two things that are NOT prerequisites, and why:
+
+- **No webhook event registration is required for confirmation.** An earlier
+  draft matched Razorpay's event names to learn that a mandate had been
+  authorised, and the reachable documentation never carried the event
+  catalogue — so it held a guessed list that would have silently never
+  collected if the real names differed. That is gone. `reconcile_pending_mandates`
+  asks the gateway for the token's own status each tick
+  (`RetryExecutor.fetch_mandate_status`), which is authoritative and works
+  whether or not any webhook is registered. You still want
+  `payment.captured` registered, as ever, for attribution.
+- **`MANDATE_MAX_AUTO_DEBIT_PAISE` is already correct at ₹15,000.** That is
+  RBI's general limit for debits exempt from per-transaction authentication,
+  which is what merchant collection is. The raised ceilings are
+  category-specific (card bills, insurance, mutual funds). Leave it alone
+  unless you operate in one of those.
+
+### 4b. The one that proves it is real
+
+Both scripts above POST events we constructed. They exercise the whole engine,
+but the gateway never spoke — so they cannot prove Razorpay is wired to this
+deployment at all. One real payment does, and it costs nothing:
+
+1. Mint a Payment Link from the Razorpay **test** dashboard (or let the engine
+   mint one) and open it.
+2. Pay with a **forcing test card** from `src/classifier/error_codes.yaml`
+   (`razorpay_test_cards`) and pick **failure** on the success/failure screen.
+   Razorpay emits that exact `error_reason`.
+3. Razorpay — not us — POSTs `payment.failed` to
+   `/webhooks/razorpay`, signed with the real secret.
+
+Watch `/console/live`: a case opens, the classifier lands the reason the card
+forced, the agent decides, the guardrail records what it checked. Then pay the
+recovery link the engine sends and Razorpay fires `payment.captured`, which is
+what attributes the money back to the case.
+
+That round trip — real gateway, real signature, real webhook, real
+attribution — is the only evidence that the deployment is live rather than
+merely running. Nothing in it is simulated except the money.
+
+**Confirm the audit chain is actually being stamped**, since it is the one
+subsystem that fails silently:
+
+```sql
+SELECT count(*) FROM case_events WHERE event_hash IS NULL;
+```
+
+Should settle at 0 within one scheduler tick (60s). Anything else means
+`AUDIT_CHAIN_SECRET` changed under a chain that was already stamped.
 
 Then open `/console/live`, sign in with `DASHBOARD_PASSWORD`, and read the
 heartbeat strip at the top of the page:

@@ -29,12 +29,14 @@ import hmac
 import logging
 import time
 import uuid
+from collections import deque
 from hashlib import sha256
 from typing import Any
 
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from src.auth import client_ip
 from src.cases import record_opt_out
 from src.config import get_settings, reveal
 from src.database import async_session_factory
@@ -45,6 +47,38 @@ from src.voice.facts import load_facts
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ── Rate limiting ───────────────────────────────────────────────────────────
+# Signature auth proves the caller knows the secret; it says nothing about
+# VOLUME. A leaked VOICE_WEBHOOK_SECRET (or a provider bug looping callbacks)
+# would burn Sarvam STT/TTS quota and LLM tokens unbounded. Same in-process
+# fixed-window limiter the customer page uses, sized for a live call: a
+# conversation turns over every few seconds, so MAX_TURNS (12) plus retries
+# and redeliveres must fit comfortably inside the window.
+# ponytail: per-IP buckets, one worker — same deployment reality as the
+# customer page's limiter; a multi-worker deployment needs the shared store.
+_VOICE_RATE_WINDOW_SECONDS = 60.0
+_VOICE_TURN_LIMIT = 60        # signed turns per IP per window
+_VOICE_RATE_BUCKETS: dict[str, deque[float]] = {}
+
+
+def _check_voice_rate_limit(request: Request) -> None:
+    key = f"voice:{client_ip(request)}"
+    now_mono = time.monotonic()
+    bucket = _VOICE_RATE_BUCKETS.setdefault(key, deque())
+    while bucket and now_mono - bucket[0] > _VOICE_RATE_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= _VOICE_TURN_LIMIT:
+        logger.warning("Voice rate limit hit: %s (%d in window)", key, len(bucket))
+        raise HTTPException(status_code=429, detail="Too many requests")
+    bucket.append(now_mono)
+    if len(_VOICE_RATE_BUCKETS) > 10_000:
+        stale = [
+            k for k, v in _VOICE_RATE_BUCKETS.items()
+            if not v or now_mono - v[-1] > _VOICE_RATE_WINDOW_SECONDS
+        ]
+        for stale_key in stale:
+            del _VOICE_RATE_BUCKETS[stale_key]
 
 
 def _voice_secret() -> str:
@@ -102,6 +136,7 @@ async def voice_turn(request: Request) -> JSONResponse:
 
     if not _authorized(raw, signature):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    _check_voice_rate_limit(request)
 
     try:
         body: dict[str, Any] = await request.json()
@@ -199,7 +234,23 @@ async def voice_turn(request: Request) -> JSONResponse:
 # GET /voice/demo — mic → saaras STT → pipeline → bulbul TTS, in the browser.
 # Not the production surface: the demo binds no case (so no amounts can be
 # spoken — the grounding gate has no facts to ground them in), and the STT
-# leg costs real Sarvam quota, so it is not linked from the console nav.
+# leg costs real Sarvam quota.
+#
+# DEVELOPMENT ONLY, and enforced rather than assumed. These three routes carry
+# no signature — /voice/turn is HMAC-checked, they are not — so deployed they
+# were an unauthenticated file upload that spends money per request against a
+# paid API. The control used to be the comment below saying they were "not
+# linked from the console nav", which is not a control: the URLs were live and
+# `include_in_schema=False` only hides them from /docs. Same rule and same
+# reasoning as src/demo.py's fake gateway — a surface that must not run in
+# production is refused there, not merely unlinked.
+
+
+def _demo_only() -> None:
+    """404 outside development — indistinguishable from a route that isn't there."""
+    if get_settings().app_env != "development":
+        raise HTTPException(status_code=404)
+
 
 
 _DEMO_TEMPLATES = None
@@ -219,12 +270,12 @@ def _demo_templates() -> Any:
     return _DEMO_TEMPLATES
 
 
-@router.get("/voice/demo", response_class=HTMLResponse)
+@router.get("/voice/demo", response_class=HTMLResponse, dependencies=[Depends(_demo_only)])
 async def voice_demo(request: Request) -> Any:
     return _demo_templates().TemplateResponse(request, "voice_demo.html", {})
 
 
-@router.post("/voice/demo/stt")
+@router.post("/voice/demo/stt", dependencies=[Depends(_demo_only)])
 async def voice_demo_stt(audio: UploadFile = File(...)) -> JSONResponse:
     """Mic blob → saaras:v3 (auto-detect) → transcript. Real Sarvam quota."""
     try:
@@ -236,7 +287,7 @@ async def voice_demo_stt(audio: UploadFile = File(...)) -> JSONResponse:
         return JSONResponse({"detail": str(e)}, status_code=502)
 
 
-@router.post("/voice/demo/turn")
+@router.post("/voice/demo/turn", dependencies=[Depends(_demo_only)])
 async def voice_demo_turn(request: Request) -> JSONResponse:
     """Transcript → pipeline → bulbul reply, with the LLM path per settings."""
     try:

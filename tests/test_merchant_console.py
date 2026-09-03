@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import src.receivables.models  # noqa: F401  — register the AR tables on Base
@@ -33,7 +34,13 @@ from src.models import (
     SchedulerHeartbeat,
     VoiceCallQueue,
 )
-from src.receivables.models import ArAccount, ArContactLog, CaseDispute, MerchantAlert
+from src.receivables.models import (
+    AccountTask,
+    ArAccount,
+    ArContactLog,
+    CaseDispute,
+    MerchantAlert,
+)
 
 PASSWORD = "console-test-password"
 
@@ -65,6 +72,18 @@ async def _seed(sm: async_sessionmaker[AsyncSession]) -> None:
         account = ArAccount(account_ref="ref:buyer-corp", display_name="Buyer Corp")
         s.add(account)
         await s.flush()
+
+        # A human call task at the urgent rung. Seeded because the console's
+        # own claim is that it shows what automation refused, and the ladder
+        # raising work for a person is the clearest case of that.
+        s.add(
+            AccountTask(
+                account_id=account.id,
+                kind="call",
+                detail={"reason": "Urgent rung reached, 42 days past due"},
+                status="open",
+            )
+        )
 
         # A recovered case, so the money line has both halves.
         paid = await open_case(
@@ -233,6 +252,15 @@ async def test_every_panel_renders_its_data(
     assert "What the guardrail refused" in html
     assert "Recent activity" in html
 
+    # The voice queue in full. voice_panel() was computed on every render and
+    # displayed nowhere: the only voice signal was a one-line attention item
+    # that fires solely when queued>0 and claimed==0, so a queue with a
+    # climbing `failed` count — the shape of an outage — was invisible.
+    assert "Voice calls" in html, "the voice queue panel is not rendered"
+    assert "Being called now" in html
+    assert "Failed" in html
+    assert "Ended in opt-out" in html
+
 
 async def test_a_stale_heartbeat_dominates_the_page(
     console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
@@ -364,7 +392,8 @@ async def test_a_database_outage_renders_honestly(
 # gone.
 
 _FOLDED = ["/console/pipeline", "/console/routing", "/console/cases",
-           "/console/ops", "/console/evidence"]
+           "/console/ops", "/console/evidence", "/console/messages",
+           "/console/accounts"]
 
 
 @pytest.mark.parametrize("path", _FOLDED)
@@ -681,3 +710,456 @@ async def test_an_unattributed_recovery_is_not_claimed_by_the_engine(
     html = console.get(f"/console/case/{case_id}").text
     assert "the customer paid directly" in html
     assert "Attributed to an attempt this engine made" not in html
+
+
+# ── The console must be able to do what it tells you to do ────────────────
+
+
+async def test_a_dispute_can_be_resolved_from_the_console(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The panel has said "Chasing is frozen on these until you uphold or reject"
+    while offering no control — the only handler was an HMAC-signed JSON
+    endpoint a merchant on a laptop cannot reach. A worklist naming an action
+    it does not offer is worse than not showing the row.
+    """
+    from src.receivables.models import CaseDispute
+
+    await _seed(db_sessionmaker)
+    html = console.get("/console/live").text
+    assert "Your verdict" in html, "the verdict column is not rendered"
+    assert "/console/dispute/resolve" in html, "no control for the named action"
+
+    async with db_sessionmaker() as session:
+        dispute = (await session.execute(select(CaseDispute))).scalars().first()
+        assert dispute is not None
+        dispute_id = str(dispute.id)
+
+    resp = console.post(
+        "/console/dispute/resolve",
+        data={"dispute_id": dispute_id, "outcome": "rejected"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    async with db_sessionmaker() as session:
+        resolved = await session.get(CaseDispute, uuid.UUID(dispute_id))
+        assert resolved is not None and resolved.status == "rejected"
+
+
+async def test_resolving_a_dispute_needs_a_session(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """It closes cases and restarts chases — same gate as every console page."""
+    from src.receivables.models import CaseDispute
+
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as session:
+        dispute = (await session.execute(select(CaseDispute))).scalars().first()
+        assert dispute is not None
+        dispute_id = str(dispute.id)
+
+    console.cookies.clear()
+    resp = console.post(
+        "/console/dispute/resolve",
+        data={"dispute_id": dispute_id, "outcome": "upheld"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "login" in resp.headers.get("location", "")
+
+    async with db_sessionmaker() as session:
+        untouched = await session.get(CaseDispute, uuid.UUID(dispute_id))
+        assert untouched is not None and untouched.status == "open"
+
+
+async def test_a_bad_outcome_string_never_reaches_resolve_dispute(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from src.receivables.models import CaseDispute
+
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as session:
+        dispute = (await session.execute(select(CaseDispute))).scalars().first()
+        assert dispute is not None
+        dispute_id = str(dispute.id)
+
+    for outcome in ("", "settled", "UPHELD; DROP TABLE"):
+        console.post(
+            "/console/dispute/resolve",
+            data={"dispute_id": dispute_id, "outcome": outcome},
+            follow_redirects=False,
+        )
+    async with db_sessionmaker() as session:
+        untouched = await session.get(CaseDispute, uuid.UUID(dispute_id))
+        assert untouched is not None and untouched.status == "open"
+
+
+async def test_a_call_task_can_be_closed_from_the_console(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The ladder showed `open_call_tasks` as a bare count: work exists,
+    somewhere, for someone. No account, no reason, no way to close it.
+    """
+    from src.receivables.models import AccountTask
+
+    await _seed(db_sessionmaker)
+    html = console.get("/console/live").text
+
+    async with db_sessionmaker() as session:
+        task = (await session.execute(select(AccountTask))).scalars().first()
+    if task is None:
+        pytest.skip("seed carries no call task")
+
+    assert "Called them" in html, "the task list has no control"
+    resp = console.post(
+        "/console/task/done", data={"task_id": str(task.id)}, follow_redirects=False
+    )
+    assert resp.status_code == 303
+
+    async with db_sessionmaker() as session:
+        closed = await session.get(AccountTask, task.id)
+        assert closed is not None and closed.status != "open"
+
+
+async def test_money_that_arrived_another_way_can_be_recorded(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    NEFT, a cheque, cash. None of it touches Razorpay, so no webhook can tell
+    us — the console showed an outstanding balance it could not let anyone
+    close, while the case went on chasing money already in the bank.
+    """
+    from src.models import RecoveryCase
+
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as session:
+        case = (
+            await session.execute(
+                select(RecoveryCase).where(RecoveryCase.state == "open")
+            )
+        ).scalars().first()
+        assert case is not None
+        case_id, owed = str(case.id), case.amount_at_risk - case.amount_recovered
+
+    page = console.get(f"/console/case/{case_id}").text
+    assert "Money arrived another way" in page
+    assert "/console/case/paid" in page, "the balance has no way to be closed"
+
+    resp = console.post(
+        "/console/case/paid",
+        data={
+            "case_id": case_id,
+            "amount_inr": str(owed // 100),
+            "paid_ref": "UTR-CONSOLE-1",
+            "method": "neft",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    async with db_sessionmaker() as session:
+        updated = await session.get(RecoveryCase, uuid.UUID(case_id))
+        assert updated is not None
+        assert updated.amount_recovered >= owed
+        # Counted, never claimed: the engine did not earn this one.
+        assert updated.recovered_via_attempt_id is None
+
+
+async def test_an_external_payment_refuses_junk_input(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """It is a money form. Zero, negative, no reference, unknown method."""
+    from src.models import RecoveryCase
+
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as session:
+        case = (
+            await session.execute(
+                select(RecoveryCase).where(RecoveryCase.state == "open")
+            )
+        ).scalars().first()
+        assert case is not None
+        case_id, before = str(case.id), case.amount_recovered
+
+    for payload in (
+        {"amount_inr": "0", "paid_ref": "R", "method": "neft"},
+        {"amount_inr": "-5", "paid_ref": "R", "method": "neft"},
+        {"amount_inr": "100", "paid_ref": "", "method": "neft"},
+        {"amount_inr": "100", "paid_ref": "R", "method": "bitcoin"},
+        {"amount_inr": "abc", "paid_ref": "R", "method": "neft"},
+    ):
+        console.post(
+            "/console/case/paid",
+            data={"case_id": case_id, **payload},
+            follow_redirects=False,
+        )
+
+    async with db_sessionmaker() as session:
+        untouched = await session.get(RecoveryCase, uuid.UUID(case_id))
+        assert untouched is not None and untouched.amount_recovered == before
+
+
+async def test_the_audit_trail_is_verified_in_product_not_asserted(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    The product offers a hash-chained, tamper-evident record. Until now the
+    only way to check that claim was a CLI script nothing deployed runs — an
+    "auditable" trail whose verification lives on someone's laptop is an
+    assertion, not evidence.
+    """
+    monkeypatch.setenv("AUDIT_CHAIN_SECRET", "console-chain-secret")
+    get_settings.cache_clear()
+    await _seed(db_sessionmaker)
+
+    from src.audit_chain import stamp_unhashed_events
+
+    async with db_sessionmaker() as session:
+        await stamp_unhashed_events(session)
+        await session.commit()
+
+    html = console.get("/console/ops").text
+    assert "Audit trail" in html
+    assert "Intact" in html, "the chain verified but the page does not say so"
+    get_settings.cache_clear()
+
+
+async def test_an_unkeyed_chain_reads_as_unverifiable_not_tampered(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    Nothing is wrong with the rows — the key is simply absent, which is a
+    development state. Saying "unverifiable" beats implying tampering.
+    """
+    monkeypatch.setenv("AUDIT_CHAIN_SECRET", "")
+    get_settings.cache_clear()
+    await _seed(db_sessionmaker)
+
+    html = console.get("/console/ops").text
+    assert "Not verifiable here" in html
+    assert "Broken" not in html, "an unkeyed chain was reported as tampering"
+    get_settings.cache_clear()
+
+
+async def test_the_console_has_a_skip_link_on_every_page(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Every console page opens with the same masthead and a 7-tab subnav, so a
+    keyboard user crossed eight controls before the page's own content on
+    every single view.
+    """
+    await _seed(db_sessionmaker)
+    for path in (
+        "/console",
+        "/console/live",
+        "/console/ops",
+        "/console/cases",
+        "/console/pipeline",
+        "/console/routing",
+        "/console/batch",
+        "/console/evidence",
+        "/console/accounts",
+        "/console/messages",
+    ):
+        html = console.get(path).text
+        assert 'href="#main"' in html, f"{path} has no skip link"
+        assert 'id="main"' in html, f"{path} skip link points at nothing"
+
+
+async def test_the_message_preview_renders_the_real_templates(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Every message goes out under the merchant's name and they had no way to
+    read one. Rendered through the SAME functions the sender calls — a preview
+    that could drift from what ships would be worse than none.
+    """
+    from src.messaging.templates import render_fallback
+
+    await _seed(db_sessionmaker)
+    html = console.get("/console/messages").text
+
+    assert "What your customers actually read" in html
+    # The exact string the real renderer produces must be on the page.
+    body = render_fallback(
+        failure_class="insufficient_funds",
+        amount_display="2,499",
+        next_step="Pay securely here: https://pay.example.in/recover/…",
+    )
+    fragment = body.split(",")[1].strip()[:40]
+    assert fragment in html, "the preview is not the renderer's own output"
+    # Every failure class the templates cover gets a row, not just a sample.
+    from src.messaging.templates import _TEMPLATES
+
+    for failure_class in _TEMPLATES:
+        assert failure_class.replace("_", " ") in html, failure_class
+    assert "Overdue invoices, by rung" in html
+
+
+async def test_the_ladder_shows_what_each_rung_actually_does(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    A merchant could see WHERE accounts sat and nothing about what happens
+    there: which channels fire, whether it costs a contact, how long to the
+    next rung, where a broken promise lands them. All enforced, none legible.
+    """
+    await _seed(db_sessionmaker)
+    html = console.get("/console/live").text
+
+    assert "next rung in" in html, "rung gaps are invisible"
+    assert "broken promise here resumes at rung" in html, "the ratchet is invisible"
+    # The B2B window is read from the enforcing function, never restated.
+    assert ("B2B contact hours are open now" in html
+            or "Outside B2B contact hours" in html), "the contact window is invisible"
+
+
+# ── The buyer directory ────────────────────────────────────────────────────
+
+
+async def test_the_buyer_directory_lists_accounts_and_contact_coverage(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    B2B collection runs on the account, and the console had no account view at
+    all — the only per-account surface in the product was the customer-facing
+    statement page. "Do we have a finance manager on file" decides whether the
+    ladder can escalate to anybody.
+    """
+    await _seed(db_sessionmaker)
+    html = console.get("/console/accounts").text
+
+    assert "Who owes you, and who you can reach" in html
+    assert "Buyer Corp" in html
+    assert "ref:buyer-corp" in html
+
+
+async def test_an_account_with_no_contacts_says_so_loudly(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A rung that escalates to a role nobody recorded escalates to nobody."""
+    from src.receivables.models import ArAccount
+
+    async with db_sessionmaker() as session:
+        account = ArAccount(account_ref="ref:silent-co", display_name="Silent Co")
+        session.add(account)
+        await session.commit()
+        account_id = str(account.id)
+
+    listing = console.get("/console/accounts").text
+    assert "nobody on file" in listing
+
+    detail = console.get(f"/console/account/{account_id}").text
+    assert "Nobody on file" in detail
+    assert "no one to write to" in detail
+
+
+async def test_a_contact_can_be_added_from_the_console(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    `add_contact` has existed since the receivables module landed, reachable
+    from nothing — no directory, no form, no way to correct a contact who left.
+    """
+    from src.receivables.models import ArAccount, ArContact
+
+    async with db_sessionmaker() as session:
+        account = ArAccount(account_ref="ref:newco", display_name="New Co")
+        session.add(account)
+        await session.commit()
+        account_id = str(account.id)
+
+    resp = console.post(
+        "/console/account/contact",
+        data={
+            "account_id": account_id,
+            "role": "finance_manager",
+            "email": "  Priya@NewCo.IN  ",
+            "name": "Priya",
+            "phone": "+919812345678",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    async with db_sessionmaker() as session:
+        contact = (
+            await session.execute(
+                select(ArContact).where(ArContact.account_id == uuid.UUID(account_id))
+            )
+        ).scalars().first()
+        assert contact is not None
+        # add_contact lowercases and strips: the email is a send target.
+        assert contact.email == "priya@newco.in"
+        assert contact.role == "finance_manager"
+
+
+async def test_adding_a_contact_refuses_junk(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The role vocabulary is the ladder's, not free text: a rung addresses roles
+    by name, so an unknown role is a contact no rung will ever reach.
+    """
+    from src.receivables.models import ArAccount, ArContact
+
+    async with db_sessionmaker() as session:
+        account = ArAccount(account_ref="ref:junkco", display_name="Junk Co")
+        session.add(account)
+        await session.commit()
+        account_id = str(account.id)
+
+    for payload in (
+        {"role": "ceo", "email": "a@b.in"},
+        {"role": "ap_clerk", "email": "not-an-email"},
+        {"role": "ap_clerk", "email": ""},
+    ):
+        console.post(
+            "/console/account/contact",
+            data={"account_id": account_id, **payload},
+            follow_redirects=False,
+        )
+
+    async with db_sessionmaker() as session:
+        rows = (
+            await session.execute(
+                select(ArContact).where(ArContact.account_id == uuid.UUID(account_id))
+            )
+        ).scalars().all()
+        assert not rows, "junk input created a contact"
+
+
+async def test_the_directory_masks_contact_addresses(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    PRODUCT.md holds the console to PII-free. A contact directory is a
+    different job, so the rule is kept rather than waived: the shape and the
+    domain identify a colleague the merchant knows, while a screenshot gives
+    nobody an address to harvest.
+    """
+    from src.receivables.accounts import add_contact
+    from src.receivables.models import ArAccount
+
+    async with db_sessionmaker() as session:
+        account = ArAccount(account_ref="ref:maskco", display_name="Mask Co")
+        session.add(account)
+        await session.flush()
+        await add_contact(
+            session,
+            account_id=account.id,
+            role="ap_clerk",
+            email="ap@buyer.in",
+            name="Anita",
+        )
+        await session.commit()
+        account_id = str(account.id)
+
+    html = console.get(f"/console/account/{account_id}").text
+    assert "ap@buyer.in" not in html, "the console leaked a full address"
+    assert "buyer.in" in html, "the domain is what identifies a known colleague"
+    assert "Anita" in html

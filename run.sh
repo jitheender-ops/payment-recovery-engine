@@ -52,6 +52,32 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Source .env WITHOUT letting it beat a value the caller exported.
+#
+# `source` overwrites, so `RAZORPAY_KEY_ID=rzp_test_x ./run.sh` would silently
+# run on .env's key instead of the one just named — and .env is where the LIVE
+# key lives. This bit twice before (demo mode, then the --sandbox live-key
+# guard, which "passed" because .env had already overwritten the exported test
+# key). One function, every branch that sources .env, so there is no third time.
+# `export -p` is the shell's own serializer for exactly this: it re-quotes every
+# exported value so a re-eval restores it verbatim. Re-evaling it AFTER the
+# source puts the caller's environment back on top; anything only .env defines
+# survives untouched.
+#
+# The sed rewrites `declare -x` into `export`, and it is load-bearing rather
+# than cosmetic: `declare` inside a function creates a LOCAL, so evaling the
+# snapshot verbatim would restore the caller's values and then discard them on
+# return — this very bug, reintroduced one level down. bash 3.2 (what macOS
+# ships) has no `declare -g`, so `export` is the portable form. `|| true`
+# covers a readonly export, which cannot be restored and cannot have been
+# clobbered either.
+source_env() {
+  [[ -f "${1:-.env}" ]] || return 0
+  local caller_env; caller_env=$(export -p | sed 's/^declare -x /export /')
+  set -a; source "${1:-.env}"; set +a
+  eval "$caller_env" 2>/dev/null || true
+}
+
 # ── 1. Interpreter ───────────────────────────────────────────────────────
 # Any 3.11+ works. PY= overrides, because `python3` is often not the one with
 # working wheels for numpy/xgboost.
@@ -79,12 +105,7 @@ if $SANDBOX; then
   # the caller exported: `source` overwrites, so RAZORPAY_KEY_ID=... ./run.sh
   # would silently use .env's key instead of the one just named. Snapshot
   # the caller's values first and put them back afterwards.
-  _pre_key="${RAZORPAY_KEY_ID:-}"; _pre_secret="${RAZORPAY_KEY_SECRET:-}"
-  _pre_hook="${RAZORPAY_WEBHOOK_SECRET:-}"
-  [[ -f .env ]] && { set -a; source ./.env; set +a; }
-  [[ -n "$_pre_key"    ]] && export RAZORPAY_KEY_ID="$_pre_key"
-  [[ -n "$_pre_secret" ]] && export RAZORPAY_KEY_SECRET="$_pre_secret"
-  [[ -n "$_pre_hook"   ]] && export RAZORPAY_WEBHOOK_SECRET="$_pre_hook"
+  source_env ./.env
   for k in RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET; do
     [[ -n "${!k:-}" ]] || die "$k is empty. --sandbox calls the real Razorpay API; put your rzp_test_ keys in .env."
   done
@@ -145,7 +166,10 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
   die ".env created from .env.example — fill in your keys, then re-run."
 fi
-set -a; source ./.env; set +a
+# Same precedence rule as --sandbox: an exported key beats .env. This branch is
+# the one where .env holds LIVE credentials, so it is the one where a caller
+# naming a test key and silently getting the live one costs the most.
+source_env ./.env
 
 for k in RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET; do
   v="${!k:-}"

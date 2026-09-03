@@ -93,6 +93,26 @@
     transition:transform .18s var(--ease),box-shadow .18s var(--ease),background .18s var(--ease),border-color .18s var(--ease)}
   .btn:focus-visible{outline:2px solid var(--green);outline-offset:3px}
   .btn:active{transform:translateY(1px)}
+  /* In-table action buttons. Pill radius and the same green/ghost pair as
+     .btn, at table scale — a row-level verdict must not carry the visual
+     weight of a page CTA, and must still be an obvious control. */
+  /* Not display:none — that would take it out of the tab order, which is the
+     one thing it exists for. */
+  .skip{position:absolute;left:-9999px;top:.5rem;z-index:20;
+    background:var(--ink);color:var(--paper);padding:.6rem 1rem;
+    border-radius:999px;text-decoration:none;font-weight:600}
+  .skip:focus{left:.75rem}
+  .btn-mini{display:inline-flex;align-items:center;justify-content:center;
+    font-family:var(--sans);font-weight:600;font-size:.78rem;line-height:1;
+    padding:.42rem .8rem;border-radius:999px;white-space:nowrap;cursor:pointer;
+    background:var(--green);color:#fff;border:1px solid transparent;
+    transition:background .18s var(--ease),border-color .18s var(--ease)}
+  .btn-mini:hover{background:var(--green-deep);color:#fff}
+  .btn-mini:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+  .btn-mini-quiet{background:transparent;color:var(--ink-2);border-color:var(--line-2)}
+  .btn-mini-quiet:hover{background:var(--well);color:var(--ink)}
+  .verdict{display:flex;gap:.4rem;flex-wrap:wrap}
+  .verdict form{margin:0}
   .btn-primary{background:var(--green);color:#fff;box-shadow:0 1px 2px rgba(11,94,60,.3),0 8px 20px -8px rgba(14,122,77,.45)}
   .btn-primary:hover{background:var(--green-deep);transform:translateY(-1px);color:#fff;
     box-shadow:0 2px 4px rgba(11,94,60,.28),0 12px 26px -8px rgba(14,122,77,.5)}
@@ -252,6 +272,10 @@
 {#
   Direction contract — see the opening comment of this file for the full text.
 #}
+{# Skip link. Every console page opens with the same masthead and a 7-tab
+   subnav, so a keyboard user crossed eight controls before the page's own
+   content on every single view. Visually hidden until focused. #}
+<a class="skip" href="#main">Skip to content</a>
 {% block body %}{% endblock %}
 
 {# Native choreography: no animation library. The hero entrance is pure CSS

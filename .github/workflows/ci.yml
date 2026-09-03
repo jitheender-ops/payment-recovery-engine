@@ -122,6 +122,23 @@ jobs:
           --exclude-rule python.django.security.django-no-csrf-token.django-no-csrf-token
           src scripts eval dashboard
 
+  pip-audit:
+    # Known CVEs in the dependency tree, on every push and PR. Semgrep and
+    # gitleaks audit the code and the history; this audits the building
+    # blocks. `--desc off` because a description network call made the step
+    # flaky in CI for findings that block anyway.
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Audit dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit --skip-editable --desc off
+
   secrets:
     name: gitleaks (secret scan, full history)
     runs-on: ubuntu-latest

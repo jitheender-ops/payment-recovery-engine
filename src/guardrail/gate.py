@@ -61,6 +61,8 @@ class GuardrailGate:
         checks: list[tuple[Callable[..., tuple[bool, str | None]], tuple[Any, ...]]] = [
             # 1. Hard-decline blocklist
             (r.check_hard_decline_blocklist, (context.failure_class,)),
+            # 1b. Switch-only classes may not be retried on the same rail
+            (r.check_switch_only_class, (context.failure_class, action.action)),
             # 2. Max retries per payment
             (r.check_max_retries_per_payment, (context.payment_id, current_attempts)),
             # 3. Max retries per customer (24h)
@@ -83,7 +85,8 @@ class GuardrailGate:
             # 10. Mandate pre-debit notification (RBI e-mandate framework, 2026)
             (r.check_mandate_predebit_notification,
              (context.risk_type, action.action,
-              context.last_notification_sent_at, context.current_time)),
+              context.last_notification_sent_at, context.current_time,
+              context.is_mandate_debit)),
         ]
         # Nudge rate limit applies only to nudge actions.
         if action.action == "nudge_customer":

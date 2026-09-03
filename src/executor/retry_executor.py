@@ -12,6 +12,7 @@ import asyncio
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any
 
 import razorpay
@@ -201,6 +202,241 @@ class RetryExecutor:
         except Exception:
             logger.warning("Failed to cancel payment link %s — will retry", link_id)
             return False
+
+    # ── UPI Autopay mandate ───────────────────────────────────────────────
+    #
+    # The two calls a promise-backed debit needs, and the only two places in
+    # this codebase that touch a Razorpay resource other than payment_link.
+    #
+    # UNVERIFIED CONTRACT. docs/razorpay-integration-notes.md records that
+    # Razorpay's reachable documentation did not carry the webhook event
+    # catalogue, and the recurring/registration payload shapes below are read
+    # from the SDK's own resource signatures rather than from a documented
+    # example. They follow src/downtime.py's precedent: build the request
+    # explicitly, parse the response defensively, and keep the parsing in ONE
+    # place so a real payload that differs has a single line to correct. Run
+    # one live authorisation on the test account before trusting either.
+
+    async def create_mandate_authorization(
+        self,
+        *,
+        amount_paise: int,
+        customer_email: str | None,
+        customer_contact: str | None,
+        expire_at: datetime,
+        idempotency_key: str,
+        description: str,
+    ) -> dict[str, Any]:
+        """
+        Mint the link on which a customer authorises a UPI Autopay mandate.
+
+        This is NOT a payment link and must never be described as one to the
+        customer: paying it authorises a standing instruction for a later
+        debit. Razorpay's registration link runs its own small authorisation
+        transaction to satisfy additional-factor authentication, which is what
+        makes the later unattended debit lawful.
+
+        `amount_paise` is the amount the mandate is authorised UP TO — the
+        promise's own amount, not a larger convenience ceiling. A mandate
+        authorised for more than the promise is consent the customer did not
+        give.
+        """
+        customer: dict[str, str] = {}
+        if customer_email:
+            customer["email"] = customer_email
+        if customer_contact:
+            customer["contact"] = customer_contact
+
+        payload: dict[str, Any] = {
+            "customer": customer,
+            "type": "link",
+            "amount": amount_paise,
+            "currency": "INR",
+            "description": description[:160],
+            "subscription_registration": {
+                "method": "upi",
+                "max_amount": amount_paise,
+                "expire_at": int(expire_at.timestamp()),
+                # One debit, presented when we present it — not a schedule.
+                # A promise is a single date, and a recurring frequency would
+                # authorise collections the customer never agreed to.
+                "frequency": "as_presented",
+            },
+            "expire_by": int(expire_at.timestamp()),
+            # Same breadcrumb discipline as the payment link: the note does not
+            # make anything idempotent (razorpay-python exposes no idempotency
+            # header), it makes the row traceable. The real guarantee is the
+            # UNIQUE on retry_attempts.idempotency_key, checked before we get
+            # here.
+            "notes": {"idempotency_key": idempotency_key, "purpose": "promise_mandate"},
+        }
+
+        result = await self._off_thread(
+            self._client.registration_link.create, payload
+        )
+        parsed = self._parse_mandate_authorization(result)
+        logger.info(
+            "Mandate authorization link created: id=%s amount=%s",
+            parsed.get("authorization_ref"),
+            amount_paise,
+        )
+        return parsed
+
+    @staticmethod
+    def _parse_mandate_authorization(result: dict[str, Any]) -> dict[str, Any]:
+        """
+        The single place to correct if the live payload differs.
+
+        Deliberately tolerant about WHERE the token id appears: Razorpay nests
+        it under the registration object on some responses and returns it at
+        the top level on others, and the difference is not worth a failed
+        authorisation the customer already completed.
+        """
+        registration = result.get("subscription_registration") or {}
+        return {
+            "success": True,
+            "authorization_ref": result.get("id"),
+            "short_url": result.get("short_url"),
+            "mandate_token": (
+                result.get("token_id")
+                or registration.get("token_id")
+                or (result.get("token") or {}).get("id")
+            ),
+            # The gateway's own customer id. charge_mandate needs it alongside
+            # the token, so a stored mandate missing this is uncollectable.
+            "gateway_customer_id": (
+                result.get("customer_id")
+                or (result.get("customer") or {}).get("id")
+            ),
+        }
+
+    async def fetch_mandate_status(
+        self, *, gateway_customer_id: str, mandate_token: str
+    ) -> str:
+        """
+        Ask the gateway whether a mandate is actually authorised.
+
+        This exists because the alternative did not work. Confirmation used to
+        depend on recognising Razorpay's webhook EVENT NAME, and the reachable
+        documentation never carried the event catalogue — so the engine held a
+        guessed list of names and would have silently never collected if the
+        real one differed. The token's own status is not a guess: it is the
+        gateway's answer to the only question that matters, and it is the same
+        answer whatever the event was called.
+
+        Returns one of: "active" (the customer authorised it and it can be
+        charged), "failed" (rejected, cancelled or expired), "pending" (not yet
+        decided), "unknown" (we could not tell — treated as pending, never as
+        consent).
+        """
+        try:
+            token = await self._off_thread(
+                self._client.token.fetch, gateway_customer_id, mandate_token
+            )
+        except Exception as exc:  # noqa: BLE001 — a lookup failure is not a verdict
+            logger.info("Mandate status lookup failed for %s: %s", mandate_token, exc)
+            return "unknown"
+        return self._read_mandate_status(token)
+
+    @staticmethod
+    def _read_mandate_status(token: dict[str, Any]) -> str:
+        """
+        The single place to correct if the live token payload differs.
+
+        Reads the recurring sub-object first and the top level second, because
+        Razorpay reports authorisation state in the former for recurring tokens
+        and general token state in the latter. Anything unrecognised returns
+        "unknown" rather than an optimistic default: an unreadable payload must
+        never be able to arm a debit.
+        """
+        recurring = token.get("recurring_details") or {}
+        raw = str(
+            recurring.get("status") or token.get("status") or ""
+        ).lower()
+        if raw in ("confirmed", "active", "authenticated"):
+            return "active"
+        if raw in ("rejected", "cancelled", "canceled", "expired", "failed", "deleted"):
+            return "failed"
+        if raw in ("initiated", "created", "pending", "requested"):
+            return "pending"
+        return "unknown"
+
+    async def create_mandate_order(
+        self, *, amount_paise: int, idempotency_key: str
+    ) -> str:
+        """
+        The amount envelope a mandate debit is charged against.
+
+        Split from `charge_mandate` deliberately. The order id is what the
+        capture webhook echoes back, so it is the ONLY thing that lets the
+        money find its way home to the case — and it must therefore be recorded
+        on the attempt row BEFORE the charge is presented. Doing both calls in
+        one method meant a timeout on the charge left an attempt with no order
+        id: if the debit had in fact gone through, the capture would arrive
+        carrying an id nothing in our database had ever seen, and the money
+        would be invisible. Same reasoning as the write-ahead row itself, one
+        level down.
+        """
+        order = await self._off_thread(
+            self._client.order.create,
+            {
+                "amount": amount_paise,
+                "currency": "INR",
+                "receipt": idempotency_key[:40],
+                "payment_capture": 1,
+                "notes": {
+                    "idempotency_key": idempotency_key,
+                    "purpose": "promise_mandate_debit",
+                },
+            },
+        )
+        return str(order.get("id") or "")
+
+    async def charge_mandate(
+        self,
+        *,
+        order_id: str,
+        mandate_token: str,
+        gateway_customer_id: str,
+        amount_paise: int,
+        customer_email: str | None,
+        customer_contact: str | None,
+        description: str,
+    ) -> dict[str, Any]:
+        """
+        Debit an authorised mandate against an order already recorded.
+
+        The one call in this engine that takes money without the customer
+        present. `order_id` comes from `create_mandate_order` and must already
+        be persisted on the attempt row before this is called.
+        """
+        payload: dict[str, Any] = {
+            "amount": amount_paise,
+            "currency": "INR",
+            "order_id": order_id,
+            "customer_id": gateway_customer_id,
+            "token": mandate_token,
+            "recurring": "1",
+            "description": description[:160],
+        }
+        if customer_email:
+            payload["email"] = customer_email
+        if customer_contact:
+            payload["contact"] = customer_contact
+
+        result = await self._off_thread(
+            self._client.payment.createRecurring, payload
+        )
+        logger.info(
+            "Mandate debited: order=%s payment=%s amount=%s",
+            order_id, result.get("razorpay_payment_id") or result.get("id"),
+            amount_paise,
+        )
+        return {
+            "success": True,
+            "order_id": order_id,
+            "payment_id": result.get("razorpay_payment_id") or result.get("id"),
+        }
 
     async def execute_retry(
         self,

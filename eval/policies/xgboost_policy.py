@@ -9,11 +9,15 @@ table can never again claim a model that was not asked.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +45,24 @@ class XGBoostPolicy:
         # which is what the training script does so it cannot load a previous
         # model over the one it is building.
         if model_path is None:
-            from src.config import get_settings
             model_path = get_settings().xgboost_model_path
         if model_path:
             try:
-                from pathlib import Path
-
                 import joblib
                 if Path(model_path).exists():
+                    # Same pin as src/agent/xgboost_baseline.py: joblib.load
+                    # is pickle, so an unpinned file is unvetted code.
+                    expected_sha = get_settings().xgboost_model_sha256
+                    if expected_sha:
+                        actual_sha = hashlib.sha256(
+                            Path(model_path).read_bytes()
+                        ).hexdigest()
+                        if actual_sha != expected_sha:
+                            logger.warning(
+                                "XGBoost policy: sha256 mismatch for %s — "
+                                "refusing unverified pickle", model_path
+                            )
+                            raise ValueError("model sha256 mismatch")
                     self._model = joblib.load(model_path)
                     logger.info("XGBoost policy loaded model from %s", model_path)
                 else:

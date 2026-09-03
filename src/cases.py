@@ -511,6 +511,18 @@ async def attribute_capture(
         attempt = await _find_attempt(
             session, RetryAttempt.idempotency_key == idempotency_key
         )
+    # A mandate debit has no Payment Link, so steps 1 and 2 cannot see it: the
+    # engine created an ORDER and charged it, and the order id is what the
+    # capture echoes back. external_ref holds only ids this engine minted, so a
+    # hit here is as direct as a link id — and getting it wrong would be
+    # expensive in a quiet way: the order_ref hop further down treats a match
+    # as SELF-recovery and leaves recovered_via_attempt_id NULL, so money the
+    # engine actively collected would be counted as the customer paying on
+    # their own, understating exactly the number this product exists to prove.
+    if attempt is None and order_ref:
+        attempt = await _find_attempt(
+            session, RetryAttempt.external_ref == order_ref
+        )
 
     case: RecoveryCase | None = None
     matched_on = "link_id" if link_id else "idempotency_key"
@@ -536,19 +548,16 @@ async def attribute_capture(
         logger.info("Capture %s matched no recovery case", recovered_ref)
         return None
 
-    if case.recovered_ref == recovered_ref:
+    if recovered_ref in case.credited_refs or case.recovered_ref == recovered_ref:
         # The same payment id, credited to this case once already — a
         # redelivery, a reconcile sweep racing the first pass, or a forger.
         # Crediting again inflates recovered revenue from one real payment,
         # and on a partially-paid case it can close it as fully recovered.
         # Checked BEFORE the terminal branch below, because a replay is not an
         # overpayment: there is no second payment and nothing to refund.
-        #
-        # ponytail: one ref deep — the column holds only the latest. Razorpay
-        # redeliveries are already deduped by event_id at ingestion
-        # (is_duplicate_event); this is the defence-in-depth layer for the
-        # reconcile path. If a case ever takes three or more partial captures,
-        # store the credited refs and test membership instead.
+        # Membership is against the full credited list, not the latest ref
+        # alone — a case paid in three or more parts holds every ref, so an
+        # earlier distinct capture replays into the same refusal.
         logger.warning(
             "Refusing replayed capture %s on case %s — already credited",
             recovered_ref, case.id,
@@ -584,6 +593,9 @@ async def attribute_capture(
 
     case.amount_recovered += amount
     case.recovered_ref = recovered_ref
+    # Reassigned, not appended in place: a JSONB column does not track in-place
+    # mutation, so the append would never reach the UPDATE statement.
+    case.credited_refs = [*case.credited_refs, recovered_ref]
     case.recovered_at = datetime.now(UTC)
     if attempt is not None:
         case.recovered_via_attempt_id = attempt.id
@@ -917,9 +929,42 @@ async def record_promise(
     instalment promises validated as a SET by src/receivables/plans.py, not
     serial deferrals, and its 90-day horizon is the plan validator's rule,
     not this cap's business.
+
+    The HORIZON is enforced here too, and that is new. It used to be checked
+    only by each capture surface — the recovery page, the voice pipeline and
+    the signed merchant API each re-implementing the same comparison — while
+    this function accepted any date at all, including one in the past. Three
+    copies of a bound is three chances to drift, and any new caller (a mandate
+    authorisation callback, say) silently got no bound whatsoever. The surfaces
+    keep their own checks because each needs to answer the customer in its own
+    channel; this is the floor underneath them.
     """
     settings = get_settings()
     is_plan = channel == "payment_plan"
+
+    # The CEILING only. A lower bound is each surface's own business and they
+    # are stricter than anything sensible here — the recovery page demands 12
+    # hours' notice, voice resolves a spoken offset. Refusing a past date here
+    # too would also refuse the legitimate way an operator backfills a promise
+    # already made, and would refuse the test and replay paths that construct
+    # an overdue promise deliberately. Plans set their own 90-day horizon and
+    # are exempt.
+    horizon = datetime.now(UTC) + timedelta(days=settings.promise_max_horizon_days)
+    if not is_plan and _aware(due_at) > horizon:
+        log_event(
+            session,
+            case,
+            "promise_refused",
+            actor="system",
+            reason="promise date outside the allowed horizon",
+            due_at=due_at.isoformat(),
+            horizon_days=settings.promise_max_horizon_days,
+        )
+        logger.warning(
+            "Promise refused (date %s outside horizon of %d days): case=%s",
+            due_at.isoformat(), settings.promise_max_horizon_days, case.id,
+        )
+        return None
     prior = await session.execute(
         select(
             func.count(PromiseToPay.id),
@@ -1087,7 +1132,7 @@ async def expire_promises(
     )
     expired_view = [
         p for p in result.scalars()
-        if _aware(p.due_at) + grace <= now
+        if _aware(p.due_at) + grace <= now and not _charge_in_flight(p, now, grace)
     ]
     broken = 0
     for promise in expired_view:
@@ -1123,6 +1168,79 @@ async def expire_promises(
     if broken:
         logger.info("Promises expired: %d broken as of %s", broken, now.isoformat())
     return broken
+
+
+async def mandates_awaiting_confirmation(
+    session: AsyncSession, *, now: datetime | None = None, limit: int = 50
+) -> list[PromiseToPay]:
+    """
+    Promises whose mandate authorisation has been started but not yet decided.
+
+    Bounded two ways so this cannot become an unbounded poll of the gateway:
+    `limit` per tick, and only authorisations young enough to still matter — a
+    mandate whose promise date has passed is not worth asking about, because
+    there is nothing left to collect on it.
+    """
+    now = now or datetime.now(UTC)
+    result = await session.execute(
+        select(PromiseToPay)
+        .where(
+            PromiseToPay.status == "pending",
+            PromiseToPay.mandate_status == "pending",
+            PromiseToPay.mandate_token.is_not(None),
+            PromiseToPay.mandate_customer_ref.is_not(None),
+            PromiseToPay.due_at > now,
+        )
+        .order_by(PromiseToPay.mandate_registered_at)
+        .limit(limit)
+    )
+    return list(result.scalars())
+
+
+def _charge_in_flight(promise: PromiseToPay, now: datetime, grace: timedelta) -> bool:
+    """
+    True while a debited mandate's capture is still plausibly on its way.
+
+    A promise whose mandate we successfully charged has had its money taken —
+    calling it broken because the capture webhook has not landed yet is exactly
+    the libel `promise_grace_hours` exists to prevent, except self-inflicted.
+
+    Bounded on purpose. If no capture arrives within one grace window OF THE
+    CHARGE, the promise breaks on the normal clock: a debit that never settles
+    is a promise that was not kept, and a reprieve with no end is how a row
+    hangs pending forever.
+    """
+    if promise.mandate_status != "charged" or promise.mandate_charged_at is None:
+        return False
+    return _aware(promise.mandate_charged_at) + grace > now
+
+
+async def promises_due_for_mandate_debit(
+    session: AsyncSession, *, now: datetime | None = None, limit: int = 100
+) -> list[PromiseToPay]:
+    """
+    Pending promises whose authorised mandate is live and whose date has come.
+
+    Deliberately NOT grace-adjusted, unlike expire_promises. Grace exists
+    because a payment the customer initiated on the due date can post a day
+    late, and breaking a promise they actually kept is the one lie this ledger
+    must not tell. A debit is the opposite situation: we are the ones acting,
+    on a date the customer named, and waiting an extra day would collect after
+    the day they budgeted for. The sweep runs BEFORE expire_promises in the
+    tick, so a promise is always charged before it can be called broken.
+    """
+    now = now or datetime.now(UTC)
+    result = await session.execute(
+        select(PromiseToPay)
+        .where(
+            PromiseToPay.status == "pending",
+            PromiseToPay.mandate_status == "active",
+            PromiseToPay.due_at <= now,
+        )
+        .order_by(PromiseToPay.due_at)
+        .limit(limit)
+    )
+    return list(result.scalars())
 
 
 async def promises_due_for_reminder(

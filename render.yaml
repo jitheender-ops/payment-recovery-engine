@@ -188,12 +188,19 @@ services:
       # dashboard, same as the other secrets on this list.
       - key: OPENAI_API_KEY
         sync: false
+      # Set this and flip LLM_PROVIDER to `anthropic` (clearing LLM_BASE_URL
+      # and setting LLM_MODEL to a claude-* id) to run the policy agent on
+      # Claude instead of the Groq free tier. Wired here so that switch is a
+      # dashboard edit, not a blueprint change — without the key present the
+      # provider cannot be switched at all.
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: LLM_MODEL
         value: openai/gpt-oss-20b
       - key: API_KEY
         generateValue: true          # guards /openapi.json outside development
       - key: DASHBOARD_PASSWORD
-        sync: false                  # must MATCH the dashboard service below
+        sync: false                  # gates /console/live
 
       # ── Customer recovery page ──────────────────────────────────────
       # Signs /recover/<token>. generateValue means Render mints it once and
@@ -215,12 +222,37 @@ services:
       # secret proves Razorpay's identity and must not unmask customers too.
       - key: PII_MASK_SECRET
         generateValue: true
+      # Keys the case_events hash chain. The scheduler stamps every new event
+      # each tick, and Settings.require_production_integrity REFUSES to boot
+      # without this — an unkeyed chain leaves every audit row unstamped while
+      # the rest of the service works perfectly, which is the quiet kind of
+      # broken. generateValue: Render mints it once and keeps it. Do NOT rotate
+      # casually: rotating invalidates every stamp already written.
+      - key: AUDIT_CHAIN_SECRET
+        generateValue: true
       # The origin customers open the link on. Taken from the service itself so
       # it is correct the moment the service exists; override with a custom
       # domain once you have one, since an onrender.com host in an SMS asking
       # for money is not a link most people would trust.
       - key: PUBLIC_BASE_URL
         fromService: {type: web, name: recovery-api, property: host}
+
+      # ── Promise-backed UPI Autopay (opt-in, off by default) ──────────
+      # OFF until Razorpay's Recurring Payments is enabled on the account.
+      # An engine that offers a customer an autopay it cannot charge has made
+      # a promise of its own that it will break, so this stays false until the
+      # authorisation round trip has been run on the test account once.
+      - key: PROMISE_MANDATE_ENABLED
+        value: "false"
+      # Ceiling on a single unattended debit, in PAISE. RBI exempts e-mandate
+      # debits from per-transaction authentication only below a threshold;
+      # above it the option is not offered at all and the promise falls back to
+      # the trust-based one. ₹15,000 is the general limit and the right value
+      # for merchant collection. The raised ceilings are category-specific
+      # (card bills, insurance, mutual funds) — leave this alone unless you
+      # operate in one of those.
+      - key: MANDATE_MAX_AUTO_DEBIT_PAISE
+        value: "1500000"        # ₹15,000
 
       # ── Voice chaser (opt-in, off by default) ────────────────────────
       # Off until DoT/TCCCP registration and the call-start AI disclosure
@@ -234,3 +266,20 @@ services:
         sync: false
       - key: SARVAM_API_KEY
         sync: false
+
+      # ── Plivo call leg (src/voice/plivo_bridge.py) ────────────────────
+      # All optional and fail-closed: without every one of these the bridge
+      # refuses to run and /plivo/* callbacks answer 401 (no secret) —
+      # nothing else about the deployment changes. Fill these only when a
+      # Plivo account exists; docs/VOICE_CALL_SETUP.md is the runbook.
+      # PLIVO_BRIDGE_BASE_URL is the public host of THIS service (Plivo
+      # must fetch the XML and audio over the internet), which on Render is
+      # the same origin as PUBLIC_BASE_URL.
+      - key: PLIVO_AUTH_ID
+        sync: false
+      - key: PLIVO_AUTH_TOKEN
+        sync: false
+      - key: PLIVO_CALLER_NUMBER
+        sync: false
+      - key: PLIVO_BRIDGE_BASE_URL
+        fromService: {type: web, name: recovery-api, property: host}

@@ -242,6 +242,41 @@ async def test_replayed_capture_cannot_double_credit(
         assert fresh.state == "open"
 
 
+async def test_replay_of_an_earlier_part_cannot_double_credit(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """EXPLOIT: a case paid in THREE parts. recovered_ref holds only the
+    latest, so a redelivery of the FIRST part's payment id used to sail
+    past the `== latest` replay check and credit twice. credited_refs must
+    membership-test every part ever credited."""
+    case = await _open_risk_case(db_sessionmaker)
+    key = f"chase_invoice_overdue_{case.subject_ref}_0"
+
+    for ref, amount in (("pay_part_1", 100000), ("pay_part_2", 100000),
+                        ("pay_part_3", 100000)):
+        async with db_sessionmaker() as session:
+            credited = await attribute_capture(
+                session, amount=amount, recovered_ref=ref,
+                idempotency_key=key,
+            )
+            await session.commit()
+        assert credited is not None
+
+    async with db_sessionmaker() as session:
+        replay = await attribute_capture(
+            session, amount=100000, recovered_ref="pay_part_1",
+            idempotency_key=key,
+        )
+        await session.commit()
+    assert replay is None, "an earlier part replayed through and credited twice"
+    async with db_sessionmaker() as session:
+        fresh = await session.get(RecoveryCase, case.id)
+        assert fresh is not None
+        assert fresh.amount_recovered == 300000
+        assert "pay_part_1" in fresh.credited_refs
+        assert len(fresh.credited_refs) == 3
+
+
 async def test_router_level_capture_with_missing_amount_is_refused(
     db_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

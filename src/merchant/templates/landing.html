@@ -236,7 +236,7 @@
   </div>
 </nav>
 
-<header class="section" style="padding-top:clamp(3rem,7vh,5rem)">
+<header id="main" class="section" style="padding-top:clamp(3rem,7vh,5rem)">
   <div class="wrap" style="display:grid;grid-template-columns:1.05fr .95fr;gap:clamp(2rem,5vw,4.5rem);align-items:center">
     <div>
       <h1 class="display" data-stage>Failed payments are not the end of the sale.</h1>
@@ -813,7 +813,10 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
 
     var steps = S.mode === 'ops' ? OPS_STEPS : CUSTOMER_STEPS;
     stepsEl.innerHTML = steps.map(function (s) {
-      return '<button type="button" class="replica-step" role="tab" aria-current="' + (S.screen === s[0]) + '" data-go="' + s[0] + '">' + s[1] + '</button>';
+      // role="tab" obliges aria-selected: aria-current alone styles the chip
+      // correctly and tells assistive tech nothing about which tab is active.
+      var on = S.screen === s[0];
+      return '<button type="button" class="replica-step" role="tab" aria-selected="' + on + '" aria-current="' + on + '" data-go="' + s[0] + '">' + s[1] + '</button>';
     }).join('');
 
     modeEl.innerHTML = S.mode === 'customer'

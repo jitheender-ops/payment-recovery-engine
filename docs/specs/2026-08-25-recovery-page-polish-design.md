@@ -1,6 +1,7 @@
 # Customer recovery page — polish pass
 
-**Status:** design, awaiting review
+**Status:** SHIPPED. Every work item below landed; the header said "awaiting
+review" for long enough that the doc read as a backlog rather than a record.
 **Scope:** `src/customer/` only. The Streamlit ops console is explicitly out.
 
 ## Why

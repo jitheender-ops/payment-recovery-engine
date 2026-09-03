@@ -78,6 +78,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup: init DB, start the scheduler. Shutdown: stop both."""
     logger.info("Starting Payment Recovery Engine (env=%s)", settings.app_env)
     settings.require_razorpay_credentials()
+    # The other half: what is silently off rather than loudly broken.
+    settings.require_production_integrity()
     # create_all only in development. It creates missing TABLES and silently
     # ignores missing COLUMNS, so on any database that predates a model change
     # it "succeeds" and the first write to the money path fails with
@@ -167,6 +169,16 @@ app.include_router(merchant_router, tags=["merchant"], include_in_schema=False)
 from src.voice.webhook import router as voice_router  # noqa: E402
 
 app.include_router(voice_router, include_in_schema=False)
+
+# The Plivo call leg (src/voice/plivo_bridge.py): the XML callbacks Plivo
+# fetches during a live call, plus the TTS audio it plays. Same fail-closed
+# secret as /voice/turn — every callback body is HMAC-checked, so an unset
+# VOICE_WEBHOOK_SECRET closes this surface too. Mounted always: Plivo only
+# gets pointed at it when a bridge is actually configured (PLIVO_*), and
+# mounting it in demo/development costs nothing when idle.
+from src.voice.plivo_bridge import router as plivo_router  # noqa: E402
+
+app.include_router(plivo_router, include_in_schema=False)
 
 # The demo gateway's stub checkout — mounted ONLY in demo mode, so the routes
 # do not exist at all on a normal boot. Settings refuses demo_mode outside

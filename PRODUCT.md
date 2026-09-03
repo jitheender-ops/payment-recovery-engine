@@ -8,7 +8,9 @@ and bounced mandates each leak revenue quietly; the engine opens a case for
 each, decides when and how to chase, and recovers the money through signed,
 expiring payment links on the rail most likely to clear.
 
-It also handles the reply. A promise to pay buys silence until its date; a
+It also handles the reply. A promise to pay buys silence until its date, and
+where the customer authorises a UPI Autopay mandate it also collects itself on
+that date rather than waiting to be remembered; a
 plan splits the amount into instalments, each its own promise; a disputed
 invoice freezes the case and goes to a human; a Hinglish voice call answers
 what the customer asks about their own case, grounded in that case's facts.
@@ -22,7 +24,8 @@ They are not payment experts; they are experts in their own customers.
 
 ## Who uses what
 
-- **Merchant console** (`/console`, `/console/live`, `/console/login`) — the
+- **Merchant console** (`/console`, `/console/live`, `/console/login`, plus
+  `/console/accounts`, `/console/messages`, `/console/ops`, and the rest) — the
   merchant's surface: a public explanation of what recovers, what happens when
   the customer replies, and a password-gated live ledger of their own money.
   This is the primary UI. The live page leads with the engine heartbeat, then
@@ -38,10 +41,16 @@ They are not payment experts; they are experts in their own customers.
 
 - Bounds are enforced, not aspirational: touches/window/rail per chaser come
   from `src/chasers/policy.py`; the payment rail's bounds from config.
-- Recovered means paid through a link the engine sent — self-payments are
-  counted but never claimed.
+- Recovered means paid through a link the engine sent, or collected on a UPI
+  Autopay mandate the customer authorised against their own promise to pay —
+  self-payments are counted but never claimed. Both are engine-earned and both
+  set `recovered_via_attempt_id`; a capture the engine cannot tie to one of its
+  own attempts raises `amount_recovered` and stays unclaimed.
 - The live console is aggregate and PII-free: totals, counts, and the
-  merchant's own references; never a customer email, phone or id.
+  merchant's own references; never a customer email, phone or id. The buyer
+  directory is the one surface that shows contact addresses at all, and it
+  masks them (`a…p@buyer.in`) — enough to recognise a colleague, never enough
+  to harvest one. The full address reaches the sender, never a page.
 - Empty and unreachable states are honest; the console never shows a invented
   number. Gating fails closed on an unset password.
 - The engine states only what it enforces. Chase bounds render from

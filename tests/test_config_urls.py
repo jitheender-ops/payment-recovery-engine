@@ -13,9 +13,13 @@ string and have each end up with the driver it needs.
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
+from typing import Any
 
-from src.config import Settings
+import pytest
+from pydantic import ValidationError
+
+from src.config import Settings, get_settings
 
 RAW = "user:pw@db.internal:5432/payment_recovery"
 
@@ -75,3 +79,44 @@ def test_public_base_url_with_a_scheme_is_left_alone() -> None:
 def test_public_base_url_empty_stays_empty() -> None:
     """Empty means unconfigured; url_for() depends on this to fail closed."""
     assert Settings(public_base_url="").public_base_url == ""
+
+
+# ── The amount ceiling: one number, one unit ────────────────────────────────
+
+
+def test_the_legacy_rupee_named_ceiling_is_refused(monkeypatch: Any) -> None:
+    """
+    AMOUNT_CEILING_INR was an alias for the PAISE field while policy.yaml
+    published a rupee value under that name, so anyone trusting the published
+    bound got a ceiling 100x too tight. Reinterpreting it as rupees instead
+    would loosen legacy deployments 100x. Neither is safe to guess.
+    """
+    monkeypatch.setenv("AMOUNT_CEILING_INR", "250000")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="AMOUNT_CEILING_INR is no longer read"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_a_rupee_shaped_paise_ceiling_is_refused(monkeypatch: Any) -> None:
+    """₹500 quietly refuses every retry and looks like a working deployment."""
+    monkeypatch.delenv("AMOUNT_CEILING_INR", raising=False)
+    monkeypatch.setenv("AMOUNT_CEILING_PAISE", "50000")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="sanity floor"):
+        Settings()
+    get_settings.cache_clear()
+
+
+def test_policy_yaml_publishes_the_enforced_ceiling() -> None:
+    """
+    PRODUCT.md: "the engine states only what it enforces." policy.yaml is the
+    human-readable copy of the bounds and drifted to 5x the enforced value.
+    """
+    import yaml
+
+    monkeypatch_free = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent / "policy.yaml").read_text()
+    )
+    published = monkeypatch_free["global"]["amount_ceiling_paise"]
+    assert published == Settings().amount_ceiling_paise

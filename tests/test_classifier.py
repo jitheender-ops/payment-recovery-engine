@@ -31,10 +31,19 @@ def test_bank_downtime_mapping() -> None:
     assert retryable is True
 
 
-def test_fraud_block_mapping() -> None:
+def test_risk_check_failed_mapping() -> None:
+    """
+    Razorpay documents payment_risk_check_failed as retryable, advising the
+    customer retry "with a different card or method". It was mapped to
+    fraud_block and abandoned. It is now retryable but SWITCH-ONLY: the
+    guardrail refuses retry_now/retry_at for it (see test_guardrail.py), so
+    the engine may only move rails or nudge.
+    """
     fc, retryable = mapper.classify("BAD_REQUEST_ERROR", error_reason="payment_risk_check_failed")
-    assert fc == FailureClass.FRAUD_BLOCK
-    assert retryable is False
+    assert fc == FailureClass.RISK_CHECK_FAILED
+    assert retryable is True
+    assert fc.is_switch_only is True
+    assert fc.is_hard_decline is False
 
 
 def test_hard_decline_non_retryable() -> None:
@@ -192,20 +201,21 @@ def test_every_documented_razorpay_reason_is_matched_by_name() -> None:
     )
 
 
-def test_the_deliberate_disagreements_stay_deliberate() -> None:
+def test_the_deliberate_disagreement_stays_deliberate() -> None:
     """
-    Two mappings knowingly contradict Razorpay's retry verdict. Neither is an
-    accident, and neither should change by accident either — this fails if
-    someone flips one without going through docs/decline-taxonomy.md.
+    One mapping knowingly contradicts Razorpay's retry verdict. It is not an
+    accident, and it should not change by accident either — this fails if
+    someone flips it without going through docs/decline-taxonomy.md.
     """
     # The customer said stop. Respecting that outranks a recoverable rupee.
     fc, retryable = mapper.classify("", error_reason="payment_cancelled")
     assert fc is FailureClass.CUSTOMER_CANCELLED and retryable is False
 
-    # Fraud-adjacent, so the conservative reading stands until it is a
-    # product decision rather than a mapping one.
+    # The second disagreement is resolved: payment_risk_check_failed no longer
+    # abandons. It agrees with Razorpay on "retryable" and with its advice on
+    # HOW — a different card or method, never the refused one.
     fc, retryable = mapper.classify("", error_reason="payment_risk_check_failed")
-    assert fc is FailureClass.FRAUD_BLOCK and retryable is False
+    assert fc is FailureClass.RISK_CHECK_FAILED and retryable is True
 
 
 # ── Forcing test cards, 2026-09-01 ───────────────────────────────────────

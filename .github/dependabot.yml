@@ -1,0 +1,20 @@
+# Dependency vulnerability alerts on top of the pip-audit CI gate
+# (.github/workflows/ci.yml). Dependabot watches daily so a CVE published
+# between pushes still opens an alert; pip-audit fails the build at PR time.
+# pip group: this project has one pyproject/uv.lock — the uv lock file is
+# covered by Dependabot's pip ecosystem only for requirements*.txt, so the
+# lock is audited by pip-audit against pyproject's pins.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: daily
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"

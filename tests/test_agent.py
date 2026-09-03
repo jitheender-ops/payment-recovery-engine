@@ -105,3 +105,34 @@ def test_a_missing_model_degrades_instead_of_crashing(tmp_path: Any) -> None:
     assert baseline.is_trained is False
     action = baseline.predict(_make_context(failure_class="network_error"))
     assert action.action in ("retry_now", "retry_at", "switch_rail", "nudge_customer", "abandon")
+
+
+def test_a_swapped_model_file_is_refused_when_a_pin_is_set(tmp_path: Any, monkeypatch: Any) -> None:
+    """
+    joblib.load is pickle: it executes whatever the file says. XGBOOST_MODEL_SHA256
+    pins the trusted bytes; a model that arrives from outside the build (a
+    registry, a bucket, a re-upload) with different bytes must be refused, not
+    executed.
+    """
+    import hashlib
+
+    path = tmp_path / "model.joblib"
+    path.write_bytes(b"not a real model, bytes are bytes")
+    # Any load that gets past the pin would raise on these bytes anyway; the
+    # point is that it never gets there.
+    monkeypatch.setattr(
+        "src.agent.xgboost_baseline.get_settings",
+        lambda: type("S", (), {"xgboost_model_sha256": "0" * 64})(),
+    )
+
+    assert XGBoostBaseline(model_path=str(path)).is_trained is False, (
+        "a pickle whose digest does not match the pin was executed"
+    )
+
+    good = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        "src.agent.xgboost_baseline.get_settings",
+        lambda: type("S", (), {"xgboost_model_sha256": good})(),
+    )
+    # Matching pin, unpickleable bytes: still rules, but it got PAST the pin.
+    assert XGBoostBaseline(model_path=str(path)).is_trained is False

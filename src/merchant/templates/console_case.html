@@ -19,7 +19,7 @@
 
 {% block body %}
 {{ console_nav("cases", merchant_name) }}
-<main class="wrap">
+<main id="main" class="wrap">
 {% if not db_ok %}
   <div class="empty"><b>Can't reach the database.</b>
   <p>Every figure here is read live, so there is nothing cached to fall back on.</p></div>
@@ -125,6 +125,51 @@
       </li>
     </ul>
   </section>
+
+  {# ── Money that arrived another way ─────────────────────────────────────
+     NEFT, a cheque, cash, a UPI transfer the merchant took by hand. None of
+     it touches Razorpay, so no webhook can ever tell us — the console showed
+     an outstanding balance it had no way to let anyone close, and the case
+     went on spending attempts chasing money already in the bank.
+
+     Counted, never CLAIMED: recorded exactly like self-recovery, so
+     amount_recovered rises and recovered_via_attempt_id stays NULL. #}
+  {% if c.state == "open" %}
+  <section class="sec">
+    <h2 class="sec-t">Money arrived another way</h2>
+    <p class="sec-s">
+      Record a payment that reached you outside the payment rail. The case
+      closes and stops chasing. It counts toward recovered money but is never
+      attributed to the engine.
+    </p>
+    <form method="post" action="/console/case/paid" class="paidform">
+      <input type="hidden" name="case_id" value="{{ c.case_id }}">
+      <label class="paid-f">
+        <span>Amount in rupees</span>
+        <input type="number" name="amount_inr" min="1" step="1" required
+               inputmode="numeric" aria-label="Amount received, in rupees">
+      </label>
+      <label class="paid-f">
+        <span>Your reference</span>
+        <input type="text" name="paid_ref" maxlength="255" required
+               placeholder="UTR or cheque number"
+               aria-label="Your own reference for this payment">
+      </label>
+      <label class="paid-f">
+        <span>How</span>
+        <select name="method" aria-label="How the money arrived">
+          <option value="neft">NEFT</option>
+          <option value="rtgs">RTGS</option>
+          <option value="imps">IMPS</option>
+          <option value="cheque">Cheque</option>
+          <option value="cash">Cash</option>
+          <option value="upi_manual">UPI, by hand</option>
+        </select>
+      </label>
+      <button class="btn-mini" type="submit">Record it</button>
+    </form>
+  </section>
+  {% endif %}
 
   {# ── Account 360, where there is an account ─────────────────────────── #}
   {% if c.account %}

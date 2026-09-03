@@ -36,6 +36,37 @@ def test_fraud_block_blocked() -> None:
     assert passed is False
 
 
+def test_switch_only_class_refuses_same_rail_retry() -> None:
+    """
+    risk_check_failed is retryable, but only off the refused instrument. The
+    money bug this guards: a same-rail retry walks back into the same risk
+    screen, fails for certain, and still burns one of three attempt slots.
+    """
+    for action_type in ("retry_now", "retry_at"):
+        passed, reason = rules.check_switch_only_class("risk_check_failed", action_type)
+        assert passed is False, action_type
+        assert reason is not None and "switch_rail" in reason
+
+    for action_type in ("switch_rail", "nudge_customer"):
+        passed, _ = rules.check_switch_only_class("risk_check_failed", action_type)
+        assert passed is True, action_type
+
+    # Not a blanket ban on retrying: every other retryable class is untouched.
+    assert rules.check_switch_only_class("network_error", "retry_now")[0] is True
+    # And it is not a hard decline — the case must still be worked.
+    assert rules.check_hard_decline_blocklist("risk_check_failed")[0] is True
+
+
+def test_switch_only_class_blocks_through_the_full_gate() -> None:
+    """The rule is wired into validate(), not just callable on its own."""
+    context = _make_context(failure_class="risk_check_failed", method="card")
+    retry = RetryAction(action="retry_now", reason="retry the same card")
+    assert gate.validate(retry, context, "idem_switch_only_1", 0).passed is False
+
+    switch = RetryAction(action="switch_rail", rail="upi", reason="move off the card")
+    assert gate.validate(switch, context, "idem_switch_only_2", 0).passed is True
+
+
 def test_retryable_class_allowed() -> None:
     passed, _ = rules.check_hard_decline_blocklist("bank_downtime")
     assert passed is True

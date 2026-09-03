@@ -123,6 +123,15 @@ CATALOGS: dict[str, dict[str, str]] = {
         "promise_days_left": "{days} days left.",
         "promise_due_today": "Due today.",
         "promise_broken": "Your last promised date passed without payment.",
+        # autopay on a promise. Exact about what is authorised — one amount,
+        # one date, one debit — because this is the screen where a customer
+        # hands over a standing instruction, and vagueness here is the thing
+        # a chargeback is about.
+        "autopay_offer": "Pay it automatically on that date",
+        "autopay_detail": (
+            "Approve once in your UPI app. We'll collect ₹{amount} on that "
+            "date. Nothing before it, nothing more, nothing after."
+        ),
         # confirming / unknown
         "check_again": "Check again",
         "confirming_auto": "This page will check again by itself in a few seconds.",
@@ -206,6 +215,11 @@ CATALOGS: dict[str, dict[str, str]] = {
         "promise_days_left": "{days} दिन बाकी हैं।",
         "promise_due_today": "आज आखिरी दिन है।",
         "promise_broken": "आपकी पिछली वादा तारीख बिना भुगतान के निकल गई।",
+        "autopay_offer": "उसी तारीख को अपने आप भुगतान हो जाए",
+        "autopay_detail": (
+            "अपने UPI ऐप में एक बार मंज़ूरी दें। हम उसी तारीख को ₹{amount} "
+            "लेंगे। न उससे पहले, न ज़्यादा, न दोबारा।"
+        ),
         "check_again": "फिर जाँचें",
         "confirming_auto": "यह पेज कुछ सेकंड में खुद दोबारा जाँच लेगा।",
         "unknown_sms": "पक्का होते ही हम आपको संदेश भेज देंगे। आपको कुछ करने की ज़रूरत नहीं है।",

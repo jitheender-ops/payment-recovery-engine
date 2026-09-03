@@ -289,6 +289,18 @@
       <input type="date" name="due_date" min="{{ promise_min_date }}"
              max="{{ promise_max_date }}" required
              aria-label="The date you'll pay by">
+      {# Autopay rides on the promise rather than replacing it: the date is
+         recorded either way, so an unticked box, an abandoned approval or a
+         gateway that is down all leave an ordinary promise standing. Absent
+         entirely above the unattended-debit threshold, where it could not be
+         honoured. #}
+      {% if autopay_offerable %}
+      <label class="autopay">
+        <input type="checkbox" name="autopay" value="1">
+        <span>{{ t.autopay_offer }}</span>
+      </label>
+      <p class="small quiet">{{ t.autopay_detail.format(amount=autopay_amount) }}</p>
+      {% endif %}
       <button class="btn btn-quiet" type="submit">I'll pay by this date</button>
     </form>
   </details>

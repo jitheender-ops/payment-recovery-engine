@@ -578,3 +578,67 @@ async def test_no_reminder_for_a_far_future_promise(
         )
         await s.commit()
         assert await remind_promises(s) == 0
+
+
+# ── The horizon has a floor under the three surface copies ─────────────────
+
+
+async def test_record_promise_refuses_a_date_past_the_horizon(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    promise_max_horizon_days was enforced in three separate copies — the
+    recovery page, the voice pipeline and the signed merchant API — while
+    record_promise itself accepted anything. Any new caller silently got no
+    bound at all. The surfaces keep their checks to answer in their own
+    channel; this is the floor underneath them.
+    """
+    from src.cases import open_case, record_promise
+    from src.config import get_settings
+
+    horizon = get_settings().promise_max_horizon_days
+    async with db_sessionmaker() as session:
+        case = await open_case(
+            session,
+            risk_type="invoice_overdue",
+            subject_ref="INV-HORIZON",
+            amount_at_risk=100_000,
+            currency="INR",
+            customer_id="email:horizon@example.in",
+        )
+        await session.commit()
+
+        too_far = datetime.now(UTC) + timedelta(days=horizon + 1)
+        assert await record_promise(
+            session, case, amount=100_000, due_at=too_far, channel="test"
+        ) is None
+
+        inside = datetime.now(UTC) + timedelta(days=horizon - 1)
+        assert await record_promise(
+            session, case, amount=100_000, due_at=inside, channel="test"
+        ) is not None
+
+
+async def test_a_payment_plan_keeps_its_own_longer_horizon(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A plan is a validated SET of instalments with a 90-day horizon of its
+    own — the ceiling above is not the plan validator's business."""
+    from src.cases import open_case, record_promise
+    from src.config import get_settings
+
+    horizon = get_settings().promise_max_horizon_days
+    async with db_sessionmaker() as session:
+        case = await open_case(
+            session,
+            risk_type="invoice_overdue",
+            subject_ref="INV-PLAN-HORIZON",
+            amount_at_risk=100_000,
+            currency="INR",
+            customer_id="email:planhorizon@example.in",
+        )
+        await session.commit()
+        far = datetime.now(UTC) + timedelta(days=horizon + 30)
+        assert await record_promise(
+            session, case, amount=50_000, due_at=far, channel="payment_plan"
+        ) is not None

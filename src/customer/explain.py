@@ -89,6 +89,13 @@ _BY_CLASS: dict[str, Explanation] = {
         "Use a different card, or pay by UPI or netbanking below.",
         True,
     ),
+    "risk_check_failed": Explanation(
+        "This payment was stopped by a security check",
+        _HELD,
+        "Pay below with a different card or by UPI — the same card will be "
+        "stopped again. If every method is refused, call the number on your card.",
+        True,
+    ),
     "invalid_card": Explanation(
         "Those card details weren't accepted",
         _HELD,

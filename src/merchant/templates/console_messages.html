@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
+{% block title %}Messages · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("messages", merchant_name) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Messages</div>
+    <h1 class="ptitle">What your customers actually read</h1>
+    <p class="psub">
+      Every message the engine sends goes out under your name. These are
+      rendered live by the same functions the sender calls, so what you read
+      here is what ships. The amounts and references are illustrative; the
+      words are exact.
+    </p>
+  </header>
+
+  {% if not data.messages.has_data %}
+  <section class="sec">
+    <p class="sec-s">No templates could be rendered. That is a bug, not an
+    empty state.</p>
+  </section>
+  {% else %}
+
+  <section class="sec">
+    <h2 class="sec-t">Failed payments</h2>
+    <p class="sec-s">
+      One per failure class the classifier can produce. SMS is billed and
+      truncated per 160 characters, so the count is a cost, not trivia.
+    </p>
+    <div class="card" style="margin-top:1rem">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>When this fires</th><th>What they receive</th><th class="num">Chars</th></tr>
+          </thead>
+          <tbody>
+            {% for n in data.messages.nudges %}
+            <tr>
+              <td class="nowrap" style="text-transform:capitalize">{{ n.failure_class }}</td>
+              <td>{{ n.body }}</td>
+              <td class="num mono{% if n.over %} red{% endif %}">{{ n.chars }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2 class="sec-t">Overdue invoices, by rung</h2>
+    <p class="sec-s">
+      The B2B ladder consolidates every open invoice for one buyer into a
+      single statement. The tone firms with the rung; the facts do not change.
+    </p>
+    {% for s in data.messages.statements %}
+    <div class="card" style="margin-top:1rem">
+      <div style="padding:1rem 1.1rem">
+        <div class="stat-l">Rung {{ s.level }} · {{ s.tone }}</div>
+        <p style="margin:.5rem 0 0;font-weight:600">{{ s.subject }}</p>
+        <p style="margin:.6rem 0 0;font-size:.9rem">
+          <span class="faint">SMS</span> {{ s.sms }}
+          <span class="mono faint{% if s.over %} red{% endif %}">({{ s.chars }})</span>
+        </p>
+        <pre class="code" style="margin-top:.8rem;white-space:pre-wrap">{{ s.email_text }}</pre>
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+
+  {% endif %}
+</main>
+{% endblock %}

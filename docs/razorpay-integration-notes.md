@@ -175,10 +175,16 @@ bank would route the whole book off a rail because one bank is down. A
 same shape locally, so the client, the parsing and the routing decision are
 all the real ones.
 
-### `payment_risk_check_failed`
+### `payment_risk_check_failed` — resolved 2026-09-02
 
 Razorpay documents it as retryable, advising *"the customer must retry with a
-different card or method"* — a rail switch, not a retry. This engine treats it
-as `fraud_block` and abandons. Kept conservative on purpose; see
-`docs/decline-taxonomy.md`. Worth deciding deliberately rather than leaving as
-an unnoticed disagreement.
+different card or method"* — a rail switch, not a retry. The engine used to
+treat it as `fraud_block` and abandon, throwing away a recoverable payment.
+
+It is now its own class, `risk_check_failed`: retryable, but **switch-only**.
+`retry_now` and `retry_at` are rejected by the guardrail
+(`check_switch_only_class`), so the engine can only move rails or nudge —
+never re-present the instrument the risk screen just refused. A customer's own
+attempt from the recovery page is unaffected: choosing a different card there
+is precisely the advice. Full reasoning and the per-layer table are in
+`docs/decline-taxonomy.md`.

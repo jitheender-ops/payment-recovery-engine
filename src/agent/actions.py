@@ -130,6 +130,13 @@ class FailureContext(BaseModel):
     # collection. None means no notification has gone out yet.
     last_notification_sent_at: datetime | None = None
 
+    # True only for the scheduler's promise-backed UPI Autopay debit. It rides
+    # on the context beside last_notification_sent_at because it feeds the same
+    # rule: a mandate debit is lawful only 24h after a notice the customer
+    # actually received. Defaults False, so every existing caller and every
+    # stored fixture is unchanged — the same defaulting pattern risk_type uses.
+    is_mandate_debit: bool = False
+
     # Promise-to-pay history for this customer: kept count, broken count,
     # pending count. Defaults (all zero) keep every stored fixture and
     # pre-existing caller behaving exactly as before — the same defaulting

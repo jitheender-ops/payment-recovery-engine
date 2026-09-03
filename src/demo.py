@@ -62,6 +62,9 @@ router = APIRouter()
 # fake links is correct — the cases that own them are in the database and
 # a fresh chase mints fresh ones, exactly as it would against Razorpay.
 _LINKS: dict[str, dict[str, Any]] = {}
+# Mandates authorised by the fake registration link, by token id. Same
+# in-process, deliberately-not-persisted discipline as _LINKS above.
+_MANDATES: dict[str, dict[str, Any]] = {}
 
 
 def sign(body: bytes, secret: str) -> str:
@@ -248,12 +251,107 @@ class _FakePaymentLink:
         return {"success": True}
 
 
+class _FakeRegistrationLink:
+    """`client.registration_link` — where a UPI Autopay mandate is authorised."""
+
+    def create(self, data: dict[str, Any]) -> dict[str, Any]:
+        auth_id = f"inv_demo_{uuid.uuid4().hex[:10]}"
+        token_id = f"token_demo_{uuid.uuid4().hex[:10]}"
+        base = get_settings().public_base_url.rstrip("/") or "http://127.0.0.1:8000"
+        registration = data.get("subscription_registration") or {}
+        record = {
+            "id": auth_id,
+            "entity": "invoice",
+            "status": "issued",
+            "amount": data.get("amount"),
+            "currency": data.get("currency", "INR"),
+            "description": data.get("description"),
+            "notes": data.get("notes", {}),
+            "short_url": f"{base}/demo/mandate/{auth_id}",
+            # Nested exactly where the real payload nests it, so
+            # RetryExecutor._parse_mandate_authorization is exercised on the
+            # same shape it will meet live rather than a convenient flat one.
+            "subscription_registration": {
+                "method": registration.get("method", "upi"),
+                "max_amount": registration.get("max_amount"),
+                "token_id": token_id,
+            },
+        }
+        _MANDATES[token_id] = record
+        logger.info(
+            "DEMO gateway: authorised mandate %s up to %s paise",
+            token_id, registration.get("max_amount"),
+        )
+        return dict(record)
+
+
+class _FakeOrder:
+    """`client.order` — the amount envelope a recurring charge is made against."""
+
+    def create(self, data: dict[str, Any]) -> dict[str, Any]:
+        order_id = f"order_demo_{uuid.uuid4().hex[:10]}"
+        logger.info("DEMO gateway: order %s for %s paise", order_id, data.get("amount"))
+        return {
+            "id": order_id,
+            "entity": "order",
+            "amount": data.get("amount"),
+            "currency": data.get("currency", "INR"),
+            "status": "created",
+            "notes": data.get("notes", {}),
+        }
+
+
+class _FakePayment:
+    """`client.payment` — the unattended debit against an authorised mandate."""
+
+    def createRecurring(self, data: dict[str, Any]) -> dict[str, Any]:  # noqa: N802
+        # Named for the real SDK's method, which is camelCase.
+        token = data.get("token")
+        if token not in _MANDATES:
+            # The one failure the fake DOES raise. A debit against a token that
+            # was never authorised is the exact bug this feature could ship —
+            # money taken on consent that does not exist — so demo mode must
+            # not be the place it looks like it works.
+            raise DemoBadRequestError(f"no such mandate token: {token}")
+        payment_id = f"pay_demo_{uuid.uuid4().hex[:10]}"
+        logger.info(
+            "DEMO gateway: debited mandate %s for %s paise -> %s",
+            token, data.get("amount"), payment_id,
+        )
+        return {"razorpay_payment_id": payment_id, "status": "captured"}
+
+
+class _FakeToken:
+    """`client.token` — the authoritative answer to "is this mandate live?"."""
+
+    def fetch(self, customer_id: str, token_id: str) -> dict[str, Any]:
+        record = _MANDATES.get(token_id)
+        if record is None:
+            # Unknown token. Not "rejected": we genuinely do not know, and the
+            # reconciler treats unknown as "ask again", never as consent.
+            return {"id": token_id, "status": "created"}
+        # Demo authorisations are approved the moment they are minted — there
+        # is no customer to send to a UPI app — so the demo can show the whole
+        # promise-to-collection arc without a second actor.
+        return {
+            "id": token_id,
+            "entity": "token",
+            "recurring_details": {"status": "confirmed"},
+            "customer_id": customer_id,
+        }
+
+
 class FakeRazorpayClient:
-    """A stand-in for `razorpay.Client` covering the three calls this engine
-    makes: payment_link.create, .cancel and .notifyBy."""
+    """A stand-in for `razorpay.Client` covering every call this engine makes:
+    payment_link.create/.cancel/.notifyBy, registration_link.create,
+    order.create, payment.createRecurring and token.fetch."""
 
     def __init__(self) -> None:
         self.payment_link = _FakePaymentLink()
+        self.registration_link = _FakeRegistrationLink()
+        self.order = _FakeOrder()
+        self.payment = _FakePayment()
+        self.token = _FakeToken()
 
 
 # ── The stub checkout ────────────────────────────────────────────────────

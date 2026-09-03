@@ -24,6 +24,8 @@ function with no top-level body to execute.
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 
 st.set_page_config(
@@ -39,6 +41,22 @@ from dashboard.auth import (  # noqa: E402
     lockout_seconds_remaining,
     password_is_correct,
 )
+
+
+def _lockout_key() -> str:
+    """
+    The per-client identity failures bucket under.
+
+    Rightmost X-Forwarded-For entry when a proxy wrote the header (the tunnel
+    in front of this dashboard does), else the socket peer, else "" — which
+    still gets its own bucket. A shared lockout let anyone burn six guesses
+    and lock the operator out of their own console.
+    """
+    xff = st.context.headers.get("X-Forwarded-For", "")
+    entries = [e.strip() for e in xff.split(",") if e.strip()]
+    if entries:
+        return entries[-1]
+    return st.context.ip or os.getenv("REMOTE_ADDR", "")
 
 theme.apply()
 
@@ -91,12 +109,13 @@ def require_password() -> None:
         )
         submitted = st.form_submit_button("Sign in", width="stretch")
     if submitted:
-        wait = lockout_seconds_remaining()
+        key = _lockout_key()
+        wait = lockout_seconds_remaining(key)
         if wait:
             st.error(
                 f"Too many failed attempts. Sign-in reopens in {wait}s."
             )
-        elif password_is_correct(supplied):
+        elif password_is_correct(supplied, key):
             # The password itself is never kept — only the fact that it matched.
             st.session_state["authenticated"] = True
             st.rerun()

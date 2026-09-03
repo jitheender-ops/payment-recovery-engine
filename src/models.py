@@ -285,6 +285,11 @@ class RecoveryCase(Base):
     # payment id. Storing only the original id is why nothing could be
     # attributed before this table existed.
     recovered_ref: Mapped[str | None] = mapped_column(String(255))
+    # EVERY payment id credited to this case, recovered_ref being only the
+    # latest. The membership test in cases.py replay-guards captures on a
+    # case paid in three or more parts, where the single latest-ref check
+    # would let an earlier distinct capture credit twice.
+    credited_refs: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     recovered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
@@ -575,6 +580,53 @@ class PromiseToPay(Base):
     # kept-in-grace with this, instead of libelling a late payment as on-time.
     kept_late_days: Mapped[int | None] = mapped_column(Integer)
 
+    # ── UPI Autopay mandate (optional; a promise works without one) ────────
+    # A promise used to collect nothing: it deferred chasing, sent a reminder
+    # 48h out, and waited for the customer to pull the money. These columns are
+    # the other half — the customer may authorise a UPI Autopay mandate for
+    # this promise's amount and date, and the scheduler debits it when the date
+    # arrives.
+    #
+    # Deliberately columns on the promise rather than a mandate table. The
+    # mandate is authorised for ONE amount on ONE date; a reusable per-customer
+    # mandate is a different product decision (and a different consent), and
+    # inventing the table now would pre-commit to it.
+    #
+    # `none` is the default and the fallback, so every pre-existing row and
+    # every unmandated promise behaves exactly as it always has. That fallback
+    # is not a lesser path: above the RBI unattended-debit threshold
+    # (mandate_max_auto_debit_paise) a mandate must not be offered at all, so
+    # for larger promises it is the only lawful one.
+    mandate_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="none"
+    )
+    # The gateway's token id for the authorised mandate. Opaque to us; the only
+    # thing that can be debited.
+    mandate_token: Mapped[str | None] = mapped_column(String(255))
+    # The authorisation payment/registration-link id, kept for the audit trail:
+    # it is the evidence the customer consented, and the join key if a mandate
+    # is ever disputed.
+    mandate_authorization_ref: Mapped[str | None] = mapped_column(String(255))
+    # Razorpay's OWN customer id, minted when the mandate was authorised. Not
+    # RecoveryCase.customer_id, which is this engine's canonical key
+    # (`email:a@b.in`) and means nothing to the gateway. The recurring charge
+    # needs both this and the token, so storing one without the other would be
+    # an authorisation we cannot actually collect against.
+    mandate_customer_ref: Mapped[str | None] = mapped_column(String(255))
+    mandate_registered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # When the debit was actually presented. Read by expire_promises: a promise
+    # whose mandate was charged is NOT broken while the capture is still in
+    # flight — the money left the customer's account and calling that a broken
+    # promise is the exact libel `promise_grace_hours` exists to prevent. The
+    # timestamp rather than a bare status flag so the reprieve is BOUNDED: if
+    # no capture lands within the grace window of the charge, the promise
+    # breaks normally instead of hanging pending forever.
+    mandate_charged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -584,6 +636,10 @@ class PromiseToPay(Base):
         # this way because status is the selective half — most promises are
         # resolved and never need looking at again.
         Index("ix_promises_status_due", "status", "due_at"),
+        # The debit sweep: promises whose mandate is live and whose date has
+        # come. Same shape and same reasoning as the index above —
+        # mandate_status is the selective half, since most promises carry none.
+        Index("ix_promises_mandate_due", "mandate_status", "due_at"),
     )
 
 

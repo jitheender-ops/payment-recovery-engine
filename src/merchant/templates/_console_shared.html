@@ -45,6 +45,20 @@
 
   .sec{margin-top:clamp(2.2rem,5vw,3rem)}
   .sec-t{font-size:1.15rem;letter-spacing:-.02em;margin:0}
+  /* The one data-entry form in the console. Wraps to a column on narrow
+     screens rather than scrolling sideways, because this is the surface a
+     merchant reaches for on a phone when a cheque lands. */
+  .paidform{display:flex;gap:.75rem;align-items:flex-end;flex-wrap:wrap;
+            margin-top:1rem}
+  .paid-f{display:flex;flex-direction:column;gap:.3rem;flex:1 1 10rem}
+  .paid-f span{font-family:var(--mono);font-size:.66rem;text-transform:uppercase;
+               letter-spacing:.1em;color:var(--ink-3)}
+  .paid-f input,.paid-f select{font-family:var(--sans);font-size:.95rem;
+    padding:.6rem .7rem;border:1px solid var(--line-2);border-radius:8px;
+    background:var(--card);color:var(--ink);min-height:44px}
+  .paid-f input:focus-visible,.paid-f select:focus-visible{
+    outline:2px solid var(--green);outline-offset:1px}
+  @media (max-width:560px){.paidform{flex-direction:column;align-items:stretch}}
   .sec-s{color:var(--ink-2);font-size:.88rem;margin-top:.35rem;max-width:66ch}
 
   .tw{overflow-x:auto;margin-top:1rem;border:1px solid var(--line);

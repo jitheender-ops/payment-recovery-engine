@@ -20,7 +20,7 @@ global:
   max_retries_per_payment: 3
   max_retries_per_customer_24h: 5
   max_nudges_per_customer_24h: 2
-  amount_ceiling_inr: 250000          # retries above this need explicit consent, not automation
+  amount_ceiling_paise: 5000000       # ₹50,000 — retries above this need explicit consent, not automation
   consent_window_hours: 72            # default; chaser risk types override per type below
   retry_blackout_ist: "23:00-07:00"   # no retries fire in this window; bank success rates fall off a cliff
   retry_attempt_cost_inr: 2           # priced into the expected-value stopping rule below
@@ -30,6 +30,16 @@ global:
 hard_rules:
   - id: hard_decline_blocklist
     rule: "Fraud blocks and true hard declines are never retried. Full stop."
+  - id: switch_only_classes
+    rule: >
+      A failure class marked switch-only is recoverable, but never on the rail
+      that just failed. retry_now and retry_at are refused for it; switch_rail
+      and nudge_customer are the only ways to spend an attempt. Currently
+      risk_check_failed (Razorpay documents payment_risk_check_failed retryable
+      and advises "a different card or method" — a rail switch, not a retry).
+      Not applied to a customer's own attempt from the recovery page: choosing
+      a different instrument there is exactly the advice.
+    enforced_in: "src/guardrail/rules.py:check_switch_only_class"
   - id: idempotency_key_required
     rule: "Every retry attempt must carry an idempotency key. Missing = refused, never defaulted."
   - id: retry_at_within_consent_window
@@ -45,13 +55,15 @@ hard_rules:
     enforced_in: "src/guardrail/rules.py:check_expected_value"
   - id: mandate_predebit_notification   # RBI Digital Payments E-mandate Framework, 2026
     rule: >
-      A mandate (autopay) retry that re-presents the charge is blocked unless
-      a notification to the customer was confirmed sent at least 24 hours
-      before the retry — and no more than 7 days before it
+      A debit presented against a mandate is blocked unless a notification to
+      the customer was confirmed sent at least 24 hours before it — and no
+      more than 7 days before it
       (MANDATE_PREDEBIT_NOTIFICATION_VALID_HOURS): the framework's notice is
       per-debit, so a stale notification is treated as unsent and must be
-      re-sent. Applies only to risk_type=mandate_failure with
-      action=retry_now — the one action that actually re-attempts a debit.
+      re-sent. Applies to risk_type=mandate_failure with action=retry_now,
+      and to the promise-backed UPI Autopay debit on ANY risk type — the two
+      things in this engine that move money against a standing instruction.
+      The 48h pre-due promise reminder IS that notice for the second.
       Post-debit: a successful mandate capture logs a confirmation event.
       Opt-out is honoured immediately across every risk type, not just this one.
     source: "RBI Digital Payments E-mandate Framework, 2026 — 24h pre-debit notice, post-debit confirmation, opt-out in the pre-debit notice."
@@ -82,7 +94,7 @@ chasers:
     consent_window_hours: 168   # 7 days
     first_action_hours: 24.0
     re_chase_hours: 48.0
-    note: "The mandate is standing consent to collect, so a retry may re-present the charge — subject to the 24h pre-debit notification rule above."
+    note: "A merchant-reported mandate failure carries no token we hold, so every action here mints a payment link like the other chasers; the engine only debits a mandate a customer authorised against their own promise to pay."
   payment_failure:
     note: >
       Webhook-driven, not a chaser — every payment.failed event re-triggers

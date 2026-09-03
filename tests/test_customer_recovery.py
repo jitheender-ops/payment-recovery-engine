@@ -819,3 +819,24 @@ async def test_no_rail_note_for_a_class_the_engine_does_not_switch(
     case_id = await _seed(db_sessionmaker, failure_class="bank_downtime", method="card")
     body = client.get(f"/recover/{recovery_link.mint(case_id)}").text
     assert "We recommend UPI" not in body
+
+
+# ── Accessibility floors ───────────────────────────────────────────────────
+
+
+async def test_the_recovery_page_has_a_skip_link_and_a_live_region(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The page opens with a masthead and a custody rail before the amount, so a
+    keyboard or screen-reader user met the same chrome before the one thing
+    they came for. And the confirming state re-renders via meta-refresh, so
+    without a live region the update was silent.
+    """
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    html = client.get(f"/recover/{token}").text
+
+    assert 'href="#main"' in html, "no skip link"
+    assert 'id="main"' in html, "skip link points at nothing"
+    assert 'aria-live="polite"' in html, "the confirming state announces nothing"

@@ -310,7 +310,38 @@ async def seed(count: int, recovered_rate: float, seed_value: int) -> dict[str, 
     return tally
 
 
+def refuse_outside_development() -> str | None:
+    """
+    This script writes a RECOVERED MONEY FIGURE straight into the database.
+
+    It never touches the gateway, so there is no 401 to stop it and no
+    credential to get wrong: point it at a production DATABASE_URL and the
+    live console reports thousands of recovered rupees that nobody paid.
+    That is the identical failure `Settings._demo_mode_is_development_only`
+    exists to prevent — a healthy-looking business with no money behind it —
+    so it gets the identical rule. Returns an error message, or None if this
+    is a development database.
+    """
+    from src.config import get_settings
+
+    env = get_settings().app_env
+    if env == "development":
+        return None
+    return (
+        f"Refusing to seed: APP_ENV={env}. This writes synthetic cases and a "
+        "synthetic recovered-money figure directly to the database — on "
+        "anything but a development box the console would then report "
+        "recovery that never happened. Set APP_ENV=development if this really "
+        "is a throwaway database."
+    )
+
+
 def main() -> int:
+    refusal = refuse_outside_development()
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 1
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--count", type=int, default=2500)
     p.add_argument("--recovered-rate", type=float, default=0.34,

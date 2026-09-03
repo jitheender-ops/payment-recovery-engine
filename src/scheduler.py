@@ -48,10 +48,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.actions import RetryAction
+from src.audit_chain import AuditChainNotKeyedError, stamp_unhashed_events
 from src.cases import (
     due_cases,
     expire_promises,
     log_event,
+    mandates_awaiting_confirmation,
+    promises_due_for_mandate_debit,
     promises_due_for_reminder,
 )
 from src.chasers.policy import RISK_POLICIES
@@ -916,6 +919,124 @@ async def chase_due_cases(
     return chased
 
 
+async def reconcile_pending_mandates(
+    session: AsyncSession, *, now: datetime | None = None, limit: int | None = None
+) -> int:
+    """
+    Ask the gateway whether each pending mandate has actually been authorised.
+    Returns how many were promoted to active.
+
+    This REPLACED webhook-event matching, and the replacement is the point.
+    Confirmation used to depend on recognising Razorpay's event name, but the
+    reachable documentation never carried the event catalogue — so the engine
+    held a guessed list, and if the real names differed autopay would have
+    silently never collected while every test still passed. A guess that fails
+    silently is worse than no feature.
+
+    The token's own status is not a guess. Polling costs one small API call per
+    pending authorisation per tick, bounded by `mandates_awaiting_confirmation`
+    to authorisations that are still worth asking about, and it works whether
+    or not a webhook was ever registered.
+
+    "unknown" is deliberately NOT a verdict: a lookup that failed leaves the
+    mandate pending and it is asked again next tick. Only an explicit
+    confirmation from the gateway may arm a debit.
+    """
+    if not get_settings().promise_mandate_enabled:
+        return 0
+
+    now = now or datetime.now(UTC)
+    batch = limit or get_settings().scheduler_batch_size
+    waiting = await mandates_awaiting_confirmation(session, now=now, limit=batch)
+    if not waiting:
+        return 0
+
+    executor = get_orchestrator()._executor
+    confirmed = 0
+    for promise in waiting:
+        status = await executor.fetch_mandate_status(
+            gateway_customer_id=promise.mandate_customer_ref or "",
+            mandate_token=promise.mandate_token or "",
+        )
+        if status == "active":
+            promise.mandate_status = "active"
+            promise.promised_rail = "upi_autopay"
+            confirmed += 1
+            logger.info("Mandate confirmed for promise %s", promise.id)
+        elif status == "failed":
+            # The customer declined, or it expired. The promise itself stands —
+            # they still named a date, and the plain reminder path is exactly
+            # what a promise without a mandate has always done.
+            promise.mandate_status = "failed"
+            logger.info("Mandate authorisation declined for promise %s", promise.id)
+    await session.commit()
+    return confirmed
+
+
+async def charge_due_promises(
+    session: AsyncSession, *, now: datetime | None = None, limit: int | None = None
+) -> int:
+    """
+    Debit every promise whose customer authorised a mandate and whose date has
+    come. Returns how many were actually charged.
+
+    The half of a promise that never existed before: a promise used to be a
+    deferral plus a reminder plus a link, and whether the money arrived was
+    entirely up to the customer remembering. Where they authorised a UPI
+    Autopay mandate, this collects on the date they named.
+
+    Off unless `promise_mandate_enabled` — and the check is here rather than
+    only at the capture surface so that turning the feature off stops
+    collection immediately, including for mandates already authorised. A
+    feature flag that only gates new authorisations is not an off switch.
+
+    Every promise-level failure is contained: one uncollectable mandate must
+    not stop the rest of the batch, and a promise whose debit fails simply
+    stays pending and breaks on the normal clock — exactly what would have
+    happened with no mandate at all.
+    """
+    if not get_settings().promise_mandate_enabled:
+        return 0
+
+    now = now or datetime.now(UTC)
+    orchestrator = get_orchestrator()
+    batch = limit or get_settings().scheduler_batch_size
+
+    due = await promises_due_for_mandate_debit(session, now=now, limit=batch)
+    if not due:
+        return 0
+
+    charged = 0
+    for promise in due:
+        case = await session.get(RecoveryCase, promise.recovery_case_id)
+        if case is None:  # pragma: no cover — orphan promise
+            continue
+        # A mandate with no token or no gateway customer is an authorisation
+        # that never completed. Charging "" would be a call to Razorpay with
+        # empty credentials, so mark it failed and let the promise break
+        # normally rather than spending an attempt discovering that.
+        if not promise.mandate_token or not promise.mandate_customer_ref:
+            promise.mandate_status = "failed"
+            await session.commit()
+            continue
+        try:
+            outcome = await orchestrator.charge_promise_mandate(
+                case, promise, session, now=now
+            )
+            if outcome == "charged":
+                charged += 1
+            elif outcome == "failed":
+                promise.mandate_status = "failed"
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "Mandate debit raised for promise %s — will retry next tick",
+                promise.id,
+            )
+            await session.rollback()
+    return charged
+
+
 async def remind_promises(
     session: AsyncSession, *, now: datetime | None = None, limit: int | None = None
 ) -> int:
@@ -1347,6 +1468,28 @@ async def _deliver_alerts(session: AsyncSession) -> int:
         return 0
 
 
+async def _stamp_audit_chain(session: AsyncSession) -> int:
+    """
+    Hash-chain any case_events written since the last tick.
+
+    Stamping was CLI-only (`scripts/audit_chain.py --stamp`), which is fine on
+    a laptop and useless deployed: nothing ran it, so `event_hash` stayed NULL
+    on every row and the tamper-evident audit trail the product claims did not
+    exist in the one place it matters. The scheduler is already the heartbeat
+    that runs every 60s, so it is where this belongs — no cron service, no
+    paid plan, and the chain is never more than one tick behind.
+
+    An unkeyed chain is not an error here. AUDIT_CHAIN_SECRET is required in
+    production (Settings.require_production_integrity), and a dev or test run
+    without one should keep ticking rather than fail every sweep behind it.
+    """
+    try:
+        return await stamp_unhashed_events(session)
+    except AuditChainNotKeyedError:
+        logger.debug("Audit chain not keyed — skipping stamp (dev/test only)")
+        return 0
+
+
 async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[str, int]:
     """One full pass. Returns what each sweep did, for logs and for tests."""
     now = now or datetime.now(UTC)
@@ -1373,6 +1516,13 @@ async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[st
         "superseded_links_cancelled": await cancel_superseded_links(
             session, orchestrator, now=now
         ),
+        # BEFORE expire_promises, and the order is a correctness property: a
+        # promise whose mandate is about to be charged must never be marked
+        # broken in the same tick that collects it.
+        # BEFORE the charge sweep: a mandate authorised moments ago should be
+        # collectable on the same tick its promise comes due, not the next one.
+        "mandates_confirmed": await reconcile_pending_mandates(session, now=now),
+        "promises_charged": await charge_due_promises(session, now=now),
         "promises_expired": await expire_promises(session, now=now),
         # The pre-due half of the promise lifecycle: the reminder fires
         # BEFORE expire_promises could ever see the promise break.
@@ -1399,6 +1549,9 @@ async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[st
         "due_cases_reported": await report_due_cases(session, now=now),
         # The writeback drain: queued merchant alerts → HMAC-signed POSTs.
         "alerts_delivered": await _deliver_alerts(session),
+        # Last: every sweep above may have written case_events, and stamping
+        # them in the same tick keeps the chain contiguous.
+        "events_stamped": await _stamp_audit_chain(session),
     }
     await _stamp_heartbeat(session, counts, now)
     await session.commit()

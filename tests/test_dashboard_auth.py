@@ -71,6 +71,30 @@ def test_non_ascii_input_is_rejected_not_raised(monkeypatch: Any) -> None:
     assert password_is_correct("パスワード") is False
 
 
+def test_one_clients_lockout_does_not_lock_out_another(monkeypatch: Any) -> None:
+    """
+    EXPLOIT: the throttle was one shared counter, so anyone burning six wrong
+    guesses locked the operator out of their own dashboard for five minutes —
+    a free "annoy the admin" button. Failures are bucketed per client key now:
+    the attacker's bucket locks, the operator's stays open.
+    """
+    import dashboard.auth as auth
+
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    try:
+        for _ in range(6):
+            assert auth.password_is_correct("wrong", key="attacker") is False
+        # The attacker is locked out...
+        assert auth.password_is_correct("wrong", key="attacker") is False
+        assert auth.lockout_seconds_remaining("attacker") > 0
+        # ...but the operator still signs in on the first try.
+        assert auth.password_is_correct(PASSWORD, key="operator") is True
+        assert auth.lockout_seconds_remaining("operator") == 0
+    finally:
+        auth.reset_throttle("attacker")
+        auth.reset_throttle("operator")
+
+
 def test_the_views_directory_is_not_named_pages(monkeypatch: Any) -> None:
     """
     Streamlit auto-registers every module under a directory named `pages/` next

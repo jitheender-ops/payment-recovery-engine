@@ -246,6 +246,23 @@
                   width:1rem; transition:transform .15s ease}
   details[open] summary::before{content:"−"}
 
+  /* Autopay opt-in on the promise form. A 44px target because this is a
+     one-thumb page on a mid-range Android, and a checkbox that consents to a
+     future debit is the last control on this page that should need a careful
+     tap. accent-color keeps the native control (free focus, free keyboard,
+     free assistive-tech semantics) while tinting it to the page's ink. */
+  /* Visually hidden until focused. Not display:none — that removes it from
+     the tab order, which is the one thing it exists for. */
+  .skip{position:absolute; left:-9999px; top:var(--sp-2);
+        background:var(--ink); color:var(--slip); padding:var(--sp-2) var(--sp-3);
+        border-radius:var(--r); z-index:10; text-decoration:none}
+  .skip:focus{left:var(--sp-3)}
+
+  .autopay{display:flex; align-items:center; gap:var(--sp-2);
+           min-height:44px; cursor:pointer; font-size:.95rem}
+  .autopay input{width:1.15rem; height:1.15rem; accent-color:var(--ink);
+                 flex:0 0 auto; cursor:pointer}
+
   footer{max-width:33rem; margin:0 auto;
          padding:var(--sp-5) var(--sp-4) var(--sp-6);
          border-top:1px solid var(--rule); color:var(--quiet); font-size:.86rem}
@@ -288,6 +305,11 @@
 </style>
 </head>
 <body>
+{# Skip link. Every page here opens with a masthead and, on the recovery page,
+   a custody rail before the amount — so a screen-reader or keyboard user met
+   the same chrome before the one thing they came for. Visually hidden until
+   focused, which is the only state it needs to exist in. #}
+<a class="skip" href="#main">Skip to content</a>
 <div class="masthead">
   {% if merchant_name %}<span class="who">{{ merchant_name }}</span><span>·</span>{% endif %}
   <span>{{ t('masthead') if t else 'Payment recovery' }}</span>
@@ -304,7 +326,11 @@
   <span class="langtoggle"><a href="{{ page_path }}?lang={{ t.other[0] }}" hreflang="{{ t.other[0] }}" rel="nofollow">{{ t.other[1] }}</a></span>
   {% endif %}
 </div>
-<main>{% block content %}{% endblock %}</main>
+{# aria-live on the shell, not on a widget: the confirming state re-renders
+   the whole page via meta-refresh (see the refresh block above), so there is
+   no in-place element for a live region to watch. `polite` because a payment
+   confirming is worth announcing at the next pause, never interrupting. #}
+<main id="main" aria-live="polite">{% block content %}{% endblock %}</main>
 <footer>{% block footer %}{% endblock %}</footer>
 </body>
 </html>

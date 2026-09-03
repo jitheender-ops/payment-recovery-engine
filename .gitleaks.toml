@@ -1,0 +1,19 @@
+# Gitleaks config: the default ruleset plus the one deliberate exception.
+#
+# The redaction self-test (tests/test_audit_fixes.py::test_a_recovery_token_
+# never_reaches_the_access_log) feeds a HANDMADE fake token — the base64 of
+# the word "signature" — into a logging.LogRecord to prove the access-log
+# filter redacts it. It is test input, not a credential: it grants nothing,
+# verifies against nothing, and was never issued by anything. Newer gitleaks
+# releases flag it under generic-api-key; older ones (the pinned CI action)
+# do not. Pinned here with the rationale rather than left to version drift.
+title = "gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures that look like, but are not, secrets"
+paths = [
+  "(tests?/.*\\.py)",
+]

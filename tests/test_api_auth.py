@@ -123,3 +123,27 @@ def test_health_does_not_leak_the_environment(monkeypatch: Any) -> None:
 
     body = client.get("/health").json()
     assert body == {"status": "healthy"}
+
+
+# ── The voice demo is a paid, unsigned surface ──────────────────────────────
+
+
+def test_voice_demo_is_open_in_development(monkeypatch: Any) -> None:
+    client = _client(monkeypatch, "development")
+    assert client.get("/voice/demo").status_code == 200
+
+
+def test_voice_demo_is_gone_outside_development(monkeypatch: Any) -> None:
+    """
+    /voice/demo/stt takes an unauthenticated file upload and spends real Sarvam
+    quota per request — /voice/turn is HMAC-checked, these three are not. The
+    control used to be a comment saying they were "not linked from the console
+    nav", which left the URLs live in production.
+    """
+    for env in ("staging", "production"):
+        client = _client(monkeypatch, env, api_key="k" * 32)
+        assert client.get("/voice/demo").status_code == 404, env
+        assert client.post("/voice/demo/turn", json={"text": "hi"}).status_code == 404, env
+        assert client.post(
+            "/voice/demo/stt", files={"audio": ("a.webm", b"x", "audio/webm")}
+        ).status_code == 404, env

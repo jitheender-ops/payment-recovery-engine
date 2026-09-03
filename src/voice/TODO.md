@@ -6,22 +6,22 @@ to "making real calls a native speaker would trust."
 
 ## 1. Connect a real mouth (before anything else)
 
-- [ ] **Pick a telephony provider.** Shortlist for India: Exotel, Plivo,
-      Knowlarity. For Hinglish STT/TTS specifically: **Sarvam AI** — the Mic
-      RAG model already measured it (520.7 / 856.5 ms P50/P95 over 6 real
-      clips, 4 languages). Recommendation: Exotel/Plivo for the call leg +
-      Sarvam for STT/TTS.
-- [ ] **Create the provider account**, buy/verify a caller number, and get
-      the signing key for outbound webhook callbacks.
-- [ ] **Write the provider adapter** — map the provider's callback field
-      names (`CallSid`, `Speech`, `From`, …) to the shapes `webhook.py`
-      already accepts (`session_id`, `transcript`, `customer_id`,
-      `subject_ref`). This is a mapping file, not a protocol change.
-- [ ] **Point the provider at `POST /voice/turn`** with the
-      `X-Voice-Signature` header (HMAC over raw body). Generate the
-      provider-side signing secret and set it as `VOICE_WEBHOOK_SECRET`.
-- [ ] **One live call round**: call your own phone, ask the 8 FAQ questions,
-      note where the flow breaks. This is the first real evidence.
+- [x] **Pick a telephony provider.** DONE: Plivo for the call leg + Sarvam
+      (saaras:v3 STT, bulbul:v3 TTS) for Hinglish — implemented in
+      src/voice/plivo_bridge.py, runbook in docs/VOICE_CALL_SETUP.md.
+- [ ] **Create the Plivo account**, buy/verify an Indian caller number
+      (DoT/TCPB KYC), note AUTH ID/TOKEN → PLIVO_AUTH_ID / PLIVO_AUTH_TOKEN.
+- [x] **Write the provider adapter** — src/voice/plivo_bridge.py maps
+      Plivo's form fields (CallUUID, RecordingUrl, CallStatus) onto the
+      bridge state; /voice/turn keeps accepting both spellings.
+- [x] **Signing** — every /plivo/* callback is HMAC-checked over the raw
+      body with VOICE_WEBHOOK_SECRET (same secret, same construction, as
+      /voice/turn); GetInput action URLs carry a per-call+turn signature.
+      NOTE: Plivo cannot set X-Voice-Signature natively — sign at the
+      proxy in front of the callbacks (docs/VOICE_CALL_SETUP.md §3).
+- [ ] **One live call round**: `python scripts/run_plivo_bridge.py --dry-run`
+      then `--once`, call your own phone, ask the 8 FAQ questions, note
+      where the flow breaks. This is the first real evidence.
 
 ## 2. Compliance before real customers
 

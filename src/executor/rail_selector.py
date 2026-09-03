@@ -39,6 +39,7 @@ def select_alternative_rail(
     - UPI timeout → card
     - Netbanking + bank down → UPI
     - Card limit exceeded → UPI
+    - Risk check failed on card → UPI (the instrument is what was refused)
 
     Never returns `current_method`: the caller has established that rail just
     failed. Returns None only if there is no other rail at all.
@@ -64,7 +65,9 @@ def select_alternative_rail(
     # Prefer UPI as the default alternative (highest success rate, simplest flow)
     prefer_upi = "upi" in alternatives
 
-    if failure_class in ("3ds_dropoff", "issuer_decline", "card_limit_exceeded"):
+    if failure_class in (
+        "3ds_dropoff", "issuer_decline", "card_limit_exceeded", "risk_check_failed"
+    ):
         return "upi" if prefer_upi else alternatives[0]
 
     if failure_class == "upi_collect_timeout":
@@ -93,6 +96,9 @@ def resolve_target_rail(
     current_method: str,
     proposed: PaymentRail | None,
     failure_class: str = "",
+    *,
+    bank: str | None = None,
+    downtime: Any = None,
 ) -> PaymentRail | None:
     """
     The rail a `switch_rail` action should actually execute on.
@@ -103,7 +109,14 @@ def resolve_target_rail(
     and a valid literal, and "the same one" satisfies both. That retry is dead
     on arrival and still costs an attempt slot out of the max of three, plus a
     live Payment Link call.
+
+    `bank` and `downtime` only feed the fallback path (no agent proposal),
+    where a bank-scoped outage must not be re-entered via a different rail —
+    a rail switch that routes through the same broken bank wastes the
+    attempt it spent.
     """
     if proposed is not None and proposed != current_method:
         return proposed
-    return select_alternative_rail(current_method, failure_class)
+    return select_alternative_rail(
+        current_method, failure_class, downtime=downtime, bank=bank
+    )

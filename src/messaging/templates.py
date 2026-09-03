@@ -59,6 +59,10 @@ _TEMPLATES: dict[str, str] = {
         "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} payment exceeded your card "
         "limit. Try a different card or UPI."
     ),
+    "risk_check_failed": (
+        "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} payment was stopped by a "
+        "security check. Please use a different card or UPI."
+    ),
     "payment_timeout": (
         "Hi{{ ' ' + name if name else '' }}, your ₹{{ amount }} payment timed out. "
         "We're retrying automatically."

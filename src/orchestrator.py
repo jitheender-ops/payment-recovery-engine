@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src import recovery_link
+from src import downtime, recovery_link
 from src.agent.actions import FailureContext, RetryAction
 from src.agent.policy_agent import PolicyAgent
 from src.cases import (
@@ -376,7 +376,9 @@ class PaymentRecoveryOrchestrator:
         # the one place it has to hold.
         if action.action == "switch_rail":
             resolved = resolve_target_rail(
-                context.method, action.rail, context.failure_class
+                context.method, action.rail, context.failure_class,
+                bank=context.bank,
+                downtime=await downtime.current(),
             )
             if resolved != action.rail:
                 # Logged, not silent: the agent's original choice is otherwise
@@ -641,7 +643,7 @@ class PaymentRecoveryOrchestrator:
     async def _build_case_context(
         self,
         case: RecoveryCase,
-        policy: RiskPolicy,
+        policy: RiskPolicy | None,
         session: AsyncSession,
         *,
         now: datetime | None = None,
@@ -699,8 +701,17 @@ class PaymentRecoveryOrchestrator:
             risk_type=case.risk_type,
             payment_id=case.subject_ref,
             order_id=None,
-            failure_class=policy.failure_class,
-            error_code=policy.failure_class.upper(),
+            # policy is None for risk_type="payment_failure": that rail is
+            # webhook-driven and its bounds live in config, not RISK_POLICIES
+            # (see chasers/policy.py). It still has a failure class of its own
+            # and the global consent window, so a promise made on a payment
+            # case can be reminded and collected like any other. Before this,
+            # every promise-side caller returned "no policy" and did nothing
+            # for the engine's single biggest rail.
+            failure_class=policy.failure_class if policy else "payment_failure",
+            error_code=(
+                policy.failure_class.upper() if policy else "PAYMENT_FAILURE"
+            ),
             amount=case.amount_at_risk,
             currency=case.currency,
             method=method,
@@ -712,7 +723,11 @@ class PaymentRecoveryOrchestrator:
             current_time=now,
             hour_of_day=local_now.hour,
             day_of_week=local_now.weekday(),
-            consent_window_hours=policy.consent_window_hours,
+            consent_window_hours=(
+                policy.consent_window_hours
+                if policy
+                else get_settings().consent_window_hours
+            ),
             risk_meta=meta,
             is_retryable=True,
             original_failure_id=None,
@@ -930,7 +945,9 @@ class PaymentRecoveryOrchestrator:
         # path: the gate validates the action that actually executes.
         if action.action == "switch_rail":
             resolved = resolve_target_rail(
-                context.method, action.rail, context.failure_class
+                context.method, action.rail, context.failure_class,
+                bank=context.bank,
+                downtime=await downtime.current(),
             )
             if resolved != action.rail:
                 logger.info(
@@ -1148,7 +1165,9 @@ class PaymentRecoveryOrchestrator:
         *,
         attempt: RetryAttempt,
         case: RecoveryCase,
-        policy: RiskPolicy,
+        # None on the payment rail — see _build_case_context. The two reads
+        # below fall back to the customer's own words for a failed payment.
+        policy: RiskPolicy | None,
         action: RetryAction,
         idem_key: str,
         actor: str,
@@ -1175,12 +1194,13 @@ class PaymentRecoveryOrchestrator:
             try:
                 page = recovery_link.url_for(case.id)
                 next_step = (
-                    f"Check your {policy.subject_noun} and pay securely here: {page}"
+                    f"Check your {policy.subject_noun if policy else 'payment'} "
+                    f"and pay securely here: {page}"
                     if page
                     else "Please try again using a different payment method."
                 )
                 nudge_message = await self._nudge_gen.generate(
-                    failure_class=policy.failure_class,
+                    failure_class=policy.failure_class if policy else "payment_failure",
                     amount=case.amount_at_risk,
                     method="unknown",
                     next_step=next_step,
@@ -1329,9 +1349,15 @@ class PaymentRecoveryOrchestrator:
         the gate already said to leave alone.
         """
         now = now or datetime.now(UTC)
+        # policy is None on the payment rail, and that used to return
+        # "skipped_no_policy" — so a promise made on the customer recovery page
+        # for a failed payment, the engine's single biggest source of promises,
+        # never got its 48h reminder at all. _build_case_context now serves a
+        # None policy from the payment rail's own config, so the reminder fires
+        # for every risk type. This also gates collection: the reminder IS the
+        # RBI pre-debit notice, so without it a promise-backed mandate on a
+        # payment case could never lawfully be debited.
         policy = policy_for(case.risk_type)
-        if policy is None:
-            return "skipped_no_policy"
 
         ledger = await self._get_ledger(case.customer_id, session)
         stop = stop_reason(case, ledger)
@@ -1402,6 +1428,192 @@ class PaymentRecoveryOrchestrator:
         case.next_action_at = max(case_next, promise_due)
         await session.commit()
         return attempt.result or "sent"
+
+    async def charge_promise_mandate(
+        self,
+        case: RecoveryCase,
+        promise: PromiseToPay,
+        session: AsyncSession,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """
+        Debit the UPI Autopay mandate a customer authorised against a promise.
+
+        The only path in this engine that takes money without the customer
+        present, so it pays every toll the reminder pays and one more: the
+        guardrail sees `is_mandate_debit=True` on the context, which arms the
+        RBI pre-debit rule (rules.py:check_mandate_predebit_notification). That
+        rule has existed and been tested since long before anything could reach
+        it — it guarded an action that minted a Payment Link. This is the
+        caller it was written for.
+
+        No agent call, same reasoning as the reminder: the decision was made
+        when the customer authorised a specific amount on a specific date. An
+        LLM re-deciding it at debit time would be inventing consent.
+
+        Returns an outcome string for the sweep to log. Never raises: a promise
+        whose debit fails is a promise that stays pending and breaks on the
+        normal clock, which is exactly what would have happened without a
+        mandate at all.
+        """
+        now = now or datetime.now(UTC)
+        policy = policy_for(case.risk_type)
+
+        ledger = await self._get_ledger(case.customer_id, session)
+        stop = stop_reason(case, ledger)
+        # Same single tolerated stop as the reminder: the promise itself set
+        # next_action_at to its due date, so "not due until" is this sweep's
+        # own silence and not a refusal. Every other stop — terminal, budget
+        # spent, opted out — means no collection.
+        if stop is not None and "not due until" not in stop:
+            return f"skipped_stop:{stop}"
+
+        action = RetryAction(
+            action="retry_now",
+            reason=(
+                f"Promise mandate debit for promise {promise.id} "
+                f"(₹{promise.amount_promised // 100} due "
+                f"{promise.due_at.isoformat()})"
+            ),
+        )
+        # One promise, one debit, forever. The promise id is in the key rather
+        # than an attempt counter precisely so a retry of this sweep cannot
+        # mint a second charge against the same authorisation.
+        idem_key = f"mandate_debit_{promise.id}"
+        if await self._attempt_exists(idem_key, session):
+            return "already_charged"
+
+        context = await self._build_case_context(
+            case, policy, session, now=now,
+            promise_score=await customer_promise_score(session, case.customer_id),
+        )
+        context = context.model_copy(
+            update={"is_mandate_debit": True, "amount": promise.amount_promised}
+        )
+        guardrail_result = self._guardrail.validate(
+            action, context, idem_key, case.attempts_used
+        )
+        attempt = self._make_attempt(
+            action=action,
+            agent_type="promise_mandate",
+            guardrail_result=guardrail_result,
+            idem_key=idem_key,
+            attempt_number=case.attempts_used + 1,
+        )
+        # NOT attach_attempt, and the difference matters. attach_attempt spends
+        # an attempt slot and widens the escalation backoff — both correct for
+        # a CONTACT, both wrong here. A debit sends the customer nothing; it
+        # collects money they authorised for this exact date. Charging it
+        # against the contact budget would mean a case that used its touches on
+        # chasing then declines to collect the mandate those touches earned,
+        # and would push next_action_at out as if we had just messaged someone.
+        #
+        # The bound still holds: stop_reason's budget check runs above, so a
+        # case already out of attempts is not collected from. This only stops
+        # the debit from CONSUMING the budget.
+        attempt.recovery_case_id = case.id
+        session.add(attempt)
+
+        if not guardrail_result.passed:
+            attempt.result = "rejected"
+            await session.commit()
+            logger.info(
+                "Mandate debit refused by guardrail: promise=%s reasons=%s",
+                promise.id, guardrail_result.rejection_reasons,
+            )
+            return "skipped_guardrail"
+
+        # WRITE-AHEAD. Identical ordering and identical reason to
+        # _execute_and_record: this row must be committed before the gateway
+        # call, or a crash between the debit and the commit leaves money taken
+        # with nothing in our database saying so — and the next sweep, seeing
+        # no attempt, debits the customer a second time.
+        attempt.result = "pending"
+        attempt.result_details = {"phase": "write_ahead"}
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            logger.info("Mandate debit already claimed: promise=%s", promise.id)
+            return "already_charged"
+
+        event = await self._latest_risk_event(case, session)
+
+        # Order first, and COMMITTED first. The order id is the only join key a
+        # mandate capture carries, so recording it after the debit would mean a
+        # timeout on the charge leaves an attempt with no order id — and if the
+        # money did move, the capture arrives quoting an id nothing here has
+        # ever seen. Same law as the write-ahead row above, one level down.
+        try:
+            order_id = await self._executor.create_mandate_order(
+                amount_paise=promise.amount_promised, idempotency_key=idem_key
+            )
+        except Exception as exc:  # noqa: BLE001 — no money has moved yet
+            logger.warning("Mandate order failed: promise=%s err=%s", promise.id, exc)
+            attempt.result = "failed"
+            attempt.result_details = {"phase": "order", "error": str(exc)[:500]}
+            await session.commit()
+            return "failed"
+
+        attempt.external_ref = order_id
+        attempt.result_details = {"phase": "charging", "order_id": order_id}
+        await session.commit()
+
+        try:
+            result = await self._executor.charge_mandate(
+                order_id=order_id,
+                mandate_token=promise.mandate_token or "",
+                gateway_customer_id=promise.mandate_customer_ref or "",
+                amount_paise=promise.amount_promised,
+                customer_email=event.customer_email if event else None,
+                customer_contact=event.customer_contact if event else None,
+                description=f"Payment for {policy.subject_noun if policy else 'your payment'}",
+            )
+        except Exception as exc:  # noqa: BLE001 — recorded, never raised at the sweep
+            # AMBIGUOUS, and recorded as such. The charge may have reached
+            # Razorpay before the error; external_ref is already saved, so if
+            # it did, the capture still finds this case. It is never retried:
+            # the idempotency key is UNIQUE and _attempt_exists sees this row,
+            # so the failure mode is "collected once, recorded as failed",
+            # never "charged twice".
+            logger.warning("Mandate debit failed: promise=%s err=%s", promise.id, exc)
+            attempt.result = "failed"
+            attempt.result_details = {
+                "phase": "charging",
+                "order_id": order_id,
+                "error": str(exc)[:500],
+            }
+            await session.commit()
+            return "failed"
+
+        attempt.result = "success"
+        attempt.result_details = {
+            "order_id": order_id,
+            "payment_id": result.get("payment_id"),
+        }
+        # Read by expire_promises: the money has left the customer's account,
+        # so this promise must not be called broken while the capture webhook
+        # is still in flight.
+        promise.mandate_status = "charged"
+        promise.mandate_charged_at = now
+        # Read by expire_promises: the money has left the customer's account,
+        # so this promise must not be called broken while the capture webhook
+        # is still in flight.
+        promise.mandate_status = "charged"
+        promise.mandate_charged_at = now
+        log_event(
+            session,
+            case,
+            "mandate_post_debit_confirmation",
+            actor="promise_mandate",
+            promise_id=str(promise.id),
+            amount=promise.amount_promised,
+            order_id=order_id,
+        )
+        await session.commit()
+        logger.info("Mandate debited for promise %s: order=%s", promise.id, order_id)
+        return "charged"
 
     async def process_risk_event(self, event: RiskEvent, session: AsyncSession) -> None:
         """

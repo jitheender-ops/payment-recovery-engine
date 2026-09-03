@@ -6,7 +6,7 @@
 
 {% block body %}
 {{ console_nav("ops", merchant_name) }}
-<main class="wrap">
+<main id="main" class="wrap">
   <header class="phead">
     <div class="peyebrow">Engine</div>
     <h1 class="ptitle">Is the machinery running</h1>
@@ -52,6 +52,38 @@
   </div>
 
   {% if data.ops.next_due %}
+  {# The audit trail, checked rather than asserted. Every case_events row is
+     hash-chained and the scheduler stamps new ones each tick; this recomputes
+     the whole chain from the raw rows and compares. A tampered detail, actor
+     or event_type changes that row's hash and breaks every hash after it. #}
+  <section class="sec">
+    <h2 class="sec-t">Audit trail</h2>
+    {% if not data.ops.chain.keyed %}
+    <p class="sec-s">
+      Not verifiable here: <span class="mono">AUDIT_CHAIN_SECRET</span> is
+      unset, so rows are stored but unsealed. Nothing is wrong with the record.
+      Staging and production refuse to start without the key.
+    </p>
+    {% elif data.ops.chain.intact %}
+    <p class="sec-s">
+      <strong class="green">Intact.</strong>
+      {{ data.ops.chain.events_checked }} event{{ "s" if data.ops.chain.events_checked != 1 }}
+      recomputed from the raw rows and matched. Changing any actor, detail or
+      event type would break this and every hash after it.
+    </p>
+    {% else %}
+    <p class="sec-s">
+      <strong class="red">Broken.</strong> {{ data.ops.chain.detail }}
+      {% if data.ops.chain.first_broken_id %}
+      First mismatch at event
+      <span class="mono">#{{ data.ops.chain.first_broken_id }}</span>.
+      {% endif %}
+      Investigate if you did not rotate the key. Re-stamp if you did:
+      <span class="mono">python scripts/audit_chain.py --stamp</span>.
+    </p>
+    {% endif %}
+  </section>
+
   <section class="sec">
     <h2 class="sec-t">What fires next</h2>
     <p class="sec-s">The queue the scheduler works from, soonest first. The guardrail runs

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
+{% block title %}{{ data.account.name if data.account else "Buyer" }} · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+
+{% block body %}
+{{ console_nav("accounts", merchant_name) }}
+<main id="main" class="wrap">
+  {% if not data.account %}
+  <header class="phead">
+    <h1 class="ptitle">No such buyer</h1>
+    <p class="psub">That account does not exist.
+      <a href="/console/accounts">Back to buyers</a>.</p>
+  </header>
+  {% else %}
+  {% set a = data.account %}
+  <header class="phead">
+    <div class="peyebrow"><a href="/console/accounts">Buyers</a></div>
+    <h1 class="ptitle">{{ a.name }}</h1>
+    <p class="psub"><span class="mono">{{ a.ref }}</span></p>
+  </header>
+
+  {# ── Who we can reach ────────────────────────────────────────────────
+     Addresses are masked on purpose. PRODUCT.md holds this console to
+     PII-free, and that rule is kept rather than waived: the shape and the
+     domain identify a colleague the merchant already knows, while a
+     screenshot gives nobody an address to harvest. The sender still uses the
+     full value; it just never reaches a page. #}
+  <section class="sec">
+    <h2 class="sec-t">Who we can reach</h2>
+    <p class="sec-s">
+      The ladder addresses people by role, and firms up by adding roles rather
+      than repeating one. Addresses are shown masked.
+    </p>
+    {% if a.contacts %}
+    <div class="card" style="margin-top:1rem">
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Role</th><th>Name</th><th>Email</th><th>Phone</th></tr></thead>
+          <tbody>
+            {% for c in a.contacts %}
+            <tr>
+              <td style="text-transform:capitalize">{{ c.role }}</td>
+              <td>{{ c.name }}</td>
+              <td class="mono">{{ c.email }}</td>
+              <td class="faint">{{ c.phone }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% else %}
+    <p class="sec-s"><strong class="red">Nobody on file.</strong> The ladder
+    has no one to write to for this buyer, so no rung can fire.</p>
+    {% endif %}
+
+    <form method="post" action="/console/account/contact" class="paidform">
+      <input type="hidden" name="account_id" value="{{ a.id }}">
+      <label class="paid-f">
+        <span>Role</span>
+        <select name="role" aria-label="Their role">
+          <option value="ap_clerk">AP clerk</option>
+          <option value="finance_manager">Finance manager</option>
+          <option value="escalation">Escalation</option>
+        </select>
+      </label>
+      <label class="paid-f">
+        <span>Name</span>
+        <input type="text" name="name" maxlength="255" aria-label="Their name">
+      </label>
+      <label class="paid-f">
+        <span>Email</span>
+        <input type="email" name="email" maxlength="255" required
+               aria-label="Their email address">
+      </label>
+      <label class="paid-f">
+        <span>Phone</span>
+        <input type="text" name="phone" maxlength="20" aria-label="Their phone number">
+      </label>
+      <button class="btn-mini" type="submit">Add contact</button>
+    </form>
+  </section>
+
+  <section class="sec">
+    <h2 class="sec-t">What they owe</h2>
+    {% if a.cases %}
+    <div class="card" style="margin-top:1rem">
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Invoice</th><th>Due</th><th class="num">Outstanding</th><th class="num">Rung</th></tr></thead>
+          <tbody>
+            {% for c in a.cases %}
+            <tr>
+              <td class="mono ref"><a href="/console/case/{{ c.case_id }}">{{ c.ref }}</a></td>
+              <td class="faint nowrap">{{ c.due }}</td>
+              <td class="num red">{{ c.outstanding }}</td>
+              <td class="num mono">{{ c.rung or "—" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% else %}
+    <p class="sec-s">Nothing open. This buyer owes you nothing right now.</p>
+    {% endif %}
+  </section>
+
+  {# One row per account per rung, never one per invoice — this table IS the
+     consolidation rule's evidence. #}
+  <section class="sec">
+    <h2 class="sec-t">What we sent</h2>
+    {% if a.log %}
+    <div class="card" style="margin-top:1rem">
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>When</th><th class="num">Rung</th><th>Channels</th><th>Subject</th></tr></thead>
+          <tbody>
+            {% for l in a.log %}
+            <tr>
+              <td class="mono nowrap">{{ l.when }}</td>
+              <td class="num mono">{{ l.rung }}</td>
+              <td class="faint">{{ l.channels }}</td>
+              <td>{{ l.subject }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% else %}
+    <p class="sec-s">Nothing has gone out to this buyer yet.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+</main>
+{% endblock %}

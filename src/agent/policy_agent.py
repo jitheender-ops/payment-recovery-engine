@@ -208,6 +208,14 @@ class PolicyAgent:
                 reason=f"Fallback: hard decline ({error_detail})",
                 confidence=0.9,
             )
+        elif fc == FailureClass.RISK_CHECK_FAILED:
+            # Recoverable, but not on this instrument — and the fallback has no
+            # business picking a rail blind, so it asks the customer to pick one.
+            return RetryAction(
+                action="nudge_customer",
+                reason=f"Fallback: risk check refused this instrument ({error_detail})",
+                confidence=0.4,
+            )
         elif fc == FailureClass.NETWORK_ERROR:
             return RetryAction(
                 action="retry_now",

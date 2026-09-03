@@ -29,6 +29,7 @@ the money paths.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -45,9 +46,11 @@ from src.models import (
     RetryAttempt,
     VoiceCallQueue,
 )
+from src.receivables.accounts import active_contacts
 from src.receivables.models import (
     AccountTask,
     ArAccount,
+    ArContact,
     ArContactLog,
     CaseDispute,
     PaymentPlan,
@@ -108,6 +111,7 @@ async def promise_panel(session: AsyncSession) -> dict[str, Any]:
                 PromiseToPay.amount_promised,
                 PromiseToPay.channel,
                 PromiseToPay.reminded_at,
+                PromiseToPay.mandate_status,
                 RecoveryCase.subject_ref,
                 RecoveryCase.risk_type,
             )
@@ -128,6 +132,11 @@ async def promise_panel(session: AsyncSession) -> dict[str, Any]:
             # The 48h pre-due reminder is one-shot; showing whether it has
             # fired is how a merchant knows the promise is being worked.
             "reminded": r["reminded_at"] is not None,
+            # Whether this promise collects itself. The distinction is the
+            # merchant's forecast: an autopay-backed promise is money arriving
+            # on a date, a plain one is a commitment that still has to be
+            # remembered by the person who made it.
+            "autopay": r["mandate_status"] == "active",
         }
         for r in upcoming_rows
     ]
@@ -242,6 +251,7 @@ async def dispute_panel(session: AsyncSession) -> dict[str, Any]:
     rows = (
         await session.execute(
             select(
+                CaseDispute.id,
                 CaseDispute.reason,
                 CaseDispute.opened_at,
                 RecoveryCase.subject_ref,
@@ -258,6 +268,11 @@ async def dispute_panel(session: AsyncSession) -> dict[str, Any]:
 
     disputes = [
         {
+            # The id the console's uphold/reject form posts back. The panel
+            # told the merchant to resolve these and offered no control for
+            # three releases; a worklist you cannot act on is a to-do list
+            # someone else is holding.
+            "id": str(r["id"]),
             "subject_ref": r["subject_ref"],
             "risk_type": r["risk_type"],
             "outstanding": _money(
@@ -339,7 +354,13 @@ async def ladder_panel(session: AsyncSession) -> dict[str, Any]:
     across all history would answer a different question ("how many rungs have
     we ever fired") and read as if every account were at every stage at once.
     """
-    from src.receivables.ladder import INVOICE_LADDER
+    from src.receivables.ladder import (
+        INVOICE_LADDER,
+        is_b2b_contact_time,
+        next_b2b_window,
+        next_stage_gap_hours,
+        stage_after_break,
+    )
 
     # The newest log row per account — the account's current rung.
     newest = (
@@ -370,10 +391,27 @@ async def ladder_panel(session: AsyncSession) -> dict[str, Any]:
             "days": stage.days_past_due,
             "accounts": by_stage.get(stage.level, 0),
             "addresses": ", ".join(a.replace("_", " ") for a in stage.addresses),
+            # The rest of the rung, which the console has never shown. A
+            # merchant could see WHERE their accounts sat and nothing about
+            # what happens there — which channels fire, whether it costs a
+            # contact, how long until the next rung, and where a broken
+            # promise lands them. All of it is enforced; none of it was
+            # legible.
+            "channels": ", ".join(stage.channels),
+            "spends_budget": stage.spends_budget,
+            "gap_hours": next_stage_gap_hours(stage.level),
+            "after_break": stage_after_break(stage.level),
         }
         for stage in INVOICE_LADDER
         if not stage.pre_due  # stage 0 is opt-in and not reachable by default
     ]
+
+    # The B2B contact window, read from the enforcing function rather than
+    # restated in copy — PRODUCT.md's rule. A merchant looking at a quiet
+    # ladder at 8pm on Saturday should be told it is quiet on purpose.
+    now_ist = datetime.now(UTC)
+    window_open = is_b2b_contact_time(now_ist)
+    next_window = next_b2b_window(now_ist)
 
     accounts = int(await session.scalar(select(func.count(ArAccount.id))) or 0)
     open_tasks = int(
@@ -383,6 +421,41 @@ async def ladder_panel(session: AsyncSession) -> dict[str, Any]:
         or 0
     )
 
+    # The tasks themselves, not just the count. A bare number told a merchant
+    # that work existed and nothing about WHICH work — no account, no reason,
+    # no way to close it. `complete_task` has existed the whole time behind an
+    # HMAC-signed endpoint a person on a laptop cannot reach.
+    task_rows = (
+        await session.execute(
+            select(
+                AccountTask.id,
+                AccountTask.kind,
+                AccountTask.detail,
+                AccountTask.created_at,
+                ArAccount.display_name,
+                ArAccount.account_ref,
+            )
+            .join(ArAccount, ArAccount.id == AccountTask.account_id)
+            .where(AccountTask.status == "open")
+            .order_by(AccountTask.created_at)
+            .limit(_LIST_LIMIT)
+        )
+    ).mappings().all()
+    tasks = [
+        {
+            "id": str(r["id"]),
+            "kind": r["kind"],
+            "account": r["display_name"] or r["account_ref"],
+            "raised": (
+                _ist(r["created_at"]).strftime("%d %b") if r["created_at"] else "—"
+            ),
+            # detail is merchant-supplied JSON; take only the one field the
+            # ladder writes and bound it, rather than rendering a blob.
+            "why": str((r["detail"] or {}).get("reason") or "")[:120],
+        }
+        for r in task_rows
+    ]
+
     return {
         "accounts": accounts,
         "stages": stages,
@@ -390,6 +463,9 @@ async def ladder_panel(session: AsyncSession) -> dict[str, Any]:
         # budget — it is merchant-side work, and it sits here undone until
         # somebody picks up a phone.
         "open_call_tasks": open_tasks,
+        "tasks": tasks,
+        "window_open": window_open,
+        "next_window": _ist(next_window).strftime("%a %d %b, %H:%M"),
     }
 
 
@@ -824,6 +900,284 @@ async def routing_panel(session: AsyncSession) -> dict[str, Any]:
     }
 
 
+def _mask_email(email: str | None) -> str:
+    """
+    Enough of an address to recognise a colleague, not enough to harvest one.
+
+    PRODUCT.md holds the console to "aggregate and PII-free: never a customer
+    email, phone or id", and that rule is right for the money pages. A contact
+    DIRECTORY is a different job — its whole purpose is "who do we reach at
+    this buyer" — so the rule is kept rather than waived: the merchant sees
+    the shape and the domain, which is what identifies a colleague they
+    already know, while a screenshot or a shoulder-surfer gets nothing
+    sendable. The full address still reaches the sender; it just never reaches
+    a page.
+    """
+    if not email or "@" not in email:
+        return "—"
+    local, _, domain = email.partition("@")
+    head = local[0] if local else ""
+    tail = local[-1] if len(local) > 2 else ""
+    return f"{head}…{tail}@{domain}"
+
+
+async def accounts_panel(session: AsyncSession) -> dict[str, Any]:
+    """
+    The buyer directory. Which organisations owe money, and who we can reach.
+
+    B2B collection runs on the ACCOUNT (one buyer with four overdue invoices
+    is one chase, not four), and the console had no account view at all — the
+    only per-account surface in the whole product was the customer-facing
+    /statement/<token>. A merchant could not answer "which buyers owe us the
+    most" or "do we even have a finance manager on file for this one", and the
+    second question is the difference between the ladder escalating and the
+    ladder running out of people to write to.
+    """
+    rows = (
+        await session.execute(
+            select(
+                ArAccount.id,
+                ArAccount.account_ref,
+                ArAccount.display_name,
+                func.count(RecoveryCase.id).label("open_cases"),
+                func.coalesce(
+                    func.sum(RecoveryCase.amount_at_risk - RecoveryCase.amount_recovered),
+                    0,
+                ).label("outstanding"),
+                func.max(RecoveryCase.escalation_level).label("rung"),
+            )
+            .outerjoin(
+                RecoveryCase,
+                (RecoveryCase.account_id == ArAccount.id)
+                & (RecoveryCase.state == "open"),
+            )
+            .group_by(ArAccount.id, ArAccount.account_ref, ArAccount.display_name)
+            .order_by(func.coalesce(func.sum(
+                RecoveryCase.amount_at_risk - RecoveryCase.amount_recovered), 0).desc())
+            .limit(_LIST_LIMIT)
+        )
+    ).mappings().all()
+
+    # Which roles each account actually has covered. A ladder that escalates to
+    # a finance manager nobody has recorded escalates to nobody.
+    role_rows = (
+        await session.execute(
+            select(ArContact.account_id, ArContact.role)
+            .where(ArContact.active.is_(True))
+            .distinct()
+        )
+    ).all()
+    roles: dict[Any, list[str]] = {}
+    for account_id, role in role_rows:
+        roles.setdefault(account_id, []).append(str(role))
+
+    accounts = [
+        {
+            "id": str(r["id"]),
+            "name": r["display_name"] or r["account_ref"],
+            "ref": r["account_ref"],
+            "open_cases": int(r["open_cases"] or 0),
+            "outstanding": _money(int(r["outstanding"] or 0)),
+            "rung": int(r["rung"] or 0),
+            "roles": ", ".join(
+                sorted(x.replace("_", " ") for x in roles.get(r["id"], []))
+            ),
+            "no_contacts": not roles.get(r["id"]),
+        }
+        for r in rows
+    ]
+    return {"accounts": accounts, "has_data": bool(accounts)}
+
+
+async def account_detail(
+    session: AsyncSession, account_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """One buyer: who we can reach, what they owe, and what we last sent."""
+    account = await session.get(ArAccount, account_id)
+    if account is None:
+        return None
+
+    contacts = [
+        {
+            "id": str(c.id),
+            "role": c.role.replace("_", " "),
+            "name": c.name or "—",
+            "email": _mask_email(c.email),
+            "phone": "on file" if c.phone else "—",
+            "active": c.active,
+        }
+        for c in (await active_contacts(session, account_id))
+    ]
+
+    cases = (
+        await session.execute(
+            select(
+                RecoveryCase.id,
+                RecoveryCase.subject_ref,
+                RecoveryCase.amount_at_risk,
+                RecoveryCase.amount_recovered,
+                RecoveryCase.due_at,
+                RecoveryCase.escalation_level,
+            )
+            .where(
+                RecoveryCase.account_id == account_id,
+                RecoveryCase.state == "open",
+            )
+            .order_by(RecoveryCase.due_at)
+            .limit(_LIST_LIMIT)
+        )
+    ).mappings().all()
+
+    # What actually went out, per rung. This is the consolidation rule's own
+    # evidence: one row per account per rung, not one per invoice.
+    log = (
+        await session.execute(
+            select(
+                ArContactLog.stage_level,
+                ArContactLog.channels,
+                ArContactLog.email_subject,
+                ArContactLog.created_at,
+            )
+            .where(ArContactLog.account_id == account_id)
+            .order_by(ArContactLog.created_at.desc())
+            .limit(10)
+        )
+    ).mappings().all()
+
+    return {
+        "id": str(account.id),
+        "name": account.display_name or account.account_ref,
+        "ref": account.account_ref,
+        "contacts": contacts,
+        "cases": [
+            {
+                "case_id": str(c["id"]),
+                "ref": c["subject_ref"],
+                "outstanding": _money(
+                    max(0, int(c["amount_at_risk"]) - int(c["amount_recovered"] or 0))
+                ),
+                "due": _ist(c["due_at"]).strftime("%d %b") if c["due_at"] else "—",
+                "rung": int(c["escalation_level"] or 0),
+            }
+            for c in cases
+        ],
+        "log": [
+            {
+                "rung": int(r["stage_level"]),
+                "channels": ", ".join(r["channels"] or []),
+                "subject": r["email_subject"],
+                "when": (
+                    _ist(r["created_at"]).strftime("%d %b, %H:%M")
+                    if r["created_at"] else "—"
+                ),
+            }
+            for r in log
+        ],
+    }
+
+
+async def message_preview(session: AsyncSession) -> dict[str, Any]:
+    """
+    What the customer actually receives, rendered by the real renderers.
+
+    The engine sends SMS and email on the merchant's behalf and the merchant
+    had no way to read a single one of them. `render_fallback` and
+    `compose_stage_message` have always existed; nothing showed their output,
+    so the exact words going out under someone else's business name were
+    visible only by reading Python. An unnamed payment link reads as phishing,
+    and so does a message nobody has approved.
+
+    Rendered live through the SAME functions the sender calls, never a copy —
+    a preview that could drift from what ships would be worse than none. The
+    values are illustrative and labelled as such; the WORDS are exact.
+    """
+    from datetime import timedelta
+
+    from src.config import get_settings
+    from src.messaging.templates import _TEMPLATES, render_fallback
+    from src.receivables.ladder import INVOICE_LADDER
+    from src.receivables.statement import compose_stage_message
+
+    settings = get_settings()
+    merchant = settings.merchant_name or "your business"
+    link = (settings.public_base_url or "https://example.in").rstrip("/") + "/recover/…"
+
+    # One sample per failure class the payment rail can send. Sorted so the
+    # page is stable between loads rather than dict-ordered.
+    nudges = []
+    for failure_class in sorted(_TEMPLATES):
+        try:
+            body = render_fallback(
+                failure_class=failure_class,
+                amount_display="2,499",
+                next_step=f"Pay securely here: {link}",
+                customer_name=None,
+            )
+        except Exception:  # noqa: BLE001 — a broken template must not blank the page
+            logger.exception("Nudge preview failed for %s", failure_class)
+            continue
+        nudges.append(
+            {
+                "failure_class": failure_class.replace("_", " "),
+                "body": body,
+                # SMS is billed and truncated per 160-character segment, so the
+                # length is a cost and a legibility fact, not trivia.
+                "chars": len(body),
+                "over": len(body) > 160,
+            }
+        )
+
+    # One sample per ladder tone, through the real statement composer.
+    now = datetime.now(UTC)
+    sample_cases = [
+        {
+            "subject_ref": "INV-2041",
+            "due_at": now - timedelta(days=18),
+            "amount_at_risk": 4_50_000,
+            "amount_recovered": 0,
+            "pay_url": link,
+        },
+        {
+            "subject_ref": "INV-2088",
+            "due_at": now - timedelta(days=6),
+            "amount_at_risk": 1_20_000,
+            "amount_recovered": 40_000,
+            "pay_url": link,
+        },
+    ]
+    statements = []
+    for stage in INVOICE_LADDER:
+        try:
+            composed = compose_stage_message(
+                sample_cases,
+                tone=stage.tone,
+                merchant_name=merchant,
+                statement_link=link,
+                now=now,
+            )
+        except Exception:  # noqa: BLE001 — same reason as above
+            logger.exception("Statement preview failed for tone %s", stage.tone)
+            continue
+        statements.append(
+            {
+                "level": stage.level,
+                "tone": stage.tone,
+                "subject": composed["subject"],
+                "sms": composed["sms"],
+                "chars": len(composed["sms"]),
+                "over": len(composed["sms"]) > 160,
+                "email_text": composed["email_text"],
+            }
+        )
+
+    return {
+        "merchant": merchant,
+        "nudges": nudges,
+        "statements": statements,
+        "has_data": bool(nudges or statements),
+    }
+
+
 async def operations_panel(session: AsyncSession) -> dict[str, Any]:
     """
     Is the machinery running — the 2am question, not the boardroom one.
@@ -879,7 +1233,37 @@ async def operations_panel(session: AsyncSession) -> dict[str, Any]:
         )
     ).all()
 
+    # Is the audit trail actually intact? The product offers a hash-chained,
+    # tamper-evident record, and until now the only way to check that claim was
+    # a CLI script nobody deployed runs. An "auditable" trail whose verification
+    # lives on someone's laptop is an assertion, not evidence.
+    #
+    # Recomputed from the raw rows on every ops-page load. That is a full scan,
+    # and it is the honest cost of the claim — the page is operator-only and
+    # loaded by hand, not by a poll.
+    # ponytail: full recompute per view; cache by max(case_events.id) if the
+    # trail outgrows a page load.
+    try:
+        from src.audit_chain import AuditChainNotKeyedError, verify_chain
+
+        verification = await verify_chain(session)
+        chain = {
+            "keyed": True,
+            "intact": verification.intact,
+            "events_checked": verification.events_checked,
+            "detail": verification.detail,
+            "first_broken_id": verification.first_broken_id,
+        }
+    except AuditChainNotKeyedError:
+        # Distinct from "broken": nothing is wrong with the rows, the key is
+        # simply absent. Production refuses to boot without it
+        # (Settings.require_production_integrity), so this is a development
+        # state, and saying "unverifiable" beats implying tampering.
+        chain = {"keyed": False, "intact": False, "events_checked": 0,
+                 "detail": "AUDIT_CHAIN_SECRET is not set", "first_broken_id": None}
+
     return {
+        "chain": chain,
         "scheduled": scheduled,
         "pending": pending,
         "stale": stale,

@@ -50,6 +50,12 @@ class FailureClass(str, Enum):
     """Daily/transaction limit exceeded on this card. Suggest alternate
     payment method."""
 
+    RISK_CHECK_FAILED = "risk_check_failed"
+    """A risk screen stopped this payment on THIS instrument. Razorpay
+    documents it retryable and advises the customer retry "with a different
+    card or method" — a rail switch, not another attempt on the same one.
+    Switch-only: see `is_switch_only`."""
+
     # ── Non-retryable (abandon) ──────────────────────────────────────
     INVALID_CARD = "invalid_card"
     """Card number, expiry, or CVV is incorrect. Cannot retry same details."""
@@ -82,6 +88,11 @@ class FailureClass(str, Enum):
         """Whether this failure class is a hard decline (never retry)."""
         return self in _HARD_DECLINE_CLASSES
 
+    @property
+    def is_switch_only(self) -> bool:
+        """Retryable, but only on a rail other than the one that just failed."""
+        return self in _SWITCH_ONLY_CLASSES
+
 
 # Pre-computed sets for O(1) membership checks
 _RETRYABLE_CLASSES = {
@@ -93,6 +104,16 @@ _RETRYABLE_CLASSES = {
     FailureClass.THREEDS_DROPOFF,
     FailureClass.ISSUER_DECLINE,
     FailureClass.CARD_LIMIT_EXCEEDED,
+    FailureClass.RISK_CHECK_FAILED,
+}
+
+# Retryable, but never on the instrument that just failed. Re-presenting the
+# same card into the same risk screen is a guaranteed decline that still costs
+# an attempt slot and a contact — so the guardrail rejects retry_now/retry_at
+# for these (src/guardrail/rules.py:check_switch_only_class), leaving
+# switch_rail and nudge_customer as the only ways to spend one.
+_SWITCH_ONLY_CLASSES = {
+    FailureClass.RISK_CHECK_FAILED,
 }
 
 _HARD_DECLINE_CLASSES = {

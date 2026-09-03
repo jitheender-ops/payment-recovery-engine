@@ -43,6 +43,37 @@ class GuardrailRules:
             return False, f"Hard decline blocklist: {fc.value} is non-retryable"
         return True, None
 
+    def check_switch_only_class(
+        self, failure_class_str: str, action_type: str
+    ) -> tuple[bool, str | None]:
+        """
+        Some failures are recoverable, but never on the instrument that just
+        failed. `risk_check_failed` is the first: Razorpay documents it
+        retryable and advises the customer retry "with a different card or
+        method" — re-presenting the same card walks straight back into the
+        same risk screen, and that guaranteed decline still spends an attempt
+        slot out of the max of three.
+
+        So retry_now and retry_at are refused for these classes; switch_rail
+        and nudge_customer are the only ways to spend an attempt on one.
+        Deliberately NOT applied in validate_self_serve: a customer choosing
+        their own instrument on the recovery page is doing exactly what the
+        advice says, and the gateway page is where they pick it.
+        """
+        if action_type not in ("retry_now", "retry_at"):
+            return True, None
+        try:
+            fc = FailureClass(failure_class_str)
+        except ValueError:
+            return True, None  # Unknown class — let other rules decide
+
+        if fc.is_switch_only:
+            return False, (
+                f"Switch-only class: {fc.value} must not be retried on the "
+                f"same rail — use switch_rail or nudge_customer"
+            )
+        return True, None
+
     def check_max_retries_per_payment(
         self, payment_id: str, current_attempts: int
     ) -> tuple[bool, str | None]:
@@ -220,16 +251,28 @@ class GuardrailRules:
         action_type: str,
         last_notification_sent_at: datetime | None,
         current_time: datetime,
+        is_mandate_debit: bool = False,
     ) -> tuple[bool, str | None]:
         """
         RBI Digital Payments E-mandate Framework, 2026: a pre-transaction
         notification must reach the customer at least 24 hours before a
         mandate is charged. Applies across cards, UPI and prepaid instruments.
 
-        Only relevant here for risk_type=mandate_failure and action=retry_now
-        — that is the one action that re-presents the mandate for collection.
+        Two things reach this rule, and they are the two things in the engine
+        that move money against a standing instruction:
+
+        1. risk_type=mandate_failure with action=retry_now — re-presenting a
+           mandate the merchant told us about.
+        2. `is_mandate_debit` — the scheduler debiting a UPI Autopay mandate a
+           customer authorised against their own promise to pay. This one can
+           sit on ANY risk type (a promise is made on a payment-failure case as
+           readily as on an invoice), which is why it is a flag and not another
+           risk_type comparison. Adding it here rather than writing a second
+           rule is deliberate: two compliance checks for one regulation drift
+           apart, and the one that drifts is discovered by a regulator.
+
         Every other action (nudge_customer, retry_at, switch_rail, abandon)
-        does not move money against the mandate and is unaffected; a
+        does not move money against a mandate and is unaffected; a
         nudge_customer IS how the notification gets sent in the first place,
         so this rule cannot block the notification itself, only a collection
         attempt that skipped it.
@@ -238,9 +281,12 @@ class GuardrailRules:
         must not authorize unlimited re-presentations forever. A notification
         older than mandate_predebit_notification_valid_hours (7 days by
         default) is treated as no notification — it must be re-sent before
-        the next retry_now is allowed.
+        the next debit is allowed.
         """
-        if risk_type != "mandate_failure" or action_type != "retry_now":
+        presents_a_mandate = is_mandate_debit or (
+            risk_type == "mandate_failure" and action_type == "retry_now"
+        )
+        if not presents_a_mandate:
             return True, None
 
         if last_notification_sent_at is None:

@@ -37,6 +37,7 @@ from __future__ import annotations
 import hmac
 import logging
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -945,6 +946,155 @@ async def console_batch_run(request: Request) -> Any:
     )
 
 
+@router.post("/console/dispute/resolve", response_class=HTMLResponse)
+async def console_resolve_dispute(request: Request) -> Any:
+    """
+    A human's verdict on a disputed invoice, from the console.
+
+    The console has rendered "Chasing is frozen on these until you uphold or
+    reject the dispute" while offering no way to do either — the only handler
+    was POST /ar/cases/dispute, an HMAC-signed JSON endpoint a merchant on a
+    laptop cannot reach. A worklist naming an action it does not offer is worse
+    than not showing the row: it tells someone their money is stuck and hands
+    them nothing.
+
+    Session-gated like every other console page (_render_console runs the same
+    gate), POST because it closes cases and restarts chases. `resolve_dispute`
+    is idempotent, so a double-submit is harmless.
+    """
+    if not _password_configured():
+        return _login_page(request)
+    if not _session_valid(request):
+        return RedirectResponse("/console/login", status_code=303)
+
+    form = await request.form()
+    dispute_id = str(form.get("dispute_id") or "")
+    outcome = str(form.get("outcome") or "")
+
+    # Both are user input on a money path: an unknown outcome string would
+    # otherwise reach resolve_dispute, and "upheld" closes a case.
+    if outcome not in ("upheld", "rejected") or not dispute_id:
+        logger.warning(
+            "Dispute resolve refused: id=%r outcome=%r", dispute_id, outcome
+        )
+        return RedirectResponse("/console/live", status_code=303)
+
+    try:
+        key = uuid.UUID(dispute_id)
+    except ValueError:
+        logger.warning("Dispute resolve: malformed id %r", dispute_id)
+        return RedirectResponse("/console/live", status_code=303)
+
+    from src.receivables.disputes import resolve_dispute
+    from src.receivables.models import CaseDispute
+
+    # Module-level async_session_factory on purpose, not a local import: the
+    # console's tests patch it by module attribute, and a function-local import
+    # would silently bind the real one and write to the wrong database.
+
+    async with async_session_factory() as session:
+        dispute = await session.get(CaseDispute, key)
+        if dispute is not None:
+            await resolve_dispute(session, dispute, outcome=outcome)
+            await session.commit()
+            logger.info("Dispute %s resolved from console: %s", key, outcome)
+
+    # Redirect rather than render: a refresh on a rendered POST re-submits the
+    # verdict, and while resolve_dispute is idempotent, the merchant should not
+    # be relying on that to avoid re-deciding a case by pressing F5.
+    return RedirectResponse("/console/live", status_code=303)
+
+
+@router.post("/console/task/done", response_class=HTMLResponse)
+async def console_task_done(request: Request) -> Any:
+    """
+    Close a human call task from the console.
+
+    The ladder has shown `open_call_tasks` as a bare COUNT since it was built:
+    work exists, somewhere, for someone. The list and this button are the other
+    half. `complete_task` is idempotent, so a double-submit is harmless.
+    """
+    if not _password_configured():
+        return _login_page(request)
+    if not _session_valid(request):
+        return RedirectResponse("/console/login", status_code=303)
+
+    form = await request.form()
+    raw = str(form.get("task_id") or "")
+    try:
+        task_id = uuid.UUID(raw)
+    except ValueError:
+        logger.warning("Task done: malformed id %r", raw)
+        return RedirectResponse("/console/live", status_code=303)
+
+    from src.receivables.models import AccountTask
+    from src.receivables.tasks import complete_task
+
+    async with async_session_factory() as session:
+        task = await session.get(AccountTask, task_id)
+        if task is not None:
+            await complete_task(session, task)
+            await session.commit()
+            logger.info("Call task %s closed from console", task_id)
+
+    return RedirectResponse("/console/live", status_code=303)
+
+
+@router.post("/console/case/paid", response_class=HTMLResponse)
+async def console_case_paid(request: Request) -> Any:
+    """
+    Record money that arrived outside the payment rail, from the console.
+
+    NEFT, a cheque, cash, a UPI transfer taken by hand: none of it touches
+    Razorpay, so no webhook can ever tell us. The console showed an outstanding
+    balance it had no way to let anyone close, and the case went on spending
+    attempts chasing money already in the bank. `record_external_payment` has
+    existed the whole time behind an HMAC-signed endpoint a person on a laptop
+    cannot reach.
+
+    Rupees in the form, paise in the call: the field a human types into is
+    labelled in rupees, and the conversion happens once, here, rather than
+    asking anyone to think in paise on a money form.
+    """
+    if not _password_configured():
+        return _login_page(request)
+    if not _session_valid(request):
+        return RedirectResponse("/console/login", status_code=303)
+
+    form = await request.form()
+    case_id = str(form.get("case_id") or "")
+    paid_ref = str(form.get("paid_ref") or "").strip()
+    method = str(form.get("method") or "neft")
+    back = f"/console/case/{case_id}" if case_id else "/console/live"
+
+    if method not in ("neft", "rtgs", "imps", "cheque", "cash", "upi_manual"):
+        logger.warning("External payment: unknown method %r", method)
+        return RedirectResponse(back, status_code=303)
+    try:
+        amount_paise = int(str(form.get("amount_inr") or "0")) * 100
+    except ValueError:
+        amount_paise = 0
+    if amount_paise <= 0 or not paid_ref:
+        logger.warning(
+            "External payment refused: amount=%s ref=%r", amount_paise, paid_ref
+        )
+        return RedirectResponse(back, status_code=303)
+
+    from src.receivables.external import record_external_payment
+
+    async with async_session_factory() as session:
+        outcome = await record_external_payment(
+            session,
+            case_id=case_id,
+            amount_paise=amount_paise,
+            paid_ref=paid_ref[:255],
+            method=method,
+        )
+        await session.commit()
+    logger.info("External payment on case %s: %s", case_id, outcome)
+    return RedirectResponse(back, status_code=303)
+
+
 @router.get("/console/case/{case_id}", response_class=HTMLResponse)
 async def console_case(request: Request, case_id: str) -> Any:
     """One case as the whole decision chain, over its audit trail."""
@@ -953,6 +1103,112 @@ async def console_case(request: Request, case_id: str) -> Any:
         return {"case": await console_data.case_detail(session, case_id)}
 
     return await _render_console(request, "console_case.html", build)
+
+
+@router.get("/console/accounts", response_class=HTMLResponse)
+async def console_accounts(request: Request) -> Any:
+    """
+    The buyer directory. The console had no account view at all.
+
+    B2B collection runs on the ACCOUNT, and the only per-account surface in the
+    product was the customer-facing /statement/<token> — so a merchant could
+    not answer "which buyers owe us most" or "do we have a finance manager on
+    file for this one", and the second question decides whether the ladder can
+    escalate to anybody.
+    """
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"accounts": await console_data.accounts_panel(session)}
+
+    return await _render_console(request, "console_accounts.html", build)
+
+
+@router.get("/console/account/{account_id}", response_class=HTMLResponse)
+async def console_account(request: Request, account_id: str) -> Any:
+    """One buyer: contacts by role, what they owe, what we last sent."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        try:
+            key = uuid.UUID(account_id)
+        except ValueError:
+            return {"account": None}
+        return {"account": await console_data.account_detail(session, key)}
+
+    return await _render_console(request, "console_account.html", build)
+
+
+@router.post("/console/account/contact", response_class=HTMLResponse)
+async def console_add_contact(request: Request) -> Any:
+    """
+    Record a person at the buyer's desk.
+
+    `add_contact` has existed since the receivables module landed, reachable
+    from nothing: there was no directory, no form, and no way to correct a
+    contact who had left. An account with no contact for a role is an account
+    the ladder cannot escalate to, and nothing said so.
+    """
+    if not _password_configured():
+        return _login_page(request)
+    if not _session_valid(request):
+        return RedirectResponse("/console/login", status_code=303)
+
+    form = await request.form()
+    raw_account = str(form.get("account_id") or "")
+    role = str(form.get("role") or "")
+    email = str(form.get("email") or "").strip()
+    back = f"/console/account/{raw_account}" if raw_account else "/console/accounts"
+
+    # The role vocabulary is the ladder's, not free text: a rung addresses
+    # roles by name, so an unknown role is a contact no rung will ever reach.
+    if role not in ("ap_clerk", "finance_manager", "escalation"):
+        logger.warning("Add contact: unknown role %r", role)
+        return RedirectResponse(back, status_code=303)
+    if "@" not in email or len(email) > 255:
+        logger.warning("Add contact: unusable email")
+        return RedirectResponse(back, status_code=303)
+    try:
+        account_id = uuid.UUID(raw_account)
+    except ValueError:
+        logger.warning("Add contact: malformed account id %r", raw_account)
+        return RedirectResponse("/console/accounts", status_code=303)
+
+    from src.receivables.accounts import add_contact
+    from src.receivables.models import ArAccount
+
+    async with async_session_factory() as session:
+        if await session.get(ArAccount, account_id) is None:
+            logger.warning("Add contact: no such account %s", account_id)
+            return RedirectResponse("/console/accounts", status_code=303)
+        await add_contact(
+            session,
+            account_id=account_id,
+            role=role,
+            email=email,
+            name=(str(form.get("name") or "").strip() or None),
+            phone=(str(form.get("phone") or "").strip() or None),
+        )
+        await session.commit()
+        logger.info("Contact added to account %s as %s", account_id, role)
+
+    return RedirectResponse(back, status_code=303)
+
+
+@router.get("/console/messages", response_class=HTMLResponse)
+async def console_messages(request: Request) -> Any:
+    """
+    Every message the engine sends, rendered by the sender's own functions.
+
+    The engine writes SMS and email that go out under the merchant's name, and
+    the merchant had no way to read one. Rendering through the real
+    `render_fallback` and `compose_stage_message` rather than a copy is the
+    whole point: a preview that could drift from what ships would be worse
+    than not having one.
+    """
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"messages": await console_data.message_preview(session)}
+
+    return await _render_console(request, "console_messages.html", build)
 
 
 @router.get("/console/ops", response_class=HTMLResponse)
