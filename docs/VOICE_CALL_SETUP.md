@@ -118,3 +118,7 @@ Call your own phone. Verify, in order:
   served at `/plivo/audio/...` only while the call is live; hangup deletes
   the directory (tested).
 - MAX_TURNS (12) and the 3-abstain hangup are the anti-trap rails (tested).
+- Launching uvicorn by hand (not via `./run.sh`)? Export
+  `PYTHONUNBUFFERED=1` first: without it the scheduler's ticks and every
+  INFO line sit in the pipe buffer, and a healthy engine looks frozen —
+  the heartbeat in the DB keeps ticking while the log says nothing.

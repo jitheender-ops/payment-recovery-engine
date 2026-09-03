@@ -158,9 +158,47 @@ elif $DEMO; then
   DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD:-demo-console-password}"
   APP_PORT="${APP_PORT:-8000}"
   PUBLIC_BASE_URL="http://127.0.0.1:$APP_PORT"
+  # Voice, on in the demo: the whole point of --demo is "every capability",
+  # and the voice surfaces (POST /voice/turn, /voice/queue/*, the bridge
+  # callbacks) fail closed without a secret — so a demo boot without one
+  # advertises a feature that answers 401. Same self-authenticating
+  # discipline as the secrets above: real HMAC, worth nothing elsewhere.
+  # SARVAM_API_KEY passes through from .env when present so the voice demo
+  # page can transcribe for real; without it the demo page says so.
+  VOICE_WEBHOOK_SECRET="${VOICE_WEBHOOK_SECRET:-demo_voice_secret_local_only}"
+  VOICE_CHASER_ENABLED="${VOICE_CHASER_ENABLED:-true}"
   set +a
   ok "demo mode — SQLite at .demo.sqlite3, gateway faked, nothing leaves this machine"
   warn "every 'recovered' rupee this run reports is fictional"
+
+  # ── Stale demo database ─────────────────────────────────────────────
+  # Development mode creates missing TABLES and silently ignores missing
+  # COLUMNS, so a demo database seeded before a schema change boots "fine"
+  # and then 500s on the first page that selects the new column — with the
+  # failure buried in a traceback (the .env-precedence rule above is why
+  # this hit us: create_all cannot upgrade, only create). The demo DB is
+  # disposable by design (the banner says how to re-seed), so detect the
+  # gap loudly and re-seed automatically rather than shipping a broken demo.
+  if [[ -f .demo.sqlite3 && -f .demo.seeded ]]; then
+    STALE="$("$PY" - <<'PYCHECK'
+import sys
+try:
+    import sqlite3
+    conn = sqlite3.connect(".demo.sqlite3")
+    have = {r[1] for r in conn.execute("PRAGMA table_info(recovery_cases)")}
+    conn.close()
+    want = {"credited_refs", "amount_at_risk", "recovered_ref"}
+    print("stale" if not want.issubset(have) else "fresh")
+except Exception:
+    print("stale")  # unreadable == disposable, same call
+PYCHECK
+)"
+    if [[ "$STALE" == "stale" ]]; then
+      warn "demo database predates the current schema — re-seeding from scratch"
+      warn "  (the old demo book is fictional data; nothing of value is lost)"
+      rm -f .demo.sqlite3 .demo.seeded
+    fi
+  fi
 else
 if [[ ! -f .env ]]; then
   cp .env.example .env

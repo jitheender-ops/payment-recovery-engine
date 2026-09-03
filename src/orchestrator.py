@@ -1709,6 +1709,14 @@ class PaymentRecoveryOrchestrator:
         # keeps the immediate path.
         if policy.first_action_hours <= 0 and case.account_id is None:
             await self.chase_case(case, session, actor="chaser")
+        elif policy.first_action_hours <= 0:
+            # Said out loud because a first-time integrator otherwise reads
+            # "HTTP 200, no chase in the log" as the event being dropped.
+            logger.info(
+                "Case %s (%s) is account-linked — first chase deferred to the "
+                "account consolidation sweep (next tick)",
+                case.id, case.risk_type,
+            )
 
     async def _execute_and_record(
         self,

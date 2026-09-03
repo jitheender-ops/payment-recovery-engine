@@ -258,6 +258,15 @@ def main() -> None:
     p.add_argument("--host", type=str, default="http://localhost:8000")
     p.add_argument("--secret", type=str, default=None,
                    help="RISK_WEBHOOK_SECRET override; defaults to the configured one.")
+    # Phase 2 (the captures) signs Razorpay webhooks, a DIFFERENT surface with
+    # a DIFFERENT secret. Without this flag it reads the configured one from
+    # THIS process's environment — which, on a machine with a real .env, is
+    # not the demo/sandbox secret the server is actually verifying. That
+    # mismatch printed "HTTP 401" on every capture while phase 1 succeeded,
+    # so the flag and the failure hint below both exist.
+    p.add_argument("--webhook-secret", type=str, default=None,
+                   help="RAZORPAY_WEBHOOK_SECRET override for the capture "
+                        "phase; defaults to the configured one.")
     p.add_argument("--capture-rate", type=float, default=0.35,
                    help="Share of open case links that get paid.")
     p.add_argument("--no-captures", action="store_true", help="Phase 1 only.")
@@ -352,12 +361,17 @@ def main() -> None:
     n_att = int(len(candidates) * args.capture_rate)
     print(f"\nPhase 2 — {n_att} captures on chase links\n")
 
-    webhook_secret = reveal(get_settings().razorpay_webhook_secret)
+    # The flag beats this process's configured secret: the server at --host
+    # may be a demo/sandbox run whose webhook secret is NOT the one in this
+    # shell's .env (the exact mismatch that made every capture 401 while
+    # phase 1 signed fine — two surfaces, two secrets, one env file).
+    webhook_secret = args.webhook_secret or reveal(get_settings().razorpay_webhook_secret)
     if not webhook_secret:
         print("  RAZORPAY_WEBHOOK_SECRET is not set — skipping captures.")
         summarise()
         return
 
+    rejected = 0
     with httpx.Client(timeout=args.timeout) as client:
         for key, amount, risk_type in candidates[:n_att]:
             body = json.dumps(captured_payload(amount, idempotency_key=key)).encode()
@@ -369,10 +383,20 @@ def main() -> None:
                     "X-Razorpay-Signature": sign(body, webhook_secret),
                 },
             )
+            if resp.status_code == 401:
+                rejected += 1
             print(f"  attributed   {risk_type:<24} {key:<44} "
                   f"{'ok' if resp.status_code == 200 else f'HTTP {resp.status_code}'}")
             time.sleep(0.15)
 
+    if rejected:
+        # Named after the likeliest cause, not the generic one: the secret this
+        # script used is the one in ITS environment, which on a machine with a
+        # real .env differs from the demo/sandbox secret the server verifies.
+        print(f"\n  {rejected} capture(s) were 401-refused: the RAZORPAY_WEBHOOK_SECRET this"
+              f"\n  script signed with does not match the server at {args.host}."
+              f"\n  For a demo/sandbox server, pass its secret explicitly:"
+              f"\n      --webhook-secret demo_webhook_secret_local_only")
     time.sleep(3)
     summarise()
 

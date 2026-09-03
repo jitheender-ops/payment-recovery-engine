@@ -16,12 +16,20 @@ exist in the merchant's own systems. The merchant POSTs them here:
       "amount_paise": 249900,
       "currency": "INR",
       "customer_id": "cust_1",                   // optional
-      "customer_email": "a@b.in",                // optional
-      "customer_contact": "+919812345678",       // optional
+      "customer_email": "a@b.in",               // optional
+      "customer_contact": "+919812345678",       // optional, but see the note
       "occurred_at": "2026-08-27T10:00:00Z",     // optional, defaults to now
       "due_at": null,                            // invoice due date etc.
       "meta": {"cart_items": "2 books"}          // optional, untrusted
     }
+
+`customer_contact` vs `customer_id`: they are NOT interchangeable. The
+voice chaser (VOICE_CHASER_ENABLED) queues a follow-up call only when the
+risk event carried a `customer_contact` — the queue row is a phone number,
+and `customer_id` (an email, an ERP id, anything) is not assumed to be
+dialable. An event pushed with only `customer_id` chases by SMS/page and
+silently never gets a call; if calls are wanted, push the phone in
+`customer_contact`.
 
 Same discipline as the Razorpay webhook: verify HMAC → dedup → store in the
 append-only risk_events table → COMMIT → process in a background task. A
