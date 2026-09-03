@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 # background task or an eval prefetch) is waiting, and a rate limit usually
 # clears in single-digit seconds.
 _TRANSIENT_RETRY_BACKOFF_SECONDS = 1.0
+# A 429's Retry-After names the real window; honour it when present, clamped:
+# a provider asking to wait minutes would stall the webhook far past sane,
+# so past this ceiling we take the XGBoost fallback and let the next decision
+# retry the provider on its own.
+_MAX_RATE_LIMIT_WAIT_SECONDS = 20.0
+
+
+def _rate_limit_wait(e: BaseException) -> float | None:
+    """Seconds the provider's Retry-After asks for, or None if not a 429/none."""
+    if getattr(e, "status_code", None) != 429 and getattr(e, "code", None) != 429:
+        return None
+    import re
+
+    m = re.search(r"try again in ([\d.]+)s", str(e), re.IGNORECASE)
+    if not m:
+        m = re.search(r"retry.?after[=:] ?([\d.]+)", str(e), re.IGNORECASE)
+    if not m:
+        return _TRANSIENT_RETRY_BACKOFF_SECONDS
+    return min(float(m.group(1)), _MAX_RATE_LIMIT_WAIT_SECONDS)
 
 
 class PolicyAgent:
@@ -91,10 +110,21 @@ class PolicyAgent:
                 status = getattr(first_error, "status_code", None)
                 if status in (401, 402, 403, 404):
                     raise
-                logger.warning(
-                    "Transient LLM failure (%s) — retrying once", str(first_error)[:120]
-                )
-                await asyncio.sleep(_TRANSIENT_RETRY_BACKOFF_SECONDS)
+                # A rate limit names its own window — honour it rather than
+                # guessing 1s and hitting the same wall twice.
+                wait = _rate_limit_wait(first_error)
+                if wait is not None:
+                    logger.warning(
+                        "LLM rate-limited — waiting %.1fs per the provider's "
+                        "own window, then retrying once", wait,
+                    )
+                else:
+                    wait = _TRANSIENT_RETRY_BACKOFF_SECONDS
+                    logger.warning(
+                        "Transient LLM failure (%s) — retrying once",
+                        str(first_error)[:120],
+                    )
+                await asyncio.sleep(wait)
                 raw_response = await self._call_llm(user_prompt)
 
             action = self._parse_response(raw_response)
