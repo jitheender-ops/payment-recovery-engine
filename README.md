@@ -54,6 +54,11 @@ Run: .venv/bin/python -m eval.runner --scenarios 5000 --seeds 5 --llm-concurrenc
 OpenAI-compatible `LLM_BASE_URL`; see `eval/modal_llm_server.py` for a
 self-hosted one sized for full-scale runs).
 
+Every number here is drawn from the **`legacy` failure mix** — the failure
+population as India produced it before authorization-time models started
+suppressing the easy half. `--mix vulcan` runs the same harness against a
+harder, hypothesised population; see [Run the Eval Harness](#-run-the-eval-harness).
+
 | Policy | Recovery Rate | Retry Cost (avg) | False-Retry % | ₹ per ₹1Cr | Net ₹ per ₹1Cr |
 |--------|-------------|-------------------|---------------|------------|----------------|
 | No Retry | 0.0% | 0.00 | 0.0% | ₹0 | ₹0 |
@@ -659,6 +664,14 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 # Call volume is scenarios x 3 attempts x seeds: 300x3 = 2,700, 5000x5 = 75,000.
 .venv/bin/python -m eval.runner --scenarios 300 --seeds 3
 
+# Same harness, a harder failure population. Razorpay's Vulcan (Aug 2026)
+# is an authorization-time model: it sits BEFORE the transaction, we sit
+# after it fails, so what survives it skews away from self-clearing
+# transients toward blockers only a recovery engine can move. --mix vulcan
+# encodes that shift; --mix legacy (the default) keeps every historical
+# result reproducible without flag archaeology.
+.venv/bin/python -m eval.runner --skip-llm --mix vulcan
+
 # Train the XGBoost baseline (run.sh does this automatically if no model exists)
 .venv/bin/python scripts/train_xgboost.py --n-samples 10000
 
@@ -670,9 +683,23 @@ with the same secret you set as `RAZORPAY_WEBHOOK_SECRET`.
 .venv/bin/python scripts/simulate_webhooks.py --count 20
 
 # Drive the four chasers (cart, subscription, invoice, mandate) with
-# synthetic merchant risk traffic → /risks, then capture on the chase links
-.venv/bin/python scripts/run_risk_batch.py --count 24
+# synthetic merchant risk traffic → /risks, then capture on the chase links.
+# --webhook-secret signs the capture phase for a server whose secret is not
+# the one in THIS shell's .env (a demo/sandbox run, typically).
+.venv/bin/python scripts/run_risk_batch.py --count 24 \
+  --webhook-secret demo_webhook_secret_local_only
 ```
+
+**Read the per-class table before the blended one.** A mix change moves every
+blended number for composition reasons alone (Simpson's paradox: a harder
+population drags every policy down), so the headline table cannot tell
+"the policy got worse" from "the population got harder". `Recovery by failure
+class` — in both `eval_results.md` and `eval_results.json` — can, and it is
+where a policy's edge actually lives: an LLM agent's advantage should
+concentrate in the judgment-call classes (`insufficient_funds`,
+`issuer_decline`), not in `network_error`, where Fixed 3-Retry is already
+right. Every result file now stamps the `mix` it came from, so two runs on
+disk are never ambiguous about which population they describe.
 
 ## 📁 Project Structure
 
@@ -759,7 +786,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**814 tests across 57 files, 80% statement coverage over `src/`.** The money
+**833 tests across 57 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |
@@ -822,6 +849,68 @@ nothing at all once anything has already read settings.
 
 The engine's first cut could decide; it could not always be trusted about what
 it had decided. The current wave, all CI-verified.
+
+### The eval's population was an unstated assumption, aging
+
+The harness drew every scenario from one fixed `FAILURE_WEIGHTS` dict that
+encoded the *pre-Vulcan* world, with 0.42 of its mass on the four same-rail
+transients a retry-anything policy recovers by accident. That was never wrong;
+it just stopped describing the failures that reach an engine sitting behind an
+authorization-time model. `MIXES` now names the population — `legacy`
+(byte-for-byte the old weights, still the default) and `vulcan` (the
+hypothesised post-Vulcan conditional mix) — and `--mix` selects it.
+
+Two things fell out of doing it. `risk_check_failed` is in the taxonomy and the
+guardrail rejects its `retry_now`/`retry_at` in `check_switch_only_class`, but
+it was not in `FAILURE_WEIGHTS` at all — so the one failure class where a
+policy's *discipline* is the entire question had **zero representation in the
+harness**. It is emitted under `vulcan`. And because a mix change moves blended
+numbers for composition reasons alone, the runner now reports recovery per
+failure class per policy, which is the only way to tell a population shift from
+a policy regression. The vulcan weights are a hypothesis and say so in the code
+— `payment_failures` is already indexed on `failure_class`, so one `GROUP BY`
+against production data replaces the guess with a measurement.
+Full writeup: [docs/specs/2026-09-03-vulcan-eval-mix-reweighting.md](docs/specs/2026-09-03-vulcan-eval-mix-reweighting.md).
+
+### Twelve boundary mutants the suite could not kill
+
+The weekly mutation run (`mutation.yml`) reported survivors that were real gaps,
+not message-text noise: the consent-window boundary hour, the nudge cap at
+exactly the limit, an empty blackout window (`start == end`), expected value
+exactly equal to cost, a naive datetime that must be *assumed* UTC rather than
+refused, and `rules_checked` counting the schema check. Each is now pinned by a
+test named for the distinction the mutant erased. Four of them pin rejection
+strings **verbatim** — the `XX...XX` mutants proved nothing asserted the copy an
+operator actually reads, so a rule could refuse for the right reason and explain
+it with garbage. The reasons quote the true elapsed hours, the true rupees, the
+true hour and window, and the RBI notice the mandate rule is missing.
+
+### Three ways a healthy engine looked broken
+
+None of these were defects in the money path; all three cost real debugging time.
+
+- **A rate-limited LLM waited 1s and hit the same wall.** A 429 names its own
+  window in `Retry-After`; the agent now honours it, clamped to 20s, past which
+  it takes the XGBoost fallback rather than stalling a webhook for minutes.
+- **An account-linked case logged nothing on arrival.** Its first chase is
+  deferred to the consolidation sweep by design — one statement per buyer, not
+  four messages — but "HTTP 200, no chase in the log" reads as a dropped event
+  to a first-time integrator. It says so out loud now.
+- **A demo database seeded before a schema change booted fine and then 500'd.**
+  Development mode creates missing tables and silently ignores missing columns,
+  so the failure surfaced as a traceback on the first page selecting the new
+  column. `./run.sh --demo` now detects the gap and re-seeds; the demo book is
+  fictional, so nothing of value is lost. Voice is also on in `--demo` now — the
+  point of that flag is *every* capability, and the voice surfaces fail closed
+  without a secret, so a demo boot without one advertised a feature that
+  answered 401.
+
+Also documented rather than fixed, because the behaviour is correct: a `/risks`
+event carrying only `customer_id` never gets a voice call. The queue row is a
+phone number and `customer_id` (an email, an ERP id) is not assumed dialable —
+push the phone in `customer_contact` if calls are wanted. And `uvicorn` launched
+by hand without `PYTHONUNBUFFERED=1` buffers every INFO line, so a healthy
+engine's log says nothing while its heartbeat keeps ticking in the DB.
 
 ### Promise collection, and the defects found building it
 
