@@ -29,6 +29,41 @@ FAILURE_WEIGHTS: dict[str, float] = {
     "hard_decline": 0.01,
 }
 
+# The named mixes the harness can run. A mix changes the POPULATION — which
+# failures reach the engine — never the physics (CONDITION_CLEARS decides
+# whether a given blocker clears, and by which lever).
+#
+# "vulcan" is a hypothesis, not a measurement: Razorpay Vulcan (Aug 2026) is
+# an authorization-time routing/risk model, so the failures that survive it
+# lose their self-clearing transients (the four same-rail transient classes
+# drop 0.42 -> 0.21 combined) and skew to blockers only a recovery engine
+# can move — nudge-path insufficient funds become the modal failure,
+# rail-switch cases roughly double, and risk_check_failed appears at all
+# (the legacy mix never emits it, so the switch-only guardrail path was
+# never exercised by the harness).
+#
+# ponytail: guessed mix, replace with observed payment_failures distribution
+# once deployed (payment_failures is indexed on failure_class).
+MIXES: dict[str, dict[str, float]] = {
+    "legacy": FAILURE_WEIGHTS,
+    "vulcan": {
+        "insufficient_funds": 0.26,
+        "3ds_dropoff": 0.18,
+        "issuer_decline": 0.13,
+        "card_limit_exceeded": 0.07,
+        "bank_downtime": 0.06,
+        "network_error": 0.06,
+        "upi_collect_timeout": 0.05,
+        "payment_timeout": 0.04,
+        "invalid_card": 0.05,
+        "expired_instrument": 0.03,
+        "fraud_block": 0.02,
+        "customer_cancelled": 0.02,
+        "hard_decline": 0.02,
+        "risk_check_failed": 0.01,
+    },
+}
+
 # Method distribution
 METHOD_WEIGHTS: dict[str, float] = {
     "upi": 0.55,
@@ -47,8 +82,15 @@ NON_RETRYABLE = {
 class ScenarioGenerator:
     """Generates synthetic payment failure scenarios for eval."""
 
-    def __init__(self, seed: int = 42) -> None:
+    def __init__(self, seed: int = 42, mix: str = "legacy") -> None:
+        if mix not in MIXES:
+            raise ValueError(f"unknown mix {mix!r}; known: {sorted(MIXES)}")
         self._rng = np.random.RandomState(seed)
+        self.mix = mix
+        # Copied, not referenced: FAILURE_WEIGHTS (the "legacy" entry) stays
+        # byte-for-byte what every pre-existing result was generated with,
+        # regardless of what anyone does to this instance.
+        self.failure_weights: dict[str, float] = dict(MIXES[mix])
 
     def generate(self, n: int = 5000) -> pd.DataFrame:
         """
@@ -67,8 +109,8 @@ class ScenarioGenerator:
         method_probs = np.array(list(METHOD_WEIGHTS.values()))
         method_probs /= method_probs.sum()
 
-        failures = list(FAILURE_WEIGHTS.keys())
-        failure_probs = np.array(list(FAILURE_WEIGHTS.values()))
+        failures = list(self.failure_weights.keys())
+        failure_probs = np.array(list(self.failure_weights.values()))
         failure_probs /= failure_probs.sum()
 
         records = []

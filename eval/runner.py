@@ -32,7 +32,7 @@ from eval.metrics import (
 from eval.policies.fixed_retry import FixedRetryPolicy
 from eval.policies.no_retry import NoRetryPolicy
 from eval.policies.xgboost_policy import XGBoostPolicy
-from eval.scenario_generator import ScenarioGenerator
+from eval.scenario_generator import MIXES, ScenarioGenerator
 from eval.simulator import BankResponseSimulator
 
 console = Console()
@@ -60,12 +60,20 @@ class EvalRunner:
         skip_llm: bool = False,
         retry_cost_inr: float = COST_PER_RETRY_INR,
         llm_concurrency: int = 3,
+        mix: str = "legacy",
     ) -> None:
+        if mix not in MIXES:
+            raise ValueError(f"unknown mix {mix!r}; known: {sorted(MIXES)}")
         self.n_scenarios = n_scenarios
         self.n_seeds = n_seeds
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.skip_llm = skip_llm
+        self.mix = mix
+        # Per-class outcomes, seed-aggregated: failure_class -> per-policy
+        # recovery/attempt stats. Filled by run_with_variance, rendered by
+        # print_per_class / _per_class_markdown.
+        self.per_class: dict[str, dict[str, dict[str, float | int]]] = {}
         self.paired: dict[str, Any] = {}
         self.economics: dict[str, Any] = {}
         self.retry_cost_inr = retry_cost_inr
@@ -136,6 +144,7 @@ class EvalRunner:
             results.append({
                 "scenario_id": scenario["scenario_id"],
                 "policy": policy_name,
+                "failure_class": scenario["failure_class"],
                 "attempts": attempts,
                 "recovered": recovered,
                 "is_retryable": scenario["is_retryable"],
@@ -174,7 +183,7 @@ class EvalRunner:
                 f"\n[bold blue]═══ Seed {seed} ({seed_idx + 1}/{self.n_seeds}) ═══[/bold blue]"
             )
 
-            gen = ScenarioGenerator(seed=seed)
+            gen = ScenarioGenerator(seed=seed, mix=self.mix)
             scenarios = gen.generate(self.n_scenarios)
             simulator = BankResponseSimulator(seed=seed)
 
@@ -245,9 +254,39 @@ class EvalRunner:
             aggregated.pop("LLM Agent", None)
             per_scenario.pop("LLM Agent", None)
 
+        self.per_class = self._per_class_breakdown(per_scenario)
         self.paired = self._paired_comparison(per_scenario)
         self.economics = self._break_even(aggregated)
         return aggregated
+
+    def _per_class_breakdown(
+        self, per_scenario: dict[str, list[pd.DataFrame]]
+    ) -> dict[str, dict[str, dict[str, float | int]]]:
+        """
+        Recovery and attempt stats per failure class, seed-aggregated.
+
+        The blended recovery number moves with the MIX for composition reasons
+        alone (a harder mix drags every policy down; Simpson's paradox), and the
+        headline table cannot distinguish "policy got worse" from "mix got
+        harder". This breakdown can — and it is where a policy's edge actually
+        lives: an LLM agent's advantage should be concentrated in the
+        judgment-call classes (insufficient_funds, issuer_decline), not in
+        network_error, where Fixed 3-Retry is already right.
+        """
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for policy_name, frames in per_scenario.items():
+            if not frames:
+                continue
+            df = pd.concat(frames, ignore_index=True)
+            for fc, group in df.groupby("failure_class"):
+                rec = group["recovered"].astype(float)
+                att = group["attempts"].astype(float)
+                out.setdefault(policy_name, {})[str(fc)] = {
+                    "n": int(len(group)),
+                    "recovery_rate_%": round(float(rec.mean() * 100), 1),
+                    "attempts_avg": round(float(att.mean()), 2),
+                }
+        return out
 
     def _break_even(self, aggregated: dict[str, dict[str, Any]]) -> dict[str, Any]:
         """
@@ -358,7 +397,9 @@ class EvalRunner:
         json_path = out / "eval_results.json"
         payload = {
             "retry_cost_inr": self.retry_cost_inr,
+            "mix": self.mix,
             "policies": _json_safe(results),
+            "per_failure_class": _json_safe(self.per_class),
             "paired_vs_baseline": _json_safe(self.paired),
             "economics_vs_baseline": _json_safe(self.economics),
         }
@@ -370,9 +411,13 @@ class EvalRunner:
         md_path = out / "eval_results.md"
         with open(md_path, "w") as f:
             f.write("# Eval Harness Results\n\n")
-            f.write(f"Scenarios: {self.n_scenarios} | Seeds: {self.n_seeds}\n\n")
+            f.write(
+                f"Scenarios: {self.n_scenarios} | Seeds: {self.n_seeds} "
+                f"| Failure mix: `{self.mix}`\n\n"
+            )
             f.write(md_table)
             f.write("\n\n*Variance (±σ) shown in JSON results.*\n")
+            f.write(self._per_class_markdown())
             f.write(self._paired_markdown())
             f.write(self._economics_markdown())
 
@@ -386,6 +431,65 @@ class EvalRunner:
         pd.DataFrame(rows).to_csv(csv_path, index=False)
 
         console.print(f"\n[green]Results saved to {out}/[/green]")
+
+    def _per_class_markdown(self) -> str:
+        """Render the per-failure-class breakdown as markdown."""
+        if not self.per_class:
+            return ""
+        classes = sorted({fc for pol in self.per_class.values() for fc in pol})
+        policies = list(self.per_class)
+        lines = [
+            "\n## Recovery by failure class\n",
+            "The blended number moves with the mix; this table is where a",
+            "policy's edge actually lives, and where a harder mix shows up first.\n",
+            "| Failure class | " + " | ".join(policies) + " | n |",
+            "|---" * (len(policies) + 2) + "|",
+        ]
+        for fc in classes:
+            cells = []
+            n: int = 0
+            for p in policies:
+                stats = self.per_class[p].get(fc)
+                if stats is None:
+                    cells.append("—")
+                else:
+                    cells.append(
+                        f"{stats['recovery_rate_%']:.1f}% "
+                        f"({stats['attempts_avg']:.2f} att)"
+                    )
+                    n = int(stats["n"])
+            lines.append(f"| {fc} | " + " | ".join(cells) + f" | {n:,} |")
+        return "\n".join(lines) + "\n"
+
+    def print_per_class(self) -> None:
+        """Print the per-failure-class breakdown."""
+        if not self.per_class:
+            return
+        table = Table(
+            title=f"Recovery by failure class (mix: {self.mix})",
+            title_style="bold cyan", show_lines=True,
+        )
+        table.add_column("Failure class", style="bold")
+        policies = list(self.per_class)
+        for p in policies:
+            table.add_column(f"{p} rec% (att)", justify="right")
+        table.add_column("n", justify="right")
+        classes = sorted({fc for pol in self.per_class.values() for fc in pol})
+        for fc in classes:
+            row = [fc]
+            n: int = 0
+            for p in policies:
+                stats = self.per_class[p].get(fc)
+                if stats is None:
+                    row.append("—")
+                else:
+                    row.append(
+                        f"{stats['recovery_rate_%']:.1f}% ({stats['attempts_avg']:.2f})"
+                    )
+                    n = int(stats["n"])
+            row.append(f"{n:,}")
+            table.add_row(*row)
+        console.print(table)
 
     def _paired_markdown(self) -> str:
         """Render the paired comparison as markdown."""
@@ -529,11 +633,18 @@ def main() -> None:
         help="Concurrent LLM prefetch calls. Default (3) fits Groq's free-tier "
         "TPM ceiling; raise it for a self-hosted or higher-limit endpoint.",
     )
+    parser.add_argument(
+        "--mix", choices=sorted(MIXES), default="legacy",
+        help="Failure-class distribution to draw from. 'legacy' is the "
+        "pre-Vulcan mix every existing result used; 'vulcan' is the "
+        "hypothesised post-Vulcan conditional mix (harder failure classes).",
+    )
     args = parser.parse_args()
 
     console.print("[bold cyan]🔄 Payment Failure Recovery — Eval Harness[/bold cyan]")
     console.print(
-        f"Scenarios: {args.scenarios} | Seeds: {args.seeds} | Skip LLM: {args.skip_llm}\n"
+        f"Scenarios: {args.scenarios} | Seeds: {args.seeds} | Skip LLM: {args.skip_llm} "
+        f"| Mix: {args.mix}\n"
     )
 
     runner = EvalRunner(
@@ -543,10 +654,12 @@ def main() -> None:
         skip_llm=args.skip_llm,
         retry_cost_inr=args.retry_cost_inr,
         llm_concurrency=args.llm_concurrency,
+        mix=args.mix,
     )
 
     results = runner.run_with_variance()
     runner.print_results(results)
+    runner.print_per_class()
     runner.print_paired()
     runner.print_economics()
     runner.save_results(results)
