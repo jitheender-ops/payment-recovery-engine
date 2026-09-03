@@ -34,25 +34,30 @@ exactly like the ops console.
 
 from __future__ import annotations
 
+import functools
 import hmac
+import json
 import logging
 import time
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 
+from src.agent.actions import ActionType
 from src.auth import client_ip
 from src.chasers.policy import RISK_POLICIES
+from src.classifier.taxonomy import FailureClass
 from src.config import get_settings, reveal
 from src.database import async_session_factory
 from src.formatting import ist as _ist
 from src.formatting import money as _money
+from src.guardrail.rules import GuardrailRules
 from src.merchant import console_data
 from src.models import RecoveryCase, RetryAttempt
 from src.receivables.ladder import INVOICE_LADDER
@@ -182,6 +187,162 @@ def _chaser_cards() -> list[dict[str, Any]]:
             }
         )
     return cards
+
+
+# ── The model page (/model) ─────────────────────────────────────────────────
+# A page about the decision layer rather than the product: what classifies a
+# failure, what may be decided about it, what re-checks the decision, and what
+# the harness measures. Everything below reads the enforcing structure —
+# the taxonomy enum, the action Literal, the rule methods, the eval's own
+# result file — for the same reason the landing reads RISK_POLICIES: a page
+# that restates the engine in prose drifts from it silently, and this one is
+# entirely claims.
+
+_EVAL_RESULTS = Path(__file__).resolve().parents[2] / "eval" / "results" / "eval_results.json"
+
+# Failure classes as a merchant would name them. The MEMBERSHIP of each lever
+# group is read from the taxonomy, never listed here — only the wording is.
+_CLASS_LABELS: dict[str, str] = {
+    "insufficient_funds": "not enough money, right then",
+    "bank_downtime": "the bank was down",
+    "network_error": "the network dropped mid-charge",
+    "upi_collect_timeout": "the UPI collect expired unanswered",
+    "payment_timeout": "the payment timed out",
+    "3ds_dropoff": "the customer abandoned the OTP screen",
+    "issuer_decline": "the issuer said no, without saying why",
+    "card_limit_exceeded": "over the card's limit",
+    "risk_check_failed": "a risk screen stopped the instrument",
+    "invalid_card": "the card details are wrong",
+    "expired_instrument": "the card has expired",
+    "fraud_block": "flagged as fraud",
+    "hard_decline": "a permanent decline",
+    "customer_cancelled": "the customer cancelled",
+    "unknown": "an error code nothing maps",
+}
+
+# What each of the five actions actually does, for the action-space act.
+_ACTION_COPY: dict[str, tuple[str, str]] = {
+    "retry_now": (
+        "Retry now",
+        "Re-present the charge immediately, same rail. Only where the blocker "
+        "plausibly cleared on its own.",
+    ),
+    "retry_at": (
+        "Retry at",
+        "Park the retry for a named time. The guardrail clamps it out of the "
+        "blackout and refuses one landing past the consent window.",
+    ),
+    "switch_rail": (
+        "Switch rail",
+        "Move to UPI, card, netbanking or wallet — the only lever for a class "
+        "that will decline again on the instrument that just failed.",
+    ),
+    "nudge_customer": (
+        "Nudge customer",
+        "Send a signed, expiring link and let the customer choose. What moves "
+        "insufficient funds; nothing else does.",
+    ),
+    "abandon": (
+        "Abandon",
+        "Stop. A hard decline is not a recovery problem, and chasing one "
+        "spends a contact to earn a second refusal.",
+    ),
+}
+
+# The rule NAMES come from GuardrailRules; only the wording lives here. A rule
+# added to the class shows up on this page with its own method name until
+# somebody writes it a label — visible, rather than silently missing.
+_RULE_LABELS: dict[str, str] = {
+    "check_hard_decline_blocklist": "The class is not a hard decline",
+    "check_switch_only_class": "A switch-only class is not being retried in place",
+    "check_max_retries_per_payment": "The case has attempts left",
+    "check_max_retries_per_customer": "The customer is not over their 24h budget",
+    "check_amount_ceiling": "The amount is under the ceiling",
+    "check_consent_window": "The consent window is still open",
+    "check_retry_at_within_window": "A deferred retry lands inside that window",
+    "check_time_of_day_blackout": "It is not 23:00–07:00 IST",
+    "check_idempotency_key": "The idempotency key is present and unspent",
+    "check_expected_value": "The attempt is worth more than it costs",
+    "check_mandate_predebit_notification": "An RBI pre-debit notice was sent in time",
+    "check_customer_nudge_rate_limit": "The customer is not over their nudge cap",
+}
+
+
+def _failure_classes() -> list[dict[str, Any]]:
+    """The taxonomy, grouped by the lever that moves each class.
+
+    Group membership is computed from the taxonomy's own properties, so a class
+    that changes lever changes column here without anyone editing this file.
+    """
+    out: list[dict[str, Any]] = []
+    for fc in FailureClass:
+        if fc.is_hard_decline:
+            lever, lever_label = "abandon", "Abandon"
+        elif fc.is_switch_only:
+            lever, lever_label = "switch", "Switch rail only"
+        elif fc.is_retryable:
+            lever, lever_label = "retry", "Retryable"
+        else:
+            lever, lever_label = "unmapped", "Not retryable"
+        out.append(
+            {
+                "name": fc.value,
+                "blurb": _CLASS_LABELS.get(fc.value, ""),
+                "lever": lever,
+                "lever_label": lever_label,
+            }
+        )
+    return out
+
+
+def _action_space() -> list[dict[str, str]]:
+    """The five actions the agent may emit, read from the ActionType Literal."""
+    out: list[dict[str, str]] = []
+    for name in get_args(ActionType):
+        title, blurb = _ACTION_COPY.get(name, (name, ""))
+        out.append({"name": name, "title": title, "blurb": blurb})
+    return out
+
+
+def _gate_rules() -> list[dict[str, str]]:
+    """Every business rule on GuardrailRules, in declaration order."""
+    return [
+        {"name": name, "label": _RULE_LABELS.get(name, name.replace("_", " "))}
+        for name in vars(GuardrailRules)
+        if name.startswith("check_")
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def _eval_headline() -> dict[str, Any] | None:
+    """The four measured figures, read from the eval's own result file.
+
+    Returns None — and the page then omits the whole act — if the file is
+    missing or does not carry what it needs. A results page that invents a
+    fallback number is worse than one that says nothing, and this is the only
+    part of the page not derivable from the source tree.
+    """
+    try:
+        raw = json.loads(_EVAL_RESULTS.read_text())
+        paired = raw["paired_vs_baseline"]["XGBoost"]["recovery_rate_pp"]
+        econ = raw["economics_vs_baseline"]["XGBoost"]
+        baseline = raw["policies"]["Fixed 3-Retry"]
+        winner = raw["policies"]["XGBoost"]
+        return {
+            "mix": raw.get("mix", "legacy"),
+            "recovery_pp": paired["mean_delta"],
+            "ci_low": paired["ci95"][0],
+            "ci_high": paired["ci95"][1],
+            "n_paired": paired["n_paired"],
+            "revenue_delta": econ["delta_revenue_per_crore"],
+            "attempts_delta": econ["delta_attempts_per_crore"],
+            "verdict": econ["verdict"],
+            "false_retry_from": baseline["false_retry_rate_%"],
+            "false_retry_to": winner["false_retry_rate_%"],
+        }
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        logger.info("No usable eval results at %s — /model omits the results act", _EVAL_RESULTS)
+        return None
 
 
 # ── Session cookie (signed, expiring) ───────────────────────────────────────
@@ -605,6 +766,30 @@ async def landing(request: Request) -> Any:
             "merchant_name": settings.merchant_name or None,
             "chasers": _chaser_cards(),
             "ladder_rungs": _ladder_rungs(),
+            "authed": _session_valid(request),
+        },
+    )
+
+
+@router.get("/model", response_class=HTMLResponse)
+async def model(request: Request) -> Any:
+    """The decision layer, as a page. Product facts only; no database.
+
+    Same trust level as /console: everything here is read from the source tree
+    or from the eval's committed result file, so it is safe on a public
+    deployment. The one act carrying measured numbers omits itself entirely
+    when those numbers are not on disk.
+    """
+    settings = get_settings()
+    return templates.TemplateResponse(
+        request,
+        "model.html",
+        {
+            "merchant_name": settings.merchant_name or None,
+            "classes": _failure_classes(),
+            "actions": _action_space(),
+            "rules": _gate_rules(),
+            "results": _eval_headline(),
             "authed": _session_valid(request),
         },
     )

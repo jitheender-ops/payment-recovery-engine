@@ -62,6 +62,19 @@ decoration; never introduce a second accent.
 - `prefers-reduced-motion`: everything renders final-state, instantly.
 - GSAP/CDN is gone on purpose: the choreography is ~50 lines of vanilla JS +
   CSS keyframes and must stay that way unless a real need appears.
+- **The one exception is `/model`** (2026-09-03). That page is an eight-act
+  scrubbed narrative — a pinned stage where scroll position *is* a payment's
+  position on the pipeline — and that is genuinely not fifty lines of vanilla.
+  GSAP + ScrollTrigger load there and nowhere else; the console and the
+  landing stay native. The exception is scoped, not a precedent: it holds only
+  while the effect is scroll-*scrubbed* narrative. A fade-in does not qualify.
+  Conditions it ships under, all non-negotiable: every layout is authored as
+  the final readable state and the pinned variant lives behind a `.gsap-on`
+  class JS adds only after the library is confirmed, so a blocked CDN costs
+  the animation and not one word; no pinning under 900px or under
+  `prefers-reduced-motion`; and the pin's own accessibility cost is paid —
+  a `focusin` handler scrolls a beat into view, because a pinned stage is out
+  of flow and the browser cannot.
 
 ## Non-negotiables
 

@@ -489,6 +489,29 @@ All timestamps render in IST (the timezone the blackout itself runs on), the
 sidebar shows a live database-status chip, and **Refresh data** busts the 30s
 query cache. The gate is fail-closed: no `DASHBOARD_PASSWORD`, no dashboard.
 
+### 🧠 The model page (`/model`)
+
+A page about the decision layer rather than the product: the fifteen failure
+classes grouped by the lever that moves each one, the five actions that are the
+only thing representable, the twelve rules that re-check the chosen one, and
+what the harness measured against a fixed-3-retry baseline. It is a scroll
+narrative — the mechanism act pins and the payment's position on the pipeline
+*is* your scroll position — and it is the one page in this repo that loads an
+animation library, deliberately and only there.
+
+Every claim on it is rendered from the enforcing structure: the classes from
+`FailureClass`, the actions from the `ActionType` Literal, the rules from
+`GuardrailRules`, the figures from `eval/results/eval_results.json` at render
+time. Copy cannot drift from the code, and `tests/test_merchant_console.py`
+asserts the page against those sources rather than against typed-in literals.
+With no eval results on disk the results act omits itself entirely — a page
+about measurement does not get to show a remembered number.
+
+The animation is never load-bearing. Every layout is authored as its final
+readable state and the pinned variant lives behind a class JS adds only after
+GSAP is confirmed, so a blocked CDN, `prefers-reduced-motion`, or a phone
+gets eight plain stacked sections with every word intact.
+
 ### 💼 The merchant console
 
 Separate from the ops dashboard and built for a different reader: the merchant
@@ -786,7 +809,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**833 tests across 57 files, 81% statement coverage over `src/`.** The money
+**844 tests across 57 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

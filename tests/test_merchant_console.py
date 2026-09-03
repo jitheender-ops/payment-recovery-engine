@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, get_args
 
 import pytest
 from fastapi import FastAPI
@@ -25,8 +26,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import src.receivables.models  # noqa: F401  — register the AR tables on Base
+from src.agent.actions import ActionType
 from src.cases import open_case, record_promise
+from src.classifier.taxonomy import FailureClass
 from src.config import get_settings
+from src.guardrail.rules import GuardrailRules
+from src.merchant.routes import _eval_headline
 from src.merchant.routes import router as merchant_router
 from src.models import (
     PromiseToPay,
@@ -1163,3 +1168,215 @@ async def test_the_directory_masks_contact_addresses(
     assert "ap@buyer.in" not in html, "the console leaked a full address"
     assert "buyer.in" in html, "the domain is what identifies a known colleague"
     assert "Anita" in html
+
+
+# ── The model page states the engine, not a description of it ─────────────
+# /model is a page whose entire content is claims about the decision layer.
+# Every one of them is rendered from the enforcing structure — the taxonomy
+# enum, the action Literal, the rule methods, the eval's own result file — so
+# these tests assert the page against those sources rather than against
+# literals. Copy that drifts from the code is the failure being guarded here;
+# a test with the numbers typed into it would drift along with the page.
+
+
+def test_the_model_page_is_public(console: Any) -> None:
+    """Same trust level as the landing: no database, no session, no password.
+
+    The signed-in `console` client is incidental — the point is the page
+    reads neither.
+    """
+    unauthed = TestClient(console.app)
+    assert unauthed.get("/model").status_code == 200
+
+
+def test_the_model_page_opens_with_no_password_configured() -> None:
+    """A deployment with DASHBOARD_PASSWORD unset gates the live console shut.
+
+    It must not also take down the public pages: /model states product facts
+    and reaching it does not imply any authority over the merchant's money.
+    """
+    app = FastAPI()
+    app.include_router(merchant_router)
+    settings = get_settings()
+    original = settings.dashboard_password
+    settings.dashboard_password = ""
+    get_settings.cache_clear()
+    try:
+        assert TestClient(app).get("/model").status_code == 200
+    finally:
+        settings.dashboard_password = original
+        get_settings.cache_clear()
+
+
+def test_the_model_page_names_every_failure_class(console: Any) -> None:
+    """Every member of the taxonomy appears, grouped by the lever that moves it.
+
+    The page's whole first act is "a failed payment is fifteen different
+    problems". Adding a sixteenth class to FailureClass and leaving it off the
+    page makes that sentence false, so the enum is the assertion.
+    """
+    html = console.get("/model").text
+    for fc in FailureClass:
+        assert fc.value in html, f"failure class {fc.value!r} missing from /model"
+
+
+def test_the_model_page_names_every_action(console: Any) -> None:
+    """All five actions, read from the ActionType Literal.
+
+    "Five actions, nothing else is representable" is the claim; a sixth action
+    added to the Literal and not to the page would make the page a liar about
+    the one thing it is most emphatic about.
+    """
+    html = console.get("/model").text
+    actions = get_args(ActionType)
+    for action in actions:
+        assert action in html, f"action {action!r} missing from /model"
+    assert f"{len(actions)} actions" in html.lower() or "Five actions" in html
+
+
+def test_the_model_page_names_every_guardrail_rule(console: Any) -> None:
+    """Each check_* on GuardrailRules is named, and the count is not hardcoded.
+
+    The gate act says "then N rules disagree with it" and separately explains
+    that the audit row reads N+1 because the schema check is counted. Both
+    numbers come from the rule list, so a rule added or removed moves them.
+    """
+    html = console.get("/model").text
+    rules = [n for n in vars(GuardrailRules) if n.startswith("check_")]
+    assert rules, "no guardrail rules discovered — the helper's contract broke"
+    for name in rules:
+        assert name in html, f"guardrail rule {name!r} missing from /model"
+    assert f"{len(rules)} rules disagree" in html
+    assert f"says {len(rules) + 1}" in html
+
+
+def test_the_model_page_reports_the_eval_file_not_a_memory_of_it(console: Any) -> None:
+    """Every figure in the results act is the value on disk, to the decimal.
+
+    This is the page's honesty budget: it claims a measured improvement with a
+    confidence interval, and the only thing making that true is that the
+    numbers are read from eval/results/eval_results.json at render time. A
+    figure typed into the template would keep rendering long after the harness
+    disagreed with it — which is exactly what happened to the landing's hero.
+    """
+    results = _eval_headline()
+    assert results is not None, "eval results missing — run eval.runner first"
+    html = console.get("/model").text
+
+    assert f"+{results['recovery_pp']:.2f}pp" in html
+    assert f"+{results['ci_low']:.2f}" in html and f"+{results['ci_high']:.2f}" in html
+    assert f"{results['n_paired']:,}" in html
+    assert f"₹{results['revenue_delta'] / 100000:.2f}L" in html
+    assert f"{int(results['attempts_delta']):,}" in html
+    assert f"{results['false_retry_from']:.2f}%" in html
+    # The population the numbers describe, not just the numbers.
+    assert results["mix"] in html
+
+
+def test_the_model_page_omits_results_rather_than_inventing_them(
+    console: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No eval file on disk → the whole act is gone, and no number replaces it.
+
+    A deployment built from a source tree without eval/results/ must not show a
+    fallback, a placeholder or a remembered figure. The page is allowed to say
+    less; it is not allowed to make something up. Silence is the honest state
+    and it has to be the one that ships.
+    """
+    monkeypatch.setattr(
+        "src.merchant.routes._EVAL_RESULTS", Path("/nonexistent/eval_results.json")
+    )
+    _eval_headline.cache_clear()
+    try:
+        r = console.get("/model")
+        assert r.status_code == 200
+        # The act, its heading, and the two things only it renders: a figure
+        # (kpi-value) and a scroll-scrubbed counter (data-scrub). No survivor
+        # means no number survived either.
+        assert 'id="results"' not in r.text
+        assert "What it measures" not in r.text
+        assert "95% CI" not in r.text
+        # `kpi-value` is a base.html class and is always in the stylesheet;
+        # `data-scrub` exists only on the figures themselves.
+        assert 'data-scrub="' not in r.text
+        assert "kpi-value green" not in r.text
+    finally:
+        _eval_headline.cache_clear()
+
+
+def test_the_model_page_renders_without_its_animation_library(console: Any) -> None:
+    """The content does not depend on GSAP arriving.
+
+    GSAP is loaded from a CDN this deployment does not control. The rule the
+    page ships under is that every layout is authored as its final readable
+    state and the pinned variant lives behind a class JS adds only after the
+    library is confirmed — so a blocked CDN costs the animation and not a word.
+    Two things prove it server-side: the scripts are deferred (they cannot
+    block the parse), and nothing in the served CSS hides content by default.
+    """
+    html = console.get("/model").text
+    assert html.count("<script defer src=") == 2, "GSAP must not block the parse"
+
+    # Every rule that hides a beat is scoped under .gsap-on, so it applies only
+    # once JS has confirmed the library. An unscoped `opacity:0` on a beat is
+    # the exact bug this test exists to catch: content invisible forever on a
+    # deployment whose CDN is blocked.
+    # Both style blocks: base.html's and this page's.
+    css = "".join(html.split("<style>")[1:])
+    for line in css.splitlines():
+        if "opacity:0" in line and "beat" in line:
+            assert ".gsap-on" in line, f"beat hidden unconditionally: {line.strip()!r}"
+
+    # And the pinned layout itself is behind the same gate.
+    assert ".gsap-on #mech .stage{position:sticky" in css
+
+
+def test_the_model_page_has_a_skip_link(console: Any) -> None:
+    """Same obligation as every other console page."""
+    html = console.get("/model").text
+    assert 'href="#main"' in html and "Skip to content" in html
+
+
+def test_the_model_page_shows_no_customer_identifiers(console: Any) -> None:
+    """It touches no database, so it cannot leak — asserted, not assumed."""
+    html = console.get("/model").text
+    for leaked in ("ap@buyer.in", "a@b.in", "+919812345678"):
+        assert leaked not in html
+
+
+def test_the_model_page_renders_its_whole_body(console: Any) -> None:
+    """Every structural landmark, in order — the page is not silently truncated.
+
+    This exists because of a real, invisible break. A media query written
+    `@media (max-width:900px){#model .wall{...}}` puts the characters `{#`
+    into the template, which Jinja reads as a COMMENT opener: it swallowed
+    everything up to the next `#}` — the rest of the stylesheet, the nav and
+    the entire hero — and served a page whose <body> had zero children.
+
+    Nothing caught it. The content assertions above all passed, because the
+    strings they look for happen to live *after* the comment Jinja closed on.
+    A truncated template fails structurally, not lexically, so the assertion
+    has to be structural: the landmarks that bracket the page, in document
+    order, with the closing tags that prove nothing swallowed them.
+    """
+    html = console.get("/model").text
+
+    assert html.count("<style>") == html.count("</style>"), "unbalanced style block"
+    assert html.count("<body>") == 1 and html.count("</body>") == 1
+
+    landmarks = [
+        "<nav",                    # masthead
+        'id="main"',               # hero, and the skip link's target
+        "Every failed rupee",      # hero headline
+        'id="taxonomy"',           # act 1
+        'id="mech"',               # acts 2-5
+        'data-beat="3"',           # the last beat inside them
+        'id="cta"',                # act 7
+        "<footer",                 # and the end of the document
+    ]
+    last = -1
+    for mark in landmarks:
+        at = html.find(mark)
+        assert at != -1, f"/model is missing {mark!r} — template truncated?"
+        assert at > last, f"{mark!r} is out of document order"
+        last = at
