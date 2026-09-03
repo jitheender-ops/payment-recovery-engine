@@ -51,27 +51,36 @@
   #model .act{padding:clamp(5rem,14vh,9rem) 0;position:relative}
   .gsap-on #model .act{min-height:100vh;display:flex;flex-direction:column;
     justify-content:center}
-  #model .act-num{font-family:var(--mono);font-size:.68rem;font-weight:600;
-    letter-spacing:.16em;color:var(--ink-3);margin-bottom:1.4rem;display:block}
-  #model .act-num b{color:var(--green-deep);font-weight:600}
   #model .huge{font-size:clamp(2.4rem,6.2vw,4.1rem);font-weight:800;
     letter-spacing:-.038em;line-height:1.02;text-wrap:balance;max-width:19ch}
   #model .said{color:var(--ink-2);font-size:clamp(1.02rem,1.5vw,1.18rem);
     max-width:62ch;margin-top:1.5rem;line-height:1.6}
 
   /* Hero. Keeps base.html's CSS entrance — that is the authored moment and
-     it is not GSAP's to rebuild. */
+     it is not GSAP's to rebuild. Two columns, because a 1160px wrap with one
+     left-aligned column left a third of every viewport empty and the page
+     read as a document adrift rather than a composition. The right column is
+     the thing that starts all of this: the webhook body, as it arrives. */
   #model .hero{padding-top:clamp(3rem,9vh,6rem)}
-  #model .hero .huge{max-width:16ch}
+  #model .hero .wrap{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);
+    gap:clamp(2rem,5vw,4.5rem);align-items:center}
+  #model .hero .huge{max-width:14ch}
   #model .hero-foot{display:flex;gap:.8rem;margin-top:2.4rem;flex-wrap:wrap;align-items:center}
-  #model .scroll-cue{font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;
-    text-transform:uppercase;color:var(--ink-3);margin-top:3.5rem;display:flex;
-    align-items:center;gap:.6rem}
-  #model .scroll-cue i{display:block;width:1px;height:2.2rem;background:var(--line-2);
-    position:relative;overflow:hidden}
-  #model .scroll-cue i::after{content:"";position:absolute;inset:0;background:var(--green);
-    animation:cue 2.1s var(--ease) infinite}
-  @keyframes cue{0%{transform:translateY(-100%)}60%,100%{transform:translateY(100%)}}
+  @media (max-width:900px){ #model .hero .wrap{grid-template-columns:1fr} }
+
+  /* The arriving failure, in the shape it actually arrives in. */
+  #model .inbound{font-family:var(--mono);font-size:.76rem;line-height:1.75;
+    background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:var(--shadow-md);overflow:hidden;font-variant-numeric:tabular-nums}
+  #model .inbound-head{display:flex;align-items:center;gap:.6rem;padding:.7rem 1.05rem;
+    background:var(--well);border-bottom:1px solid var(--line);
+    font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+  #model .inbound-head .dot{width:7px;height:7px;border-radius:50%;background:var(--red);flex:none}
+  #model .inbound-body{padding:.9rem 1.05rem;color:var(--ink-2);overflow-x:auto}
+  #model .inbound-body .k{color:var(--ink-3)}
+  #model .inbound-body b{color:var(--ink);font-weight:600}
+  #model .inbound-foot{padding:.7rem 1.05rem;border-top:1px solid var(--line);
+    font-size:.7rem;color:var(--ink-3)}
 
   /* ── Act 1 — the taxonomy, grouped by lever ─────────────────────────── */
   #model .levers{margin-top:3.2rem;display:grid;gap:2.2rem}
@@ -126,18 +135,41 @@
   #model .beat .src{font-family:var(--mono);font-size:.7rem;color:var(--ink-3);
     margin-top:1.3rem;display:block}
 
-  /* The pipeline drawing. One SVG for all four beats; the dot IS the scroll
-     position. */
-  #model .art{width:100%;max-width:23rem;height:auto;display:block;margin:0 auto}
-  #model .art .track{stroke:var(--line-2);stroke-width:2;fill:none}
-  #model .art .flow{stroke:var(--green);stroke-width:2.5;fill:none;
-    stroke-linecap:round;stroke-dasharray:1 1}
-  #model .art .node{fill:var(--card);stroke:var(--line-2);stroke-width:1.5}
-  #model .art .node.on{fill:var(--green-tint);stroke:var(--green)}
-  #model .art .nlabel{font-family:var(--mono);font-size:9px;letter-spacing:.08em;
-    text-transform:uppercase;fill:var(--ink-3)}
-  #model .art .nlabel.on{fill:var(--green-deep)}
-  #model .art .dot{fill:var(--green)}
+  /* THE SIGNATURE ELEMENT — the case record.
+     This half of the stage was a four-dot diagram on a line: decorative, and
+     it left the left column ninety percent empty on every beat. It is now the
+     artifact the product itself produces — the case as the console shows it,
+     writing one more line per beat. The sequence is IN the record, which is
+     why no act on this page carries a 01/02/03 kicker any more: numbering
+     every act spent the device where order carries no meaning, and MASTER.md
+     forbids kickers above headings regardless.
+     Times, ids and amounts here are one illustrative case, labelled as one. */
+  #model .record{font-family:var(--mono);font-variant-numeric:tabular-nums;
+    background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:var(--shadow-lg);overflow:hidden}
+  #model .rec-head{display:flex;justify-content:space-between;align-items:baseline;
+    gap:1rem;padding:.8rem 1.1rem;background:var(--well);
+    border-bottom:1px solid var(--line)}
+  #model .rec-id{font-size:.74rem;color:var(--ink-2)}
+  #model .rec-amt{font-size:.95rem;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+  #model .rec-rows{list-style:none;margin:0;padding:0}
+  #model .rec-row{display:grid;grid-template-columns:4.4rem 5.2rem minmax(0,1fr);
+    gap:.7rem;align-items:baseline;padding:.62rem 1.1rem;
+    border-bottom:1px solid var(--line);font-size:.75rem}
+  #model .rec-row:last-child{border-bottom:none}
+  #model .rec-t{color:var(--ink-3);font-size:.68rem}
+  #model .rec-k{color:var(--ink-3)}
+  #model .rec-v{color:var(--ink);overflow-wrap:anywhere;min-width:0}
+  #model .rec-v b{color:var(--green-deep);font-weight:600}
+  #model .rec-row.win{background:var(--green-tint)}
+  #model .rec-row.win .rec-v,#model .rec-row.win .rec-k{color:var(--green-deep);font-weight:600}
+  #model .rec-note{padding:.7rem 1.1rem;border-top:1px solid var(--line);
+    background:var(--well);font-size:.66rem;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--ink-3)}
+  @media (max-width:620px){
+    #model .rec-row{grid-template-columns:1fr;gap:.1rem}
+    #model .rec-t{order:-1}
+  }
 
   /* Beat 1 — the lookup */
   #model .lookup{font-family:var(--mono);font-size:.78rem;line-height:1.9;
@@ -180,14 +212,16 @@
   @media (max-width:820px){ #model .rules{grid-template-columns:1fr} }
   #model .rule .v{font-family:var(--mono);font-size:.66rem;font-weight:600;
     letter-spacing:.08em;color:var(--green-deep)}
-  #model .rule.fail{border-color:rgba(179,38,30,.3);background:var(--red-tint)}
-  #model .rule.fail .v{color:var(--red)}
+  /* check_mandate_predebit_notification is 35 characters of unbreakable mono
+     and ran out of its card at 1024px. */
   #model .rule .name{font-family:var(--mono);font-size:.66rem;color:var(--ink-3);
-    display:block;margin-top:.1rem}
+    display:block;margin-top:.1rem;overflow-wrap:anywhere}
 
   /* ── Act 6 — the measured result ────────────────────────────────────── */
   #model .wall{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-top:2.8rem}
   #model .wall .kpi-value{font-size:clamp(1.5rem,2.6vw,2.1rem)}
+  #model .kpi-value.pair{display:flex;flex-wrap:wrap;gap:0 .45rem}
+  #model .kpi-value.pair span{white-space:nowrap}
   @media (max-width:900px){ #model .wall{grid-template-columns:repeat(2,1fr)}}
   @media (max-width:520px){ #model .wall{grid-template-columns:1fr}}
   #model .caveat{margin-top:2rem;border-left:2px solid var(--line-2);padding-left:1.1rem;
@@ -223,19 +257,34 @@
 
   <header id="main" class="act hero">
     <div class="wrap">
-      <span class="act-num" data-stage>The decision layer</span>
-      <h1 class="huge" data-stage="2">Every failed rupee gets a decision.</h1>
-      <p class="said" data-stage="3">
-        A payment fails and something has to choose: retry it, park it, move it
-        to another rail, ask the customer, or stop. That choice is a model with
-        a fixed vocabulary, wrapped in rules it cannot argue with — and it is
-        measured against the alternative that does not bother choosing.
-      </p>
-      <div class="hero-foot" data-stage="4">
-        <a class="btn btn-primary" href="/console/live">Open the live ledger {{ icon("arrow", 16) }}</a>
-        <a class="btn btn-ghost" href="/console">What it recovers</a>
+      <div>
+        <h1 class="huge" data-stage>Every failed rupee gets a decision.</h1>
+        <p class="said" data-stage="2">
+          A payment fails and something has to choose: retry it, park it, move
+          it to another rail, ask the customer, or stop. That choice is a model
+          with a fixed vocabulary, wrapped in rules it cannot argue with — and
+          it is measured against the alternative that does not bother choosing.
+        </p>
+        <div class="hero-foot" data-stage="3">
+          <a class="btn btn-primary" href="/console/live">Open the live ledger {{ icon("arrow", 16) }}</a>
+          <a class="btn btn-ghost" href="/console">What it recovers</a>
+        </div>
       </div>
-      <div class="scroll-cue" data-stage="5"><i></i> Scroll</div>
+
+      {# The webhook body, as it arrives. The page's subject is what happens
+         to this object, so it opens with the object rather than a paraphrase
+         of it. Illustrative values, said so in the footer. #}
+      <div class="inbound" data-stage="4">
+        <div class="inbound-head"><span class="dot"></span> Inbound · payment.failed</div>
+        <div class="inbound-body">
+<span class="k">error_code</span>     <b>BAD_REQUEST_ERROR</b><br>
+<span class="k">error_reason</span>   <b>payment_risk_check_failed</b><br>
+<span class="k">method</span>         card · HDFC<br>
+<span class="k">amount</span>         <b>₹2,480</b><br>
+<span class="k">at</span>             20:41:02 IST
+        </div>
+        <div class="inbound-foot">Illustrative case · nothing decided yet</div>
+      </div>
     </div>
   </header>
 
@@ -246,7 +295,6 @@
      class that changes lever moves column here without anyone editing copy. #}
   <section class="act" id="taxonomy">
     <div class="wrap">
-      <span class="act-num"><b>01</b> — The population</span>
       <h2 class="huge">A failed payment is fifteen different problems.</h2>
       <p class="said">
         "Declined" is not a reason, it is a receipt. What matters is whether
@@ -305,23 +353,53 @@
       <div class="wrap stage-in">
 
         <div class="stage-art">
-          {# Four nodes on one track. The flow line and the dot are scrubbed;
-             everything else is static. Drawn, not imported. #}
-          <svg class="art" viewBox="0 0 420 300" role="img"
-               aria-label="A failed payment travelling through classify, decide, gate and recover">
-            <path class="track" d="M60 40 L60 100 L60 160 L60 220"/>
-            <path class="flow" id="flow" d="M60 40 L60 100 L60 160 L60 220" pathLength="1"/>
-            {% for y, key, label in [(40,"classify","Classify"),(100,"decide","Decide"),(160,"gate","Gate"),(220,"recover","Recover")] %}
-            <circle class="node" data-node="{{ loop.index0 }}" cx="60" cy="{{ y }}" r="11"/>
-            <text class="nlabel" data-nlabel="{{ loop.index0 }}" x="86" y="{{ y + 3.5 }}">{{ label }}</text>
-            {% endfor %}
-            <circle class="dot" id="dot" cx="60" cy="40" r="4.5"/>
-          </svg>
+          {# The case as the console writes it. One line per beat — the record
+             filling IS the progress indicator, so the beats need no numbering
+             and the stage needs no diagram. data-fill names the beat that
+             writes each line; without GSAP every line is simply already
+             there, which is also what the finished case looks like. #}
+          <div class="record">
+            <div class="rec-head">
+              <span class="rec-id">case TV-4471 · pay_QxR8mD44</span>
+              <span class="rec-amt">₹2,480</span>
+            </div>
+            <ol class="rec-rows">
+              <li class="rec-row">
+                <span class="rec-t">20:41:02</span><span class="rec-k">received</span>
+                <span class="rec-v">payment.failed · <b>BAD_REQUEST_ERROR</b></span>
+              </li>
+              <li class="rec-row" data-fill="0">
+                <span class="rec-t">20:41:02</span><span class="rec-k">class</span>
+                <span class="rec-v"><b>risk_check_failed</b> · switch-only</span>
+              </li>
+              <li class="rec-row" data-fill="1">
+                <span class="rec-t">20:41:04</span><span class="rec-k">action</span>
+                <span class="rec-v"><b>switch_rail</b> → upi</span>
+              </li>
+              <li class="rec-row" data-fill="1">
+                <span class="rec-t"></span><span class="rec-k">reason</span>
+                <span class="rec-v">“Risk screen stopped the card; the same
+                instrument will decline again.”</span>
+              </li>
+              <li class="rec-row" data-fill="2">
+                <span class="rec-t">20:41:04</span><span class="rec-k">guardrail</span>
+                <span class="rec-v"><b>{{ rules | length + 1 }} checked</b> · 0 refused</span>
+              </li>
+              <li class="rec-row" data-fill="3">
+                <span class="rec-t">20:41:05</span><span class="rec-k">link</span>
+                <span class="rec-v">plink_QxR8… · upi · expires 46m</span>
+              </li>
+              <li class="rec-row win" data-fill="3">
+                <span class="rec-t">20:52:06</span><span class="rec-k">recovered</span>
+                <span class="rec-v">₹2,480 · attempt 2 of 3</span>
+              </li>
+            </ol>
+            <div class="rec-note">Illustrative case · shape and fields are the real ones</div>
+          </div>
         </div>
 
         <div class="beats">
           <div class="beat" data-beat="0">
-            <span class="act-num"><b>02</b> — Classify</span>
             <h2>The classifier has no model in it.</h2>
             <p class="say">
               Razorpay's five-tuple error code goes into a YAML table sorted by
@@ -341,7 +419,6 @@
           </div>
 
           <div class="beat" data-beat="1">
-            <span class="act-num"><b>03</b> — Decide</span>
             <h2>Five actions. Nothing else is representable.</h2>
             <p class="say">
               The agent emits a typed action, a rail, an optional time and a
@@ -366,7 +443,6 @@
           </div>
 
           <div class="beat" data-beat="2">
-            <span class="act-num"><b>04</b> — Gate</span>
             <h2>Then {{ rules | length }} rules disagree with it.</h2>
             <p class="say">
               Every rule runs. None short-circuits, so a rejection names
@@ -387,7 +463,6 @@
           </div>
 
           <div class="beat" data-beat="3">
-            <span class="act-num"><b>05</b> — Recover</span>
             <h2>One signed link, on the rail most likely to clear.</h2>
             <p class="say">
               The link expires, it is minted once per attempt and reused while
@@ -416,7 +491,6 @@
   {% if results %}
   <section class="act" id="results">
     <div class="wrap">
-      <span class="act-num"><b>06</b> — What it measures</span>
       <h2 class="huge">Against a policy that does not bother choosing.</h2>
       <p class="said">
         Fixed 3-retry is the honest baseline: it recovers real money by
@@ -446,7 +520,9 @@
         </div>
         <div class="kpi">
           <span class="kpi-label">False retries</span>
-          <span class="kpi-value green">{{ '%.2f' % results.false_retry_from }}% → {{ '%.2f' % results.false_retry_to }}%</span>
+          {# Kept as two unbreakable halves: wrapping mid-pair stranded the
+             arrow at the end of the first line. #}
+          <span class="kpi-value green pair"><span>{{ '%.2f' % results.false_retry_from }}%</span> <span>→ {{ '%.2f' % results.false_retry_to }}%</span></span>
           <span class="kpi-foot">retrying a hard decline — the baseline's 8% is money burned</span>
         </div>
       </div>
@@ -570,15 +646,15 @@ window.addEventListener("load", function () {
   // driven off the same timeline, so they cannot disagree with each other.
   var mech = document.querySelector("#mech");
   var beats = gsap.utils.toArray("#mech .beat");
-  var nodes = gsap.utils.toArray("#mech .node");
-  var nlabels = gsap.utils.toArray("#mech .nlabel");
-  var NODE_Y = [40, 100, 160, 220];
 
-  var lightNode = function (i) {
-    nodes.forEach(function (n, j) { n.classList.toggle("on", j <= i); });
-    nlabels.forEach(function (n, j) { n.classList.toggle("on", j <= i); });
+  // The record's lines, keyed to the beat that writes each one. Set from JS,
+  // never from CSS: with the library absent every line is simply already
+  // there, which is exactly what a finished case looks like.
+  var rowsFor = function (i) {
+    return gsap.utils.toArray('#mech .rec-row[data-fill="' + i + '"]');
   };
-  lightNode(0);
+  var pending = gsap.utils.toArray("#mech .rec-row[data-fill]");
+  gsap.set(pending, { opacity: 0.14 });
 
   var tl = gsap.timeline({
     scrollTrigger: {
@@ -593,47 +669,31 @@ window.addEventListener("load", function () {
   // opacity 0, keyed to a percentage of a section whose length the pin
   // changes. Anything that must be in sync with a beat belongs in the beat's
   // own segment, not in a second trigger guessing at the same scroll range.
+  //
+  // There is deliberately NO refused-rule animation here any more. Flipping a
+  // rule to REFUSED and then showing, two beats later, that the link was
+  // minted and the money came back describes an engine that ignores its own
+  // guardrail. The case shown is one that passes; what a refusal does is
+  // stated in the copy, where it cannot contradict the record.
   var rules = gsap.utils.toArray("#mech [data-rule]");
-  // By name, not by index: the blackout is the refusal worth showing (it is a
-  // rule the page states twice and the only one that refuses a *correct*
-  // action purely on the clock), and an index silently becomes a different
-  // rule the moment one is added to GuardrailRules above it.
-  var refuser = rules.filter(function (r) {
-    var n = r.querySelector(".name");
-    return n && n.textContent.trim() === "check_time_of_day_blackout";
-  })[0] || rules[rules.length - 1];
 
-  var setRefusal = function (on) {
-    if (!refuser) return;
-    refuser.classList.toggle("fail", on);
-    refuser.querySelector(".v").textContent = on ? "REFUSED" : "PASS";
-  };
-  setRefusal(false);
+  // The classify line lands with the beat that is already on screen.
+  tl.to(rowsFor(0), { opacity: 1, ease: "none", duration: 0.3 });
 
   // Beat 0 is already visible; each segment hands off to the next.
   beats.forEach(function (beat, i) {
     if (i === 0) return;
     tl.to(beats[i - 1], { opacity: 0, y: -24, ease: "none", duration: 0.35 }, ">")
-      .to(document.getElementById("dot"), {
-        attr: { cy: NODE_Y[i] }, ease: "none", duration: 0.35,
-        onUpdate: function () { lightNode(i); },
-        onReverseComplete: function () { lightNode(i - 1); }
-      }, "<")
-      .to("#flow", { attr: { "stroke-dasharray": (i / 3) + " 1" }, ease: "none", duration: 0.35 }, "<")
+      .to(rowsFor(i), { opacity: 1, stagger: 0.12, ease: "none", duration: 0.35 }, "<")
       .fromTo(beat, { opacity: 0, y: 24 }, { opacity: 1, y: 0, ease: "none", duration: 0.35 }, ">");
 
+    // The gate's twelve rules stamp in one at a time as you keep scrolling.
+    // Twelve arriving at once is a green wall; twelve arriving in order is
+    // the no-short-circuit discipline the beat is claiming.
     if (i === 2 && rules.length) {
-      // The rules stamp in as you keep scrolling, then one refuses. The
-      // refusal is the point of the act — a wall of green PASS says only that
-      // nothing was tested — so it gets its own beat rather than being
-      // implied. Driven off a proxy so it reverses exactly.
       tl.from(rules, {
         opacity: 0, x: -12, stagger: 0.05, ease: "none", duration: 0.9
       }, ">");
-      tl.to({ p: 0 }, {
-        p: 1, ease: "none", duration: 0.6,
-        onUpdate: function () { setRefusal(this.targets()[0].p > 0.45); }
-      }, ">+=0.3");
     }
 
     tl.to({}, { duration: 0.5 });  // dwell — a beat you cannot read is decoration
