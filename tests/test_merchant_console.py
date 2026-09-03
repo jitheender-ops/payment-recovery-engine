@@ -31,7 +31,7 @@ from src.cases import open_case, record_promise
 from src.classifier.taxonomy import FailureClass
 from src.config import get_settings
 from src.guardrail.rules import GuardrailRules
-from src.merchant.routes import _eval_headline
+from src.merchant.routes import _eval_headline, _failure_classes
 from src.merchant.routes import router as merchant_router
 from src.models import (
     PromiseToPay,
@@ -1209,15 +1209,26 @@ def test_the_model_page_opens_with_no_password_configured() -> None:
 
 
 def test_the_model_page_names_every_failure_class(console: Any) -> None:
-    """Every member of the taxonomy appears, grouped by the lever that moves it.
+    """Every member of the taxonomy reaches the page, and reads as words.
 
     The page's whole first act is "a failed payment is fifteen different
     problems". Adding a sixteenth class to FailureClass and leaving it off the
     page makes that sentence false, so the enum is the assertion.
+
+    The identifier itself is carried on data-fc rather than shown: a reader is
+    being told what failed, not what it is called in Python. So this asserts
+    both halves — the class reached the page, and what the reader sees is
+    spelled out rather than snake_case.
     """
     html = console.get("/model").text
     for fc in FailureClass:
-        assert fc.value in html, f"failure class {fc.value!r} missing from /model"
+        assert f'data-fc="{fc.value}"' in html, f"class {fc.value!r} missing from /model"
+
+    titles = [c["title"] for c in _failure_classes()]
+    assert len(titles) == len(list(FailureClass))
+    for title in titles:
+        assert "_" not in title, f"class title {title!r} still reads as an identifier"
+        assert title in html
 
 
 def test_the_model_page_names_every_action(console: Any) -> None:
@@ -1230,8 +1241,8 @@ def test_the_model_page_names_every_action(console: Any) -> None:
     html = console.get("/model").text
     actions = get_args(ActionType)
     for action in actions:
-        assert action in html, f"action {action!r} missing from /model"
-    assert f"{len(actions)} actions" in html.lower() or "Five actions" in html
+        assert f'data-action="{action}"' in html, f"action {action!r} missing from /model"
+    assert "Five actions" in html
 
 
 def test_the_model_page_names_every_guardrail_rule(console: Any) -> None:
@@ -1245,7 +1256,7 @@ def test_the_model_page_names_every_guardrail_rule(console: Any) -> None:
     rules = [n for n in vars(GuardrailRules) if n.startswith("check_")]
     assert rules, "no guardrail rules discovered — the helper's contract broke"
     for name in rules:
-        assert name in html, f"guardrail rule {name!r} missing from /model"
+        assert f'data-rule="{name}"' in html, f"rule {name!r} missing from /model"
     assert f"{len(rules)} rules disagree" in html
     assert f"says {len(rules) + 1}" in html
 

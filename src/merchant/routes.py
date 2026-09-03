@@ -200,25 +200,31 @@ def _chaser_cards() -> list[dict[str, Any]]:
 
 _EVAL_RESULTS = Path(__file__).resolve().parents[2] / "eval" / "results" / "eval_results.json"
 
-# Failure classes as a merchant would name them. The MEMBERSHIP of each lever
-# group is read from the taxonomy, never listed here — only the wording is.
-_CLASS_LABELS: dict[str, str] = {
-    "insufficient_funds": "not enough money, right then",
-    "bank_downtime": "the bank was down",
-    "network_error": "the network dropped mid-charge",
-    "upi_collect_timeout": "the UPI collect expired unanswered",
-    "payment_timeout": "the payment timed out",
-    "3ds_dropoff": "the customer abandoned the OTP screen",
-    "issuer_decline": "the issuer said no, without saying why",
-    "card_limit_exceeded": "over the card's limit",
-    "risk_check_failed": "a risk screen stopped the instrument",
-    "invalid_card": "the card details are wrong",
-    "expired_instrument": "the card has expired",
-    "fraud_block": "flagged as fraud",
-    "hard_decline": "a permanent decline",
-    "customer_cancelled": "the customer cancelled",
-    "unknown": "an error code nothing maps",
+# Failure classes as a merchant would name them: a display title and a plain
+# blurb. The MEMBERSHIP of each lever group is read from the taxonomy, never
+# listed here — only the wording is. Titles are spelled out rather than shown
+# as snake_case identifiers: `insufficient_funds` is the enum's business, and
+# a reader of this page is being told what failed, not what it is called in
+# Python. The raw identifier still appears where the string genuinely IS the
+# data — the webhook body, the YAML lookup, the case record.
+_CLASS_LABELS: dict[str, tuple[str, str]] = {
+    "insufficient_funds": ("Insufficient funds", "not enough money, right then"),
+    "bank_downtime": ("Bank downtime", "the bank was down"),
+    "network_error": ("Network error", "the network dropped mid-charge"),
+    "upi_collect_timeout": ("UPI collect timeout", "the collect request expired unanswered"),
+    "payment_timeout": ("Payment timeout", "the payment never came back"),
+    "3ds_dropoff": ("3DS drop-off", "the customer abandoned the OTP screen"),
+    "issuer_decline": ("Issuer decline", "the issuer said no, without saying why"),
+    "card_limit_exceeded": ("Card limit exceeded", "over the card's limit"),
+    "risk_check_failed": ("Risk check failed", "a risk screen stopped the instrument"),
+    "invalid_card": ("Invalid card", "the card details are wrong"),
+    "expired_instrument": ("Expired instrument", "the card has expired"),
+    "fraud_block": ("Fraud block", "flagged as fraud"),
+    "hard_decline": ("Hard decline", "a permanent decline"),
+    "customer_cancelled": ("Customer cancelled", "the customer cancelled"),
+    "unknown": ("Unknown", "an error code nothing maps"),
 }
+
 
 # What each of the five actions actually does, for the action-space act.
 _ACTION_COPY: dict[str, tuple[str, str]] = {
@@ -284,10 +290,16 @@ def _failure_classes() -> list[dict[str, Any]]:
             lever, lever_label = "retry", "Retryable"
         else:
             lever, lever_label = "unmapped", "Not retryable"
+        # A class with no wording yet still renders, under its own name with
+        # the underscores opened up — visible rather than silently missing.
+        title, blurb = _CLASS_LABELS.get(
+            fc.value, (fc.value.replace("_", " ").capitalize(), "")
+        )
         out.append(
             {
                 "name": fc.value,
-                "blurb": _CLASS_LABELS.get(fc.value, ""),
+                "title": title,
+                "blurb": blurb,
                 "lever": lever,
                 "lever_label": lever_label,
             }
