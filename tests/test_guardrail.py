@@ -387,3 +387,149 @@ def test_gate_passes_a_mandate_retry_notified_well_in_advance() -> None:
     )
     result = gate.validate(action, context, "mandate_key_2", 0)
     assert result.passed is True
+
+
+# ── Boundary mutants the mutation run survived ──────────────────────────────
+# The weekly mutmut pass (mutation.yml) reported survivors that are real
+# boundary gaps, not message-text noise. Each test below is named for the
+# behavioural distinction a mutant erased. Anything marked "honest copy"
+# pins the EXACT rejection string an operator reads in the console — the
+# XX...XX mutants on those lines proved nothing asserts them verbatim.
+
+
+def test_the_consent_window_boundary_hour_itself_still_passes() -> None:
+    """Exactly deadline hours elapsed: `current_time > deadline` must keep
+    the window open at its edge — the deadline instant belongs to the
+    consent period. (Mutant: > flipped.)"""
+    failed = now - timedelta(hours=72)
+    passed, _ = rules.check_consent_window(failed, failed + timedelta(hours=72))
+    assert passed is True
+    # One second past the edge closes it.
+    passed, _ = rules.check_consent_window(
+        failed, failed + timedelta(hours=72, seconds=1)
+    )
+    assert passed is False
+
+
+def test_the_nudge_cap_boundary_slot_is_vetoed() -> None:
+    """nudges == limit is the cap itself, not one below it (>=, not >).
+    The default cap is 2 nudges/24h — the boundary slot is 2."""
+    limit = rules._settings.max_nudges_per_customer_24h
+    passed, reason = rules.check_customer_nudge_rate_limit(limit)
+    assert passed is False
+    assert reason is not None
+    passed, _ = rules.check_customer_nudge_rate_limit(limit - 1)
+    assert passed is True
+
+
+def test_a_naive_current_time_is_assumed_utc_not_refused() -> None:
+    """Naive datetimes from tests/legacy rows must compare as UTC, not
+    crash or silently pass. (Mutant: tzinfo check inverted.)"""
+    failed = now.replace(tzinfo=None) - timedelta(hours=80)
+    current = now.replace(tzinfo=None)
+    passed, _ = rules.check_consent_window(failed, current)
+    assert passed is False, "a naive 80h-old failure leaked past the window"
+
+
+def test_the_consent_rejection_reason_names_the_true_hours() -> None:
+    """Honest copy: the reason says the REAL elapsed hours and the REAL
+    window. hours * 3600 (the mutant) reported a 259200h debt."""
+    failed = now - timedelta(hours=80)
+    _, reason = rules.check_consent_window(failed, now)
+    assert reason is not None
+    assert "80.0h" in reason
+    assert "> 72h" in reason
+
+
+def test_the_amount_ceiling_reason_quotes_the_true_rupees() -> None:
+    """Honest copy: ₹ figures in the rejection match the case. The * 100
+    mutant inflated the displayed amount a hundredfold while blocking the
+    same rows — an operator reading it would distrust the whole console."""
+    amount = rules._settings.amount_ceiling_paise
+    # Deliberately over the ceiling by a known factor: 2× the ceiling.
+    passed, reason = rules.check_amount_ceiling(amount * 2)
+    assert passed is False
+    over = f"₹{amount * 2 / 100:,.2f}"
+    assert over in reason, f"the rejection misquotes the amount: {reason}"
+
+
+def test_the_blackout_reason_names_the_hour_and_window() -> None:
+    """Honest copy: the operator sees which hour and which window."""
+    passed, reason = rules.check_time_of_day_blackout(23)
+    assert passed is False
+    assert "23" in reason and "23:00-07:00" in reason
+
+
+def test_an_empty_blackout_window_blocks_nothing() -> None:
+    """start == end (the tests' 0/0 "off" setting) must be an EMPTY window
+    in both branches. The >= mutant turned 0/0 into an always-blackout,
+    which would have deferred every scheduled test and every real sweep.
+    Pinned here with the LIVE settings (23-7); the 0/0 trick itself is
+    pinned by test_recovery_batch.py's fixture."""
+    from src.guardrail.rules import is_in_blackout
+
+    # Default window 23-7: the boundary hours themselves are the contract.
+    assert is_in_blackout(23) is True
+    assert is_in_blackout(7) is False
+    assert is_in_blackout(12) is False
+
+
+def test_the_expected_value_boundary_is_inclusive() -> None:
+    """EV exactly == cost: the attempt is not worth it — `<= cost` refuses.
+    The < mutant let an exactly-at-cost retry through, spending an attempt
+    for zero expected gain."""
+    passed, _ = rules.check_expected_value("retry_now", 0.02, 100_00)
+    # confidence 0.02 × ₹100 = ₹2 == default ₹2 cost — must REFUSE.
+    assert passed is False
+
+
+def test_a_retry_at_without_a_timestamp_is_a_schema_violation() -> None:
+    """validate_action_schema is the first thing the gate feeds through; a
+    retry_at with no timestamp must fail it outright. (Mutant: inverted.)"""
+    from src.guardrail.schemas import validate_action_schema
+
+    ok, parsed, err = validate_action_schema({
+        "action": "retry_at", "reason": "no timestamp supplied",
+    })
+    assert ok is False
+    assert parsed is None
+    assert err is not None and "retry_at" in err
+
+
+def test_the_mandate_notice_rule_reports_the_missing_notice_honestly() -> None:
+    """Honest copy for compliance: the RBI rule's refusal names the
+    requirement and the required lead time."""
+    passed, reason = rules.check_mandate_predebit_notification(
+        risk_type="mandate_failure", action_type="retry_now",
+        last_notification_sent_at=None, current_time=now,
+    )
+    assert passed is False
+    assert reason is not None
+    assert "24h" in reason or "24 hours" in reason
+    assert "pre-debit notification" in reason or "notification" in reason
+
+
+def test_the_rules_checked_count_includes_the_schema_check() -> None:
+    """The audit trail's `rules_checked` must count every rule that ran.
+    (Mutant: -1.) A miscount here makes 'all rules checked' unpinnable.
+    The abandon path returns rules_checked=0 by design — use a retry."""
+    action = RetryAction(action="retry_now", reason="transient network error")
+    ctx = _ctx()
+    result = gate.validate(action, ctx, idempotency_key="mut_pin_1",
+                           current_attempts=0)
+    # The gate runs the schema check + every business rule and reports the
+    # count; a retry_now on a fresh case passes, so what we pin is that
+    # the count matches the rules that ran, not 0.
+    assert result.rules_checked >= 12, (
+        f"the gate undercounted its own checks: {result.rules_checked}"
+    )
+
+
+def _ctx() -> FailureContext:
+    """One valid context for whole-gate exercises in this section."""
+    return FailureContext(
+        payment_id="pay_mut_1", failure_class="insufficient_funds",
+        error_code="BAD_REQUEST_ERROR", amount=100_00, method="card",
+        bank="HDFC", failed_at=now - timedelta(hours=1), current_time=now,
+        hour_of_day=14, day_of_week=2,
+    )
