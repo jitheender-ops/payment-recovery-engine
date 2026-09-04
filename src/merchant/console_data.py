@@ -540,9 +540,28 @@ async def engine_health(session: AsyncSession) -> dict[str, Any]:
         "ticking": True,
         "last_tick": _ist(last).strftime("%d %b, %H:%M"),
         "age_seconds": int(age.total_seconds()),
+        # The same age as a phrase. The question under a heartbeat is "are
+        # these numbers current", and a wall-clock timestamp makes the reader
+        # do the subtraction. Coarse on purpose past a minute: nobody needs
+        # "4m 37s ago", and a second-precision figure on a page that does not
+        # live-update is a lie that gets truer once a minute.
+        "fresh": _ago(int(age.total_seconds())),
         "stale": age > stale_after,
         "counts": heartbeat.last_tick_counts,
     }
+
+
+def _ago(seconds: int) -> str:
+    """A coarse, honest "how long ago" — never a false precision."""
+    if seconds < 10:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 async def outstanding_total(session: AsyncSession) -> dict[str, Any]:
@@ -631,6 +650,16 @@ def attention_items(
 
     Returns [] when there is nothing — and the template says so out loud,
     because "nothing needs you" is a real answer and a blank space is not.
+
+    Each item carries a `severity` and an `href`:
+
+    * `severity` is "stop" (money has halted and only a person restarts it) or
+      "wait" (it will resolve itself; watch it). Rendered as a word beside the
+      colour, never a colour alone.
+    * `href` is where the work actually gets done. A worklist whose rows are
+      not clickable makes the reader hunt the same page for the thing it just
+      told them about — every item here points at the block or the filtered
+      list that holds it.
     """
     items: list[dict[str, str]] = []
 
@@ -641,6 +670,10 @@ def attention_items(
         items.append(
             {
                 "kind": "engine",
+                "severity": "stop",
+                # The one item that is not about a case: the sweeps that would
+                # clear everything else are not running.
+                "href": "/console/ops",
                 "title": "The engine has stopped ticking",
                 "detail": (
                     f"Last sweep {health['last_tick']}. Deferred retries, "
@@ -656,6 +689,8 @@ def attention_items(
         items.append(
             {
                 "kind": "dispute",
+                "severity": "stop",
+                "href": "#disputes",
                 "title": (
                     f"{disputes['open']} invoice"
                     f"{'s' if disputes['open'] != 1 else ''} disputed"
@@ -673,6 +708,8 @@ def attention_items(
         items.append(
             {
                 "kind": "voice",
+                "severity": "stop",
+                "href": "#voice",
                 "title": (
                     f"{voice['queued']} call"
                     f"{'s' if voice['queued'] != 1 else ''} waiting to be placed"
@@ -690,6 +727,10 @@ def attention_items(
         items.append(
             {
                 "kind": "plan",
+                # The chase resumed on its own, a rung firmer. Worth seeing,
+                # not worth stopping the day for.
+                "severity": "wait",
+                "href": "#plans",
                 "title": (
                     f"{plans['defaulted']} payment plan"
                     f"{'s' if plans['defaulted'] != 1 else ''} defaulted"
@@ -702,6 +743,8 @@ def attention_items(
         items.append(
             {
                 "kind": "exhausted",
+                "severity": "stop",
+                "href": "/console/cases?state=exhausted",
                 "title": (
                     f"{len(exceptions)} case"
                     f"{'s' if len(exceptions) != 1 else ''} out of attempts"
@@ -764,16 +807,24 @@ async def pipeline_funnel(session: AsyncSession) -> dict[str, Any]:
             RetryAttempt.result.in_(["success", "failed", "pending"])
         )
     )
+    # `href` only where a page shows THAT population. "Failed" and
+    # "Retryable" count payment_failures; the cases list is keyed on case
+    # state and cannot be filtered to either, and the attempt stages have no
+    # page at all. A stage that links to a nearly-right list is worse than one
+    # that does not link — the reader trusts the number they land on.
     return {
         "cases": [
-            {"label": "Failed", "n": failed or 0},
-            {"label": "Retryable", "n": retryable or 0},
-            {"label": "Recovered", "n": recovered or 0},
+            {"label": "Failed", "n": failed or 0, "href": None},
+            {"label": "Retryable", "n": retryable or 0, "href": None},
+            {
+                "label": "Recovered", "n": recovered or 0,
+                "href": "/console/cases?state=recovered",
+            },
         ],
         "attempts": [
-            {"label": "Decided", "n": decided or 0},
-            {"label": "Guardrail passed", "n": passed or 0},
-            {"label": "Executed", "n": executed or 0},
+            {"label": "Decided", "n": decided or 0, "href": None},
+            {"label": "Guardrail passed", "n": passed or 0, "href": None},
+            {"label": "Executed", "n": executed or 0, "href": None},
         ],
         "has_data": bool(failed or decided),
     }

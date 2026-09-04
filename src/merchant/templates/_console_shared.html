@@ -235,7 +235,10 @@
   {% for s in stages %}
   <div style="display:grid;grid-template-columns:minmax(8rem,11rem) 1fr auto;gap:.8rem;
               align-items:center;padding:.35rem 0;">
-    <span style="font-size:.87rem;color:var(--ink-2);">{{ s.label }}</span>
+    <span style="font-size:.87rem;color:var(--ink-2);">
+      {%- if s.href %}<a href="{{ s.href }}" style="color:inherit">{{ s.label }}</a>
+      {%- else %}{{ s.label }}{% endif -%}
+    </span>
     <span style="height:26px;border-radius:6px;background:var(--well);
                  border:1px solid var(--line);overflow:hidden;">
       <span style="display:block;height:100%;

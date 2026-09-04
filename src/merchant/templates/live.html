@@ -33,12 +33,17 @@
     {% if data.health.stale %}
       <strong>Engine stopped</strong>
       <span class="pulse-detail">
-        {% if data.health.last_tick %}Last sweep {{ data.health.last_tick }} IST — no retries or reminders are firing.
+        {# The elapsed time first: "17h ago" is the fact that makes this a
+           problem, and a timestamp asks the reader to work it out. #}
+        {% if data.health.last_tick %}Last sweep {{ data.health.fresh }} ({{ data.health.last_tick }} IST) — no retries or reminders are firing.
         {% else %}No sweep has run yet.{% endif %}
       </span>
     {% else %}
       <strong>Engine running</strong>
-      <span class="pulse-detail">Last sweep {{ data.health.last_tick }} IST · {{ data.flight.scheduled }} retries parked · {{ data.flight.pending }} in flight</span>
+      {# "Updated Ns ago" rather than only a wall-clock time: the question
+         under the heartbeat is "are these numbers current", and a timestamp
+         makes the reader do that subtraction themselves. #}
+      <span class="pulse-detail">Updated {{ data.health.fresh }} · {{ data.flight.scheduled }} retries parked · {{ data.flight.pending }} in flight</span>
     {% endif %}
   </div>
 </div>
@@ -158,12 +163,22 @@
           {% if data.attention %}<span class="needs-count">{{ data.attention | length }}</span>{% endif %}
         </div>
         {% if data.attention %}
+          {# Each row goes where the work is done. A worklist that names a
+             frozen dispute and then makes you hunt the same page for it is
+             half a worklist. Anchors, so the browser's own back button and
+             "open in new tab" both work. #}
           <ul class="needs-list">
             {% for item in data.attention %}
-            <li class="needs-item needs-{{ item.kind }}">
+            <li class="needs-item needs-{{ item.kind }} needs-{{ item.severity }}">
               <span class="needs-bar" aria-hidden="true"></span>
               <div>
-                <p class="needs-item-title">{{ item.title }}</p>
+                <p class="needs-item-title">
+                  <a class="needs-link" href="{{ item.href }}">{{ item.title }}</a>
+                  {# The severity as a word, not only as the bar's colour:
+                     a printed page and a colour-blind reader both need it. #}
+                  <span class="needs-sev needs-sev-{{ item.severity }}">{{
+                    "act now" if item.severity == "stop" else "watch" }}</span>
+                </p>
                 <p class="needs-item-detail">{{ item.detail }}</p>
               </div>
             </li>
@@ -257,7 +272,7 @@
            climbing was completely invisible, which is the exact shape of an
            outage this console exists to surface. #}
         {% if data.voice.total %}
-        <section class="block" data-reveal>
+        <section class="block" id="voice" data-reveal>
           <h2 class="block-title">Voice calls</h2>
           <p class="block-sub">
             The engine queues calls; the telephony leg claims them. Nothing
@@ -364,7 +379,7 @@
         {% endif %}
 
         {% if data.plans.total %}
-        <section class="block" data-reveal>
+        <section class="block" id="plans" data-reveal>
           <h2 class="block-title">Payment plans</h2>
           <p class="block-sub">{{ data.plans.active }} active · {{ data.plans.completed }} completed · {{ data.plans.defaulted }} defaulted. Each instalment is a promise, so a missed one breaks on the clock and the chase resumes a rung firmer.</p>
           {% if data.plans.plans %}
@@ -393,7 +408,7 @@
          Summarised in the worklist above; the customer's own words belong
          here, because the reason is what a person actually decides on. #}
       {% if data.disputes.disputes %}
-      <section class="block" data-reveal>
+      <section class="block" id="disputes" data-reveal>
         <h2 class="block-title">Disputed invoices</h2>
         <p class="block-sub">Chasing is frozen on these until you uphold or reject the dispute. Nothing in the engine resolves one — "this invoice is wrong" is a commercial judgement.</p>
         <div class="card" style="margin-top:1rem">
@@ -603,9 +618,26 @@
               border-radius:var(--r-sm);padding:.85rem 1rem .85rem 0;
               overflow:hidden;box-shadow:var(--shadow-sm)}
   .needs-bar{background:var(--ink-3);border-radius:3px 0 0 3px}
-  .needs-dispute .needs-bar,.needs-engine .needs-bar{background:var(--red)}
-  .needs-voice .needs-bar,.needs-plan .needs-bar{background:#B8860B}
-  .needs-item-title{margin:0;font-weight:600;font-size:.95rem}
+  /* The bar takes its colour from the SEVERITY, not the kind. It used to key
+     on kind, which left a queued voice call (money stopped, nobody coming)
+     the same amber as a defaulted plan (the chase resumed on its own) and
+     left an exhausted case with no colour at all. One source for the stripe,
+     the word beside the title and the row's meaning. */
+  .needs-stop .needs-bar{background:var(--red)}
+  .needs-wait .needs-bar{background:#B8860B}
+  .needs-item-title{margin:0;font-weight:600;font-size:.95rem;
+                    display:flex;align-items:baseline;gap:.55rem;flex-wrap:wrap}
+  .needs-link{color:inherit;text-decoration:none}
+  .needs-link:hover{text-decoration:underline;text-underline-offset:3px}
+  .needs-link::after{content:"";position:absolute;inset:0}
+  .needs-item{position:relative}
+  .needs-sev{font-family:var(--mono);font-size:.6rem;font-weight:600;
+             letter-spacing:.1em;text-transform:uppercase;padding:.12rem .4rem;
+             border-radius:999px;white-space:nowrap;border:1px solid}
+  .needs-sev-stop{color:var(--red);border-color:var(--red-line);
+                  background:var(--red-tint)}
+  .needs-sev-wait{color:#8A5A00;border-color:rgba(138,90,0,.28);
+                  background:rgba(138,90,0,.07)}
   .needs-item-detail{margin:.2rem 0 0;font-size:.85rem;color:var(--ink-3);line-height:1.5}
   .needs-clear{margin:.9rem 0 0;font-size:.9rem;color:var(--ink-3);
                background:var(--green-tint);border:1px solid var(--green-line);

@@ -611,7 +611,10 @@ The live page is ordered by the questions a merchant actually asks, in order:
    here is bounded by design, so the things it **refused** — a frozen dispute,
    a case out of attempts, a voice call stuck in the queue — are the page's
    most important content, not a footnote. An empty worklist is a real answer
-   and gets said out loud.
+   and gets said out loud. Every row is a link to where that work is done, and
+   carries its severity as a **word** (*act now* / *watch*) as well as a
+   colour: a worklist that names a frozen dispute and then makes you hunt the
+   same page for it is half a worklist.
 4. **How is the chase going?** — the B2B ladder drawn as a ladder, promises
    kept vs. broken (with the grace window split out), active plans, disputes
    in the customer's own words, per-chaser performance, aging.
@@ -895,7 +898,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**902 tests across 59 files, 81% statement coverage over `src/`.** The money
+**911 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

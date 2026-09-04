@@ -1595,3 +1595,83 @@ async def test_the_nav_survives_a_database_it_cannot_read(
     assert 'href="/console/live"' in r.text
     assert 'class="nav-badge"' not in r.text
     get_settings.cache_clear()
+
+
+# ── The worklist: severity, and somewhere to go ──────────────────────────────
+
+
+async def test_every_worklist_item_carries_a_severity_and_a_destination(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    A worklist that names a frozen dispute and then makes you hunt the same
+    page for it is half a worklist. Every item points at the block or the
+    filtered list that holds it, and says in a word whether it stops the day.
+    """
+    await _seed(db_sessionmaker)
+    r = console.get("/console/live")
+    assert r.status_code == 200
+    assert 'class="needs-link"' in r.text
+    assert "act now" in r.text or "watch" in r.text
+
+    # Every in-page destination the worklist offers actually exists on the
+    # page. Asserted from the rendered hrefs rather than a fixed list: the
+    # blocks are conditional (there is no plans block without a plan), so a
+    # fixed list would test the fixture instead of the property.
+    worklist = r.text.split('class="needs-list"', 1)[1].split("</ul>", 1)[0]
+    anchors = re.findall(r'class="needs-link" href="#([a-z]+)"', worklist)
+    assert anchors, "no in-page worklist destinations rendered"
+    for anchor in anchors:
+        assert f'id="{anchor}"' in r.text, f"worklist points at missing #{anchor}"
+
+
+def test_worklist_severity_is_stop_or_wait_and_nothing_else() -> None:
+    """
+    Two levels on purpose. "stop" is money halted until a person acts; "wait"
+    resolves itself and is worth seeing. A third level would be a preference,
+    and the stripe colour, the word and the row's meaning would stop agreeing.
+    """
+    items = console_data.attention_items(
+        disputes={"open": 2, "disputes": [{"days_open": 5}]},
+        voice={"queued": 3, "claimed": 0, "oldest_queued": "2 days"},
+        plans={"defaulted": 1},
+        exceptions=[{"ref": "pay_x"}],
+        health={"stale": True, "last_tick": "04 Sep, 10:00"},
+    )
+    assert items, "the fixture describes five problems"
+    for item in items:
+        assert item["severity"] in ("stop", "wait"), item
+        assert item["href"], f"{item['kind']} has nowhere to go"
+
+
+def test_the_heartbeat_says_how_fresh_rather_than_only_when() -> None:
+    """
+    The question under a heartbeat is "are these numbers current", and a
+    wall-clock timestamp makes the reader do the subtraction. Coarse past a
+    minute on purpose: the page does not live-update, so second precision
+    would be a claim that becomes true again once a minute.
+    """
+    ago = console_data._ago
+    assert ago(3) == "just now"
+    assert ago(45) == "45s ago"
+    assert ago(300) == "5m ago"
+    assert ago(7200) == "2h ago"
+    assert ago(200000) == "2d ago"
+
+
+async def test_a_funnel_stage_links_only_where_the_same_population_lives(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    "Failed" and "Retryable" count payment_failures; the cases list is keyed
+    on case state and cannot be filtered to either. A stage linking to a
+    nearly-right list is worse than one that does not link, because the reader
+    trusts the number they land on.
+    """
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        funnel = await console_data.pipeline_funnel(s)
+    by_label = {row["label"]: row for row in funnel["cases"] + funnel["attempts"]}
+    assert by_label["Recovered"]["href"] == "/console/cases?state=recovered"
+    for label in ("Failed", "Retryable", "Decided", "Guardrail passed", "Executed"):
+        assert by_label[label]["href"] is None, label
