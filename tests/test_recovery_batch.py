@@ -190,3 +190,45 @@ async def test_the_cohort_is_capped(
     async with db_sessionmaker() as s:
         plan = await recovery_batch.plan(s, limit=10_000)
     assert len(plan.candidates) <= recovery_batch.MAX_COHORT
+
+
+async def test_an_abandon_is_a_refusal_not_an_approval(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    A policy that says "abandon" has nothing for the batch to run, and the
+    guardrail passes it precisely because it is the safe action — so
+    "guardrail passed" was the wrong test for eligibility. It made a cohort
+    of hard declines look 100% approved, then spent one attempt per case on
+    execute_retry's no-op ("No action taken"), bumping attempts_used and
+    exhausting budgets while reporting itself 100% accepted.
+
+    The agent is stubbed rather than steered through settings: whether the
+    trained model is on disk decided this before, which is how it passed
+    locally and failed in CI.
+    """
+    from src.agent.actions import RetryAction
+
+    class _AlwaysAbandon:
+        def predict(self, context: Any) -> RetryAction:
+            return RetryAction(
+                action="abandon", confidence=0.95,
+                reason="Rule-based: fraud_block is a hard decline",
+            )
+
+    monkeypatch.setattr(recovery_batch, "_agent", lambda: _AlwaysAbandon())
+    await _case(db_sessionmaker, "pay_fraud", failure_class="fraud_block")
+
+    async with db_sessionmaker() as s:
+        plan = await recovery_batch.plan(s)
+        result = await recovery_batch.execute(s, plan)
+
+    assert not plan.approved, "an abandon must never be approved to run"
+    assert plan.blocked and all(c.blocked_by for c in plan.blocked), "silent refusal"
+    assert any("Nothing to chase" in r for c in plan.blocked for r in c.blocked_by)
+    assert result["attempted"] == 0
+    async with db_sessionmaker() as s:
+        assert await s.scalar(select(func.count()).select_from(RetryAttempt)) == 0
+        case = await s.scalar(select(RecoveryCase))
+        assert case is not None and case.attempts_used == 0

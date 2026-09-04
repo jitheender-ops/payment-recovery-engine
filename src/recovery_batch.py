@@ -194,10 +194,20 @@ async def plan(
             action, context, f"batch_{case.id.hex}_{case.attempts_used}",
             current_attempts=case.attempts_used,
         )
-        if verdict.passed:
-            cand.eligible = True
-        else:
+        if not verdict.passed:
             cand.blocked_by = list(verdict.rejection_reasons)
+        elif action.action == "abandon":
+            # The guardrail passes an abandon — of course it does, abandon is
+            # the safe action. But "approved" here means the batch will act on
+            # it, and execute() then spends an attempt, bumps attempts_used and
+            # counts the no-op as accepted (execute_retry returns success with
+            # "No action taken"), so a cohort of hard declines would report
+            # itself 100% accepted while doing nothing and exhausting every
+            # case's budget. Nothing to chase is a refusal, with the policy's
+            # own reason attached.
+            cand.blocked_by = [f"Nothing to chase: {action.reason}"]
+        else:
+            cand.eligible = True
         candidates.append(cand)
 
     label = failure_class or "every open payment-rail case with budget left"
@@ -264,10 +274,13 @@ async def execute(
         verdict = gate.validate(
             action, context, idem, current_attempts=case.attempts_used
         )
-        if not verdict.passed:
+        if not verdict.passed or action.action == "abandon":
             # Approved in the preview, refused now. Counted, not silently
             # skipped — this is the guardrail doing its job late, and hiding
-            # it would make the batch look cleaner than it was.
+            # it would make the batch look cleaner than it was. An abandon
+            # lands here too: the re-prediction can differ from the preview's,
+            # and an abandon must never reach the executor and spend an
+            # attempt on a no-op.
             stale += 1
             continue
 

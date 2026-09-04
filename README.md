@@ -837,7 +837,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**884 tests across 59 files, 81% statement coverage over `src/`.** The money
+**885 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |
@@ -902,6 +902,32 @@ nothing at all once anything has already read settings.
 
 The engine's first cut could decide; it could not always be trusted about what
 it had decided. The current wave, all CI-verified.
+
+### The batch approved abandons, and only CI could see it
+
+`tests/test_recovery_batch.py::test_a_refused_case_spends_no_attempt` passed
+on every developer machine and failed in CI. The difference was a gitignored
+file: `models/xgboost_baseline.joblib` exists locally (`run.sh` trains it) and
+does not in the `verify` job, and `XGBoostBaseline()` defaults its path from
+settings — so the same hard-declined case was decided by the trained model
+locally (`switch_rail`, which the guardrail then blocked) and by the rule
+heuristic in CI (`abandon`, which the guardrail passes, because abandon is the
+safe action).
+
+The test was right to fail. `plan()` set `eligible = True` on any candidate the
+guardrail passed, so an `abandon` came back **approved**, and `execute()` then
+ran it: `execute_retry` returns `{"success": True, "details": "No action
+taken"}` for an abandon, so the batch wrote a `RetryAttempt`, incremented
+`attempts_used`, counted it as *accepted*, and could close the case as
+`exhausted` — a cohort of hard declines would report itself 100% accepted for
+doing nothing, while spending every case's budget. Eligibility now means the
+guardrail passed **and** there is something to run; an abandon is a refusal
+carrying the policy's own reason, and `execute()` refuses one again at
+re-validation in case the second prediction differs from the preview's.
+
+The regression test stubs the agent rather than steering it through settings —
+whether a file is on disk is not a thing a test's outcome may depend on. The
+suite now passes identically with and without the trained model.
 
 ### Two deploys died on SQL that SQLite does not type-check
 
