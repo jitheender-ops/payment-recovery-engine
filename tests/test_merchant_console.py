@@ -1675,3 +1675,205 @@ async def test_a_funnel_stage_links_only_where_the_same_population_lives(
     assert by_label["Recovered"]["href"] == "/console/cases?state=recovered"
     for label in ("Failed", "Retryable", "Decided", "Guardrail passed", "Executed"):
         assert by_label[label]["href"] is None, label
+
+
+# ── Payments, and the gate rendered rule by rule ─────────────────────────────
+
+
+async def _payment(
+    sm: async_sessionmaker[AsyncSession], *, ref: str, failure_class: str,
+    with_case: bool = True, state: str = "open",
+) -> Any:
+    """One failed charge, optionally with the case opened around it."""
+    from src.models import PaymentFailure
+
+    async with sm() as s:
+        s.add(PaymentFailure(
+            payment_id=ref, order_id=f"order_{ref}", amount=249900, method="card",
+            bank="HDFC", error_code="BAD_REQUEST_ERROR",
+            error_reason="payment_declined", failure_class=failure_class,
+            is_retryable=failure_class not in ("fraud_block", "hard_decline"),
+            # The three the console must never show.
+            customer_email="leak@example.com", customer_contact="+919876500000",
+            vpa="leak@okhdfcbank",
+            webhook_event_id=uuid.uuid4(), failed_at=datetime.now(UTC),
+        ))
+        case = None
+        if with_case:
+            case = await open_case(
+                s, risk_type="payment_failure", subject_ref=ref,
+                amount_at_risk=249900, customer_id="email:leak@example.com",
+            )
+            case.state = state
+        await s.commit()
+        return case.id if case else None
+
+
+async def test_the_payments_page_shows_the_failure_and_never_the_customer(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    PaymentFailure carries an email, a phone and a UPI handle — a UPI VPA is a
+    personal identifier. payment_list names every column it selects for
+    exactly this reason; a select(Model) would put all three one template
+    mistake away from the page.
+    """
+    await _payment(db_sessionmaker, ref="pay_leak", failure_class="insufficient_funds")
+    body = console.get("/console/payments").text
+    assert "pay_leak" in body
+    assert "insufficient funds" in body
+    for secret in ("leak@example.com", "919876500000", "okhdfcbank"):
+        assert secret not in body, f"the payments page leaked {secret}"
+
+
+async def test_the_payment_filters_actually_filter(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A filter that appears to apply and does not is worse than no filter."""
+    await _payment(db_sessionmaker, ref="pay_open", failure_class="insufficient_funds")
+    await _payment(
+        db_sessionmaker, ref="pay_gone", failure_class="fraud_block",
+        state="abandoned",
+    )
+
+    both = console.get("/console/payments").text
+    assert "pay_open" in both and "pay_gone" in both
+
+    by_state = console.get("/console/payments?state=abandoned").text
+    assert "pay_gone" in by_state and "pay_open" not in by_state
+
+    by_class = console.get("/console/payments?class=fraud_block").text
+    assert "pay_gone" in by_class and "pay_open" not in by_class
+
+
+async def test_an_unknown_filter_falls_back_and_says_it_is_showing_everything(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The fallback is safe only because the filter bar then marks "all payments"
+    active. A page that claims to be filtered when it is not is the failure
+    mode worse than having no filter.
+    """
+    await _payment(db_sessionmaker, ref="pay_a", failure_class="insufficient_funds")
+    body = console.get("/console/payments?state=nonsense").text
+    assert "pay_a" in body
+    assert 'href="/console/payments" class="is-on"' in body
+
+
+async def test_a_failure_with_no_case_says_so_rather_than_showing_a_blank(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """An outer join on purpose: the failure no case opened for is exactly the
+    row a merchant most wants to see, and it is a state, not a gap."""
+    await _payment(
+        db_sessionmaker, ref="pay_orphan", failure_class="insufficient_funds",
+        with_case=False,
+    )
+    body = console.get("/console/payments").text
+    assert "pay_orphan" in body
+    assert "no case yet" in body
+
+
+async def test_the_guardrail_trace_names_the_rule_that_refused(
+    db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Not "the AI decided not to retry" — the rule, in the gate's own words,
+    with the rest of the roster shown as what it was: checked and passed.
+    """
+    case_id = await _payment(
+        db_sessionmaker, ref="pay_blocked", failure_class="insufficient_funds"
+    )
+    async with db_sessionmaker() as s:
+        s.add(RetryAttempt(
+            payment_id="pay_blocked", idempotency_key="idem_blocked",
+            attempt_number=1, recovery_case_id=case_id, action_type="switch_rail",
+            agent_type="xgboost", guardrail_passed=False,
+            guardrail_rejection_reason=(
+                "Time-of-day blackout: hour 1 is within 23:00-07:00 IST"
+            ),
+            result="blocked",
+        ))
+        await s.commit()
+        trace = await console_data.guardrail_trace(s, str(case_id))
+
+    assert trace is not None and not trace["passed"]
+    assert trace["failed"] == 1 and trace["checked"] == 12
+    fired = [r for r in trace["rules"] if r["fired"]]
+    assert len(fired) == 1 and fired[0]["label"] == "Quiet hours"
+    assert "23:00-07:00" in fired[0]["detail"]
+    # Every other rule ran and passed — that is the gate's actual claim.
+    assert all(r["detail"] is None for r in trace["rules"] if not r["fired"])
+    assert not trace["unattributed"]
+
+
+async def test_an_approved_attempt_means_every_rule_ran_and_none_fired(
+    db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The gate never stops at the first violation, so "approved" is a claim
+    about all of them — which is the more interesting one, and the one the
+    page could not previously make."""
+    case_id = await _payment(
+        db_sessionmaker, ref="pay_ok", failure_class="insufficient_funds"
+    )
+    async with db_sessionmaker() as s:
+        s.add(RetryAttempt(
+            payment_id="pay_ok", idempotency_key="idem_ok", attempt_number=1,
+            recovery_case_id=case_id, action_type="nudge_customer",
+            agent_type="xgboost", guardrail_passed=True, result="success",
+        ))
+        await s.commit()
+        trace = await console_data.guardrail_trace(s, str(case_id))
+
+    assert trace is not None and trace["passed"]
+    assert trace["failed"] == 0
+    # A nudge carries the twelfth rule the other actions do not.
+    assert trace["checked"] == 13
+    assert any(r["label"] == "Nudges per customer, 24h" for r in trace["rules"])
+
+
+async def test_an_abandon_reports_that_the_gate_ran_nothing(
+    db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """validate() auto-passes an abandon without running a rule. Twelve green
+    ticks here would describe work that never happened."""
+    case_id = await _payment(
+        db_sessionmaker, ref="pay_abandon", failure_class="fraud_block"
+    )
+    async with db_sessionmaker() as s:
+        s.add(RetryAttempt(
+            payment_id="pay_abandon", idempotency_key="idem_ab", attempt_number=1,
+            recovery_case_id=case_id, action_type="abandon", agent_type="xgboost",
+            guardrail_passed=True, result="success",
+        ))
+        await s.commit()
+        trace = await console_data.guardrail_trace(s, str(case_id))
+
+    assert trace is not None
+    assert trace["skipped"] and trace["rules"] == [] and trace["checked"] == 0
+
+
+async def test_a_refusal_matching_no_rule_is_said_out_loud(
+    db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    A rule renamed or its message changed leaves the roster in gate.py
+    drifted. The page must not render that as a clean sheet — an all-passed
+    checklist beside a refusal is the worst possible reading.
+    """
+    case_id = await _payment(
+        db_sessionmaker, ref="pay_drift", failure_class="insufficient_funds"
+    )
+    async with db_sessionmaker() as s:
+        s.add(RetryAttempt(
+            payment_id="pay_drift", idempotency_key="idem_drift", attempt_number=1,
+            recovery_case_id=case_id, action_type="retry_now", agent_type="xgboost",
+            guardrail_passed=False,
+            guardrail_rejection_reason="Some rule nobody labelled said no",
+            result="blocked",
+        ))
+        await s.commit()
+        trace = await console_data.guardrail_trace(s, str(case_id))
+
+    assert trace is not None
+    assert trace["failed"] == 0 and trace["unattributed"]

@@ -21,6 +21,83 @@ from src.guardrail.schemas import validate_action_schema
 logger = logging.getLogger(__name__)
 
 
+# ── The roster, for the surfaces that have to explain the gate ────────────
+#
+# The console shows a merchant which rules ran on an attempt and which fired.
+# It cannot get that from the database: RetryAttempt stores `guardrail_passed`
+# and the joined `guardrail_rejection_reason`, not the roster. So the roster
+# is declared here, beside the checks it describes, as
+#   method name -> (what a merchant calls it, the prefix its refusal starts with)
+#
+# The prefixes are how a stored reason is attributed back to a rule. Both
+# halves are load-bearing and both can drift from the code, so
+# tests/test_guardrail.py asserts every check in _checks_for has an entry and
+# every entry names a real rule — PRODUCT.md's "read from the enforcing
+# structure" applied through a test, since the check list is built with
+# arguments and cannot simply be introspected.
+RULE_LABELS: dict[str, tuple[str, str]] = {
+    "check_hard_decline_blocklist": (
+        "Hard-decline blocklist", "Hard decline blocklist:"),
+    "check_switch_only_class": (
+        "Switch-only failure class", "Switch-only class:"),
+    "check_max_retries_per_payment": (
+        "Retry budget for this payment", "Max retries per payment exceeded:"),
+    "check_max_retries_per_customer": (
+        "Retries per customer, 24h", "Max retries per customer (24h) exceeded:"),
+    "check_amount_ceiling": (
+        "Amount ceiling", "Amount ceiling exceeded:"),
+    "check_consent_window": (
+        "Consent window", "Consent window expired:"),
+    "check_retry_at_within_window": (
+        "Deferred retry lands inside the window",
+        "Scheduled retry falls outside the consent window:"),
+    "check_time_of_day_blackout": (
+        "Quiet hours", "Time-of-day blackout:"),
+    "check_idempotency_key": (
+        "Idempotency key", "Missing idempotency key"),
+    "check_expected_value": (
+        "Expected value clears the attempt cost",
+        "Expected value below attempt cost:"),
+    "check_mandate_predebit_notification": (
+        "RBI pre-debit notice", "RBI e-mandate framework:"),
+    "check_customer_nudge_rate_limit": (
+        "Nudges per customer, 24h", "Nudge rate limit exceeded:"),
+}
+
+# The schema check runs first and is not in _checks_for (different signature),
+# so it is named separately rather than left out of what the console shows.
+SCHEMA_RULE = ("Action schema", "Schema validation failed")
+
+
+def rule_roster(action_type: str) -> list[tuple[str, str, str]]:
+    """
+    The rules the gate runs for this action, in audit order.
+
+    Returns (method name, merchant-facing label, rejection prefix). An
+    `abandon` returns [] — the gate auto-passes it without running anything,
+    and a surface that drew twelve green ticks for an abandon would be
+    describing work that never happened.
+    """
+    if action_type == "abandon":
+        return []
+    names = [
+        "check_hard_decline_blocklist",
+        "check_switch_only_class",
+        "check_max_retries_per_payment",
+        "check_max_retries_per_customer",
+        "check_amount_ceiling",
+        "check_consent_window",
+        "check_retry_at_within_window",
+        "check_time_of_day_blackout",
+        "check_idempotency_key",
+        "check_expected_value",
+        "check_mandate_predebit_notification",
+    ]
+    if action_type == "nudge_customer":
+        names.append("check_customer_nudge_rate_limit")
+    return [(n, *RULE_LABELS[n]) for n in names]
+
+
 class GuardrailResult(BaseModel):
     """Result of guardrail validation."""
 

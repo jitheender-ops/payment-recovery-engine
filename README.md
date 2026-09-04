@@ -564,9 +564,27 @@ page, ten gated ones, all served by the API itself.
 | `GET /console/pipeline` | gated | The funnel, and where the money leaves it |
 | `GET /console/routing` | gated | Which bank clears on which rail |
 | `GET /console/cases` | gated | Every unit of revenue at risk, filterable by state |
+| `GET /console/payments` | gated | The payment rail's own view — what failed, the gateway's reason, and where the recovery got to. Filterable by recovery state and failure class, both URL-bearing |
 | `GET /console/batch` | gated | Preview a cohort, approve it, execute it, measure it |
 | `GET /console/ops` | gated | Is the machinery running — sweeps, heartbeat, and whether the audit hash chain still verifies |
 | `GET /console/evidence` | gated | Does the agent beat the baseline, with paired CIs |
+
+**"Why did the engine do that?" is answerable rule by rule.** The case page
+has always said *whether* the guardrail approved an attempt and reproduced its
+refusal verbatim; what it could not say is what else was checked, so an
+approval read as "nothing objected" rather than as "twelve named rules ran and
+none of them fired" — which is the actual claim, and the more interesting one.
+`/console/case/{id}` now lists the roster for that attempt's action, marks
+which fired, and quotes the gate's own words for those.
+
+It is reconstructed, never re-run: re-validating now would answer *"would this
+pass today"* against a clock, a budget and a consent window that have all
+moved. The roster comes from `gate.rule_roster(action)` — a nudge carries a
+thirteenth rule, an **abandon runs none at all** and says so rather than
+drawing twelve green ticks for work that never happened. A refusal whose text
+matches no rule is reported as unmatched rather than rendered as a clean
+sheet, and `tests/test_guardrail.py` fails if a check is added to the gate
+without a label or a label outlives its rule.
 
 **The console had the engine's side of every case and not the customer's.**
 It could say which guardrail approved an action, on which rail, with what
@@ -898,7 +916,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**911 tests across 59 files, 81% statement coverage over `src/`.** The money
+**924 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

@@ -1872,3 +1872,245 @@ async def nav_counts(session: AsyncSession) -> dict[str, int]:
         # that will not restart on their own.
         "needs_you": disputes + tasks + calls,
     }
+
+
+async def guardrail_trace(
+    session: AsyncSession, case_id: str
+) -> dict[str, Any] | None:
+    """
+    The gate's verdict on this case's latest attempt, rule by rule.
+
+    The case page already says *whether* the guardrail approved an attempt and
+    reproduces its refusal verbatim. What it could not say is what else was
+    checked — so an approval read as "nothing objected" rather than as "eleven
+    named rules ran and none of them fired", which is the actual claim and the
+    more interesting one.
+
+    Reconstructed rather than stored, and the reconstruction is honest about
+    its own limits:
+
+    * The roster comes from `gate.rule_roster(action)`, so it is the rules the
+      gate runs for THAT action — a nudge carries a twelfth, an abandon runs
+      none at all.
+    * A fired rule is attributed by matching its rejection prefix against the
+      stored reason. The gate collects every violation rather than stopping at
+      the first, so a refusal names all of them and the rest of the roster
+      genuinely passed.
+    * Nothing here is a re-run. Re-validating now would answer a different
+      question — "would this pass today" — against a clock, a budget and a
+      consent window that have all moved since.
+    """
+    import uuid as _uuid
+
+    from src.guardrail.gate import SCHEMA_RULE, rule_roster
+
+    try:
+        cid = _uuid.UUID(case_id)
+    except (ValueError, AttributeError):
+        return None
+
+    attempt = await session.scalar(
+        select(RetryAttempt)
+        .where(RetryAttempt.recovery_case_id == cid)
+        .order_by(RetryAttempt.attempt_number.desc(), RetryAttempt.created_at.desc())
+        .limit(1)
+    )
+    if attempt is None:
+        return None
+
+    action = attempt.action_type or ""
+    reason = attempt.guardrail_rejection_reason or ""
+    roster = rule_roster(action)
+
+    if not roster:
+        # An abandon. The gate auto-passes it without running anything, and
+        # drawing eleven green ticks here would describe work that never
+        # happened.
+        return {
+            "attempt": attempt.attempt_number,
+            "action": action,
+            "passed": bool(attempt.guardrail_passed),
+            "skipped": True,
+            "rules": [],
+            "checked": 0,
+            "failed": 0,
+        }
+
+    rules = [
+        {
+            "label": label,
+            # The schema check aside, a rule "fired" exactly when its prefix
+            # appears in the stored reason.
+            "fired": prefix in reason,
+            # Only a fired rule has anything to say; a passed one saying
+            # something would be invented detail.
+            "detail": reason if prefix in reason else None,
+        }
+        for _name, label, prefix in roster
+    ]
+    schema_label, schema_prefix = SCHEMA_RULE
+    rules.insert(0, {
+        "label": schema_label,
+        "fired": schema_prefix in reason,
+        "detail": reason if schema_prefix in reason else None,
+    })
+
+    fired = sum(1 for r in rules if r["fired"])
+    return {
+        "attempt": attempt.attempt_number,
+        "action": action,
+        "passed": bool(attempt.guardrail_passed),
+        "skipped": False,
+        "rules": rules,
+        "checked": len(rules),
+        "failed": fired,
+        # A refusal whose reason matches no prefix: the rule was renamed, or
+        # its message changed, and the roster has drifted. Said out loud
+        # rather than rendered as a clean sheet.
+        "unattributed": bool(reason) and fired == 0,
+        "reason": reason or None,
+    }
+
+
+# The filters the payments page offers, as (value, label) in the order a
+# merchant thinks about them. Declared here rather than in the template so the
+# page cannot offer a filter the query does not implement.
+PAYMENT_STATES: list[tuple[str, str]] = [
+    ("open", "Recovering"),
+    ("recovered", "Recovered"),
+    ("exhausted", "Out of attempts"),
+    ("abandoned", "Abandoned"),
+    ("opted_out", "Opted out"),
+]
+
+
+async def payment_list(
+    session: AsyncSession,
+    *,
+    state: str = "all",
+    failure_class: str = "all",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """
+    The payment rail's own view: one row per failed charge, not per case.
+
+    The console has had a case list since the ledger landed, and a case is not
+    a payment — it is the recovery wrapped around one. A merchant asking "what
+    failed, and why" was being answered with case references and case states,
+    which is the right answer to a different question.
+
+    **Every column is named explicitly.** PaymentFailure carries
+    `customer_email`, `customer_contact` and `vpa` (a UPI handle is a personal
+    identifier), and the console is PII-free by contract. A `select(Model)`
+    here would put all three one template mistake away from the page.
+    """
+    from src.models import PaymentFailure
+
+    stmt = (
+        select(
+            PaymentFailure.payment_id,
+            PaymentFailure.order_id,
+            PaymentFailure.amount,
+            PaymentFailure.method,
+            PaymentFailure.bank,
+            PaymentFailure.card_issuer,
+            PaymentFailure.failure_class,
+            PaymentFailure.is_retryable,
+            PaymentFailure.error_reason,
+            PaymentFailure.failed_at,
+            RecoveryCase.id.label("case_id"),
+            RecoveryCase.state,
+            RecoveryCase.attempts_used,
+            RecoveryCase.max_attempts,
+            RecoveryCase.next_action_at,
+            RecoveryCase.amount_recovered,
+        )
+        # OUTER: a failure whose case has not opened yet is exactly the row a
+        # merchant most wants to see, and an inner join would hide it.
+        .join(
+            RecoveryCase,
+            RecoveryCase.subject_ref == PaymentFailure.payment_id,
+            isouter=True,
+        )
+        .order_by(PaymentFailure.failed_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    count_stmt = (
+        select(func.count())
+        .select_from(PaymentFailure)
+        .join(
+            RecoveryCase,
+            RecoveryCase.subject_ref == PaymentFailure.payment_id,
+            isouter=True,
+        )
+    )
+    if state != "all":
+        stmt = stmt.where(RecoveryCase.state == state)
+        count_stmt = count_stmt.where(RecoveryCase.state == state)
+    if failure_class != "all":
+        stmt = stmt.where(PaymentFailure.failure_class == failure_class)
+        count_stmt = count_stmt.where(PaymentFailure.failure_class == failure_class)
+
+    rows = (await session.execute(stmt)).all()
+    total = int(await session.scalar(count_stmt) or 0)
+
+    # The filter legend, counted the same way the filter itself selects — a
+    # count that disagrees with the list it leads to is worse than no count.
+    by_state = {
+        row[0]: row[1] for row in (await session.execute(
+            select(RecoveryCase.state, func.count())
+            .join(
+                PaymentFailure,
+                PaymentFailure.payment_id == RecoveryCase.subject_ref,
+            )
+            .group_by(RecoveryCase.state)
+        )).all()
+    }
+    by_class = {
+        row[0]: row[1] for row in (await session.execute(
+            select(PaymentFailure.failure_class, func.count())
+            .group_by(PaymentFailure.failure_class)
+            .order_by(func.count().desc())
+        )).all()
+    }
+
+    return {
+        "payments": [
+            {
+                "ref": r.payment_id,
+                "order_ref": r.order_id,
+                "amount": _money(r.amount),
+                "method": r.method,
+                "bank": r.bank or r.card_issuer or "—",
+                "failure_class": r.failure_class.replace("_", " "),
+                "retryable": bool(r.is_retryable),
+                "why": r.error_reason,
+                "failed": _ist(_aware(r.failed_at)).strftime("%d %b, %H:%M"),
+                # None means no case opened for this failure yet — a real
+                # state with its own meaning, not a blank.
+                "case_id": str(r.case_id) if r.case_id else None,
+                "state": r.state,
+                "attempts": (
+                    f"{r.attempts_used}/{r.max_attempts}"
+                    if r.case_id is not None else None
+                ),
+                "next_action": (
+                    _ist(_aware(r.next_action_at)).strftime("%d %b, %H:%M")
+                    if r.next_action_at else None
+                ),
+                "recovered": (
+                    _money(r.amount_recovered) if r.amount_recovered else None
+                ),
+            }
+            for r in rows
+        ],
+        "total": total,
+        "states": [
+            (value, label, by_state.get(value, 0)) for value, label in PAYMENT_STATES
+        ],
+        "classes": [
+            (name, name.replace("_", " "), n) for name, n in by_class.items()
+        ],
+    }

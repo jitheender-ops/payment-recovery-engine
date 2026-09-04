@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.agent.actions import FailureContext, RetryAction
-from src.guardrail.gate import GuardrailGate
+from src.guardrail.gate import RULE_LABELS, GuardrailGate, rule_roster
 from src.guardrail.rules import GuardrailRules
 
 rules = GuardrailRules()
@@ -533,3 +533,92 @@ def _ctx() -> FailureContext:
         bank="HDFC", failed_at=now - timedelta(hours=1), current_time=now,
         hour_of_day=14, day_of_week=2,
     )
+
+
+# ── The roster the console explains the gate with ────────────────────────────
+
+
+def _checks_for(action_type: str) -> list[str]:
+    """The method names _checks_for actually builds, for one action type."""
+    from datetime import UTC, datetime
+
+    from src.agent.actions import FailureContext, RetryAction
+
+    now = datetime.now(UTC)
+    action = RetryAction(action=action_type, confidence=0.8, reason="roster probe")
+    context = FailureContext(
+        payment_id="pay_roster", failure_class="insufficient_funds",
+        error_code="BAD_REQUEST_ERROR", method="card", amount=100000,
+        hour_of_day=12, day_of_week=2, retry_count_24h=0, is_retryable=True,
+        bank="HDFC", failed_at=now, current_time=now,
+    )
+    gate = GuardrailGate()
+    checks = gate._checks_for(action, context, "idem_roster", 0)
+    return [fn.__name__ for fn, _args in checks]
+
+
+def test_every_rule_the_gate_runs_has_a_merchant_facing_label() -> None:
+    """
+    The console tells a merchant which rules ran and which fired. It cannot
+    read that from the database — RetryAttempt stores the joined rejection
+    string, not the roster — so gate.RULE_LABELS declares it. A rule added to
+    _checks_for without a label would be a rule the console silently stopped
+    mentioning, which is the whole failure this asserts against.
+    """
+    for action_type in ("retry_now", "nudge_customer", "switch_rail"):
+        for name in _checks_for(action_type):
+            assert name in RULE_LABELS, f"{name} has no label for the console"
+
+
+def test_no_label_names_a_rule_that_no_longer_exists() -> None:
+    """The other direction: a renamed or deleted check must not leave a label
+    behind, or the console would list a rule nothing runs."""
+    rules = GuardrailRules()
+    for name in RULE_LABELS:
+        assert hasattr(rules, name), f"RULE_LABELS names a missing rule: {name}"
+
+
+def test_the_roster_matches_what_the_gate_actually_runs() -> None:
+    """Same rules, same order — the console's checklist is the audit order."""
+    for action_type in ("retry_now", "switch_rail", "nudge_customer"):
+        roster = [name for name, _label, _prefix in rule_roster(action_type)]
+        assert roster == _checks_for(action_type), action_type
+
+
+def test_an_abandon_has_an_empty_roster_because_the_gate_runs_nothing() -> None:
+    """
+    validate() auto-passes an abandon with rules_checked=0. A surface drawing
+    twelve green ticks for one would be describing work that never happened.
+    """
+    assert rule_roster("abandon") == []
+    gate = GuardrailGate()
+    from datetime import UTC, datetime
+
+    from src.agent.actions import FailureContext, RetryAction
+
+    now = datetime.now(UTC)
+    result = gate.validate(
+        RetryAction(action="abandon", confidence=0.9, reason="hard decline"),
+        FailureContext(
+            payment_id="pay_abandon", failure_class="fraud_block",
+            error_code="BAD_REQUEST_ERROR", method="card", amount=100000,
+            hour_of_day=12, day_of_week=2, retry_count_24h=0,
+            is_retryable=False, bank="HDFC", failed_at=now, current_time=now,
+        ),
+        "idem_abandon", 0,
+    )
+    assert result.passed and result.rules_checked == 0
+
+
+def test_every_rejection_prefix_is_one_a_rule_can_actually_produce() -> None:
+    """
+    The prefixes attribute a stored reason back to its rule. A prefix that no
+    rule emits would silently mark that rule as never-fired on every page it
+    appears on — a guardrail the console claims always passes.
+    """
+    import inspect
+
+    source = inspect.getsource(GuardrailRules)
+    for name, (_label, prefix) in RULE_LABELS.items():
+        # The prefix is the literal head of the f-string the rule returns.
+        assert prefix in source, f"{name}: no rule emits {prefix!r}"

@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, filter_bar, empty_state %}
+{#
+  /console/payments — the payment rail's own view.
+
+  The console has had a case list since the ledger landed, and a case is not a
+  payment: it is the recovery wrapped around one. "What are we chasing" and
+  "what failed, and why" are different questions, and the second is the one a
+  merchant opens the console with.
+
+  Nothing here is computed in the template. Every figure is a column
+  console_data.payment_list selected by name — including the columns it
+  deliberately did not select, because PaymentFailure carries an email, a
+  phone and a UPI handle and this console is PII-free by contract.
+#}
+{% block title %}Payments · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}
+<style>
+  /* The failure reason is prose in a table of references and numbers. Given
+     its own column width so it does not squeeze the money. */
+  .why{color:var(--ink-2);font-size:.83rem;max-width:26ch}
+  .nocase{color:var(--ink-3);font-style:italic}
+</style>
+{% endblock %}
+
+{% block body %}
+{{ console_nav("payments", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Payments</div>
+    <h1 class="ptitle">What failed, and why</h1>
+    <p class="psub">
+      One row per failed charge, newest first — the gateway's own reason, the
+      class the engine put it in, and where the recovery got to. References
+      are your own; a customer's email, phone or UPI handle is never on this
+      page.
+    </p>
+  </header>
+
+  {% if not db_ok %}
+    {{ empty_state(
+      "Can't reach the database.",
+      "Every figure here is read live, so there is no cached number to fall
+       back on — check the database and reload.") }}
+  {% else %}
+  {% set p = data.payments %}
+
+  {# Two filters, both real: the route validates each against the values the
+     query implements, and each count is taken the same way the filter
+     selects. A count that disagrees with the list it leads to is worse than
+     no count. #}
+  {{ filter_bar("/console/payments", "state", p.states, state, "all payments") }}
+  {% if p.classes | length > 1 %}
+  {{ filter_bar("/console/payments", "class", p.classes, fclass, "every failure class") }}
+  {% endif %}
+
+  {% if not p.payments %}
+    {{ empty_state(
+      "No payments match this view." if state != "all" or fclass != "all"
+        else "No failed payments yet.",
+      "A failed card or UPI charge arrives on the Razorpay webhook and opens a
+       case automatically. Until one does, there is nothing here — which is a
+       good state to be in.",
+      "python scripts/simulate_webhooks.py --count 20") }}
+  {% else %}
+    <div class="tw">
+      <table class="ct">
+        <thead><tr>
+          <th>Payment</th><th>Why it failed</th><th>Method</th>
+          <th style="text-align:right">Amount</th>
+          <th>Recovery</th><th>Attempts</th><th>Next action</th><th>Failed</th>
+        </tr></thead>
+        <tbody>
+        {% for row in p.payments %}
+          <tr>
+            <td class="ref">
+              {# The link is to the case, because the decision chain is where
+                 a payment reference actually leads somewhere. A failure with
+                 no case yet has nowhere to go and says so. #}
+              {% if row.case_id %}
+                <a href="/console/case/{{ row.case_id }}">{{ row.ref }}</a>
+              {% else %}
+                {{ row.ref }}
+              {% endif %}
+              {% if row.order_ref %}
+              <span class="faint" style="display:block;font-size:.72rem">{{ row.order_ref }}</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="pill {% if not row.retryable %}pill-r{% endif %}">{{ row.failure_class }}</span>
+              {% if row.why %}<span class="why" style="display:block;margin-top:.25rem">{{ row.why }}</span>{% endif %}
+              {% if not row.retryable %}
+              <span class="faint" style="display:block;font-size:.72rem">
+                never retried — the blocklist is deterministic</span>
+              {% endif %}
+            </td>
+            <td>{{ row.method }}{% if row.bank != "—" %}
+              <span class="faint" style="display:block;font-size:.72rem">{{ row.bank }}</span>{% endif %}</td>
+            <td class="n">{{ row.amount }}
+              {% if row.recovered %}
+              <span class="faint" style="display:block;font-size:.72rem">{{ row.recovered }} back</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.state %}
+                <span class="pill {% if row.state == 'recovered' %}pill-g{% elif row.state in ('exhausted','abandoned','opted_out','expired') %}pill-r{% endif %}">{{ row.state }}</span>
+              {% else %}
+                {# Not a blank: no case has opened for this failure, which is
+                   its own state and the one worth noticing. #}
+                <span class="nocase">no case yet</span>
+              {% endif %}
+            </td>
+            <td class="n">{{ row.attempts or "—" }}</td>
+            <td class="ref">{{ row.next_action or "—" }}</td>
+            <td class="ref">{{ row.failed }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="sec-s" style="margin-top:.8rem">
+      Showing {{ p.payments | length }} of {{ p.total }} payment{{ "s" if p.total != 1 }}
+      {%- if state != "all" or fclass != "all" %} in this view{% endif %}.
+      Open a payment to see the decision chain behind it: what the classifier
+      read, what the policy proposed, and which rules the guardrail ran.
+    </p>
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

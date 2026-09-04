@@ -1133,6 +1133,40 @@ async def console_cases(request: Request) -> Any:
     return await _render_console(request, "console_cases.html", build, state=state)
 
 
+@router.get("/console/payments", response_class=HTMLResponse)
+async def console_payments(request: Request) -> Any:
+    """
+    The payment rail's own view: what failed, why, and where it got to.
+
+    Distinct from /console/cases on purpose. A case is the recovery wrapped
+    around a payment, so the case list answers "what are we chasing"; this
+    answers "what failed", which is the question a merchant actually opens the
+    console with.
+
+    Both filters are validated against the values the read implements. An
+    unrecognised one falls back to "all" — the same behaviour as the cases
+    page, and safe here only because the filter bar then marks "all payments"
+    as the active pill: the page never claims to be filtered when it is not,
+    which is the failure mode worse than having no filter at all.
+    """
+    state = request.query_params.get("state", "all")
+    valid_states = {value for value, _label in console_data.PAYMENT_STATES}
+    if state != "all" and state not in valid_states:
+        state = "all"
+    fclass = request.query_params.get("class", "all")
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {
+            "payments": await console_data.payment_list(
+                session, state=state, failure_class=fclass
+            )
+        }
+
+    return await _render_console(
+        request, "console_payments.html", build, state=state, fclass=fclass
+    )
+
+
 @router.get("/console/batch", response_class=HTMLResponse)
 async def console_batch(request: Request) -> Any:
     """Preview a cohort: eligible, blocked, and why — before anything runs."""
@@ -1348,7 +1382,10 @@ async def console_case(request: Request, case_id: str) -> Any:
     """One case as the whole decision chain, over its audit trail."""
 
     async def build(session: Any) -> dict[str, Any]:
-        return {"case": await console_data.case_detail(session, case_id)}
+        return {
+            "case": await console_data.case_detail(session, case_id),
+            "guardrail": await console_data.guardrail_trace(session, case_id),
+        }
 
     return await _render_console(request, "console_case.html", build)
 

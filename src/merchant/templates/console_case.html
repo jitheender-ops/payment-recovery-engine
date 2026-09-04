@@ -14,6 +14,25 @@
   .chain-k{{ '{' }}font-size:.7rem;text-transform:uppercase;letter-spacing:.12em;
     color:var(--ink-3);font-weight:600{{ '}' }}
   .chain-v{{ '{' }}margin:.15rem 0 0;font-size:.95rem{{ '}' }}
+
+  /* The guardrail checklist. A tick is never the only signal — the verdict
+     is a word beside it, per MASTER.md's non-negotiable. */
+  .gr-list{{ '{' }}list-style:none;margin:1.1rem 0 0;padding:0;
+    display:grid;gap:.1rem{{ '}' }}
+  .gr-rule{{ '{' }}display:grid;grid-template-columns:1.4rem 1fr;gap:.7rem;
+    align-items:baseline;padding:.5rem .2rem;
+    border-bottom:1px solid var(--line){{ '}' }}
+  .gr-rule:last-child{{ '{' }}border-bottom:none{{ '}' }}
+  .gr-mark{{ '{' }}font-family:var(--mono);font-size:.9rem;text-align:center{{ '}' }}
+  .gr-ok .gr-mark{{ '{' }}color:var(--green){{ '}' }}
+  .gr-fired .gr-mark{{ '{' }}color:var(--red){{ '}' }}
+  .gr-label{{ '{' }}font-size:.92rem{{ '}' }}
+  .gr-verdict{{ '{' }}font-family:var(--mono);font-size:.62rem;font-weight:600;
+    letter-spacing:.1em;text-transform:uppercase;margin-left:.5rem;
+    color:var(--ink-3){{ '}' }}
+  .gr-fired .gr-verdict{{ '{' }}color:var(--red){{ '}' }}
+  .gr-detail{{ '{' }}margin:.25rem 0 0;font-size:.83rem;color:var(--ink-2);
+    max-width:62ch{{ '}' }}
 </style>
 {% endblock %}
 
@@ -144,6 +163,68 @@
       </li>
     </ul>
   </section>
+
+  {# ── The gate, rule by rule ───────────────────────────────────────────
+     The chain above says WHETHER the guardrail agreed and quotes its refusal.
+     This says what else ran — so an approval reads as "eleven named rules
+     ran and none fired" rather than "nothing objected", which is the actual
+     claim and the more interesting one. Reconstructed, never re-run:
+     re-validating now would answer "would this pass today", against a clock
+     and a budget that have both moved. #}
+  {% set gr = data.guardrail %}
+  {% if gr %}
+  <section class="sec">
+    <h2 class="sec-t">What the guardrail checked</h2>
+    {% if gr.skipped %}
+      <p class="sec-s">
+        The last decision was <strong>abandon</strong>, and the gate does not
+        run for one — there is nothing to bound when nothing is being spent.
+        It is recorded as passed because refusing an abandon would be refusing
+        to stop.
+      </p>
+    {% else %}
+      <p class="sec-s">
+        Attempt {{ gr.attempt }}, action <strong>{{ gr.action }}</strong>.
+        {% if gr.passed %}
+          All {{ gr.checked }} rules ran and none fired. The gate never
+          stops at the first violation, so an approval means every one of
+          these was checked, not that the first one passed.
+        {% else %}
+          {{ gr.failed }} of {{ gr.checked }} rules refused it.
+          Everything else on this list passed — the gate collects all
+          violations rather than stopping at the first.
+        {% endif %}
+      </p>
+
+      {% if gr.unattributed %}
+      {# The stored reason matched no rule's prefix: a rule was renamed or its
+         message changed and gate.RULE_LABELS has drifted. Said out loud
+         rather than drawn as a clean sheet. #}
+      <div class="empty" style="margin-top:1rem">
+        <b>This refusal could not be matched to a rule.</b>
+        <p>The gate recorded: <span class="mono">{{ gr.reason }}</span>.
+        The checklist below may be describing the wrong rules — a message
+        changed without its label in <span class="mono">guardrail/gate.py</span>.</p>
+      </div>
+      {% endif %}
+
+      <ul class="gr-list">
+        {% for rule in gr.rules %}
+        <li class="gr-rule {{ 'gr-fired' if rule.fired else 'gr-ok' }}">
+          <span class="gr-mark" aria-hidden="true">{{ "✕" if rule.fired else "✓" }}</span>
+          <div>
+            <span class="gr-label">{{ rule.label }}</span>
+            <span class="gr-verdict">{{ "refused" if rule.fired else "passed" }}</span>
+            {% if rule.detail %}
+            <p class="gr-detail">{{ rule.detail }}</p>
+            {% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+  {% endif %}
 
   {# ── Money that arrived another way ─────────────────────────────────────
      NEFT, a cheque, cash, a UPI transfer the merchant took by hand. None of
