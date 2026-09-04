@@ -1369,7 +1369,11 @@ async def test_risk_case_page_stops_past_its_window(
     assert token is not None
     resp = page_client.get(f"/recover/{token}")
     assert resp.status_code == 200
-    assert "/pay" not in resp.text
+    # The pay FORM must be gone past the window. Scoped to the form's action,
+    # not any "/pay" substring: the link-preview card's og:image URL carries
+    # the host's path too (added later), and a marketing meta tag is not a
+    # payment affordance.
+    assert f"/recover/{token}/pay" not in resp.text
 
 
 async def test_self_serve_pay_for_a_risk_case_mints_a_link(

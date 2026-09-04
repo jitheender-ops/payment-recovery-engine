@@ -37,6 +37,12 @@ def _mandate_on(monkeypatch: Any) -> Any:
     leaves that stale executor in place, so these tests passed alone and failed
     in the full suite with "Authentication failed" — the fake was never
     reached. Reset the singleton, not just the settings.
+
+    Blackout off: the mandate debit runs the FULL guardrail, whose
+    23:00–07:00 IST quiet-hours rule refused every debit when the suite ran
+    late at night — these tests asserted on debit counts, not on quiet-hours
+    behaviour (test_blackout_clamp.py owns that). Same fix as
+    test_recovery_batch.py's fixture: an empty window (start == end) is off.
     """
     import src.orchestrator as orch
 
@@ -45,6 +51,8 @@ def _mandate_on(monkeypatch: Any) -> Any:
     monkeypatch.setenv("PROMISE_MANDATE_ENABLED", "true")
     monkeypatch.setenv("DEMO_MODE", "true")
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("RETRY_BLACKOUT_START_HOUR", "0")
+    monkeypatch.setenv("RETRY_BLACKOUT_END_HOUR", "0")
     yield
     orch._orchestrator = None
     get_settings.cache_clear()

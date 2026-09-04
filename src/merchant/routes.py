@@ -776,8 +776,35 @@ async def landing(request: Request) -> Any:
         "landing.html",
         {
             "merchant_name": settings.merchant_name or None,
+            "public_base_url": settings.public_base_url or None,
             "chasers": _chaser_cards(),
             "ladder_rungs": _ladder_rungs(),
+            "authed": _session_valid(request),
+        },
+    )
+
+
+@router.get("/foundation", response_class=HTMLResponse, include_in_schema=False)
+async def foundation(request: Request) -> Any:
+    """
+    The scroll-told product story — the engine's front door, shaped like a
+    product launch page: dark, one idea per screen, measured numbers only.
+
+    Same trust level as /console: every figure here is a fact from the repo's
+    own eval harness (hardcoded, because eval/results are not importable data
+    and must never drift silently — the README and eval_methodology.md carry
+    the full provenance and the CI eval-reproduction job fails if the
+    headline moves). No database, no session, nothing user-specific. The
+    landing (/console) remains the operational door for a signed-in
+    operator; this page is the one a stranger or a funder opens.
+    """
+    settings = get_settings()
+    return templates.TemplateResponse(
+        request,
+        "foundation.html",
+        {
+            "merchant_name": settings.merchant_name or None,
+            "public_base_url": settings.public_base_url or None,
             "authed": _session_valid(request),
         },
     )

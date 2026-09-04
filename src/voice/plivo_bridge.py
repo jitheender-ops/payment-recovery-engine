@@ -39,15 +39,15 @@ import logging
 import secrets
 import urllib.error
 import urllib.request
-from collections import deque
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, Response
 
+from src import rate_limit
 from src.auth import client_ip
 from src.config import get_settings, reveal
 from src.voice import sarvam
@@ -65,35 +65,15 @@ MAX_TURNS = 12
 # Signature auth proves the callback came from the proxy we trust; it says
 # nothing about volume. A provider bug (or a leaked proxy secret) looping
 # turn callbacks would burn Sarvam quota through THIS surface too, because
-# each turn runs STT + an engine call + TTS. Same fixed-window limiter as
-# the customer page, sized for a real call: 12 turns + nudge retries +
+# each turn runs STT + an engine call + TTS. Fixed-window limiter per IP —
+# in-process until REDIS_URL is set, shared across workers after
+# (src/rate_limit.py) — sized for a real call: 12 turns + nudge retries +
 # Plivo redeliveries, several calls at once, still inside the window.
-# ponytail: per-IP buckets, one worker — the deployment the console's own
-# limiter already assumes; shared store only if workers ever multiply.
-_RATE_WINDOW_SECONDS = 60.0
 _RATE_LIMIT = 120            # signed callbacks per IP per window
-_RATE_BUCKETS: dict[str, deque[float]] = {}
 
 
 def _check_rate(request: Request) -> None:
-    import time
-
-    key = f"plivo:{client_ip(request)}"
-    now_mono = time.monotonic()
-    bucket = _RATE_BUCKETS.setdefault(key, deque())
-    while bucket and now_mono - bucket[0] > _RATE_WINDOW_SECONDS:
-        bucket.popleft()
-    if len(bucket) >= _RATE_LIMIT:
-        logger.warning("Plivo callback rate limit hit: %s", key)
-        raise HTTPException(status_code=429, detail="Too many requests")
-    bucket.append(now_mono)
-    if len(_RATE_BUCKETS) > 10_000:
-        stale = [
-            k for k, v in _RATE_BUCKETS.items()
-            if not v or now_mono - v[-1] > _RATE_WINDOW_SECONDS
-        ]
-        for stale_key in stale:
-            del _RATE_BUCKETS[stale_key]
+    rate_limit.check(f"plivo:{client_ip(request)}", _RATE_LIMIT)
 
 
 class BridgeError(RuntimeError):

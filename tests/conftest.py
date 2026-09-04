@@ -63,8 +63,33 @@ def hermetic_settings(monkeypatch: Any) -> Any:
     # every test that sets APP_ENV=production die inside pydantic, for
     # reasons having nothing to do with the code under test.
     monkeypatch.delenv("DEMO_MODE", raising=False)
+    # The suite is hermetic: no test may leave this machine. run.sh sources
+    # .env (with `set -a`) before running pytest, so the developer's REAL
+    # credentials arrive here exported — and two tests have actually burned
+    # them. A live Razorpay downtime feed reporting UPI impaired flipped the
+    # rail-selector test's expected alternative to netbanking; a real LLM
+    # answering the voice turn failed the grounding floor and came back
+    # "abstain". Stripping ambient values restores defaults (no LLM, no
+    # network) exactly as the suite was designed to run; a test that means
+    # to exercise a key sets it itself.
+    for var in (
+        "VOICE_LLM_ENABLED", "CLASSIFIER_LLM_TAIL_ENABLED",
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SARVAM_API_KEY",
+        "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET",
+    ):
+        monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
+    # The live-downtime snapshot is a module-global cache (src/downtime.py):
+    # a test that fetched one (or ran in demo mode, whose payload marks rails
+    # down) would hand it to every later test — the rail selector reads it
+    # through the orchestrator, so an inherited "UPI down" snapshot flips a
+    # rail test's expected alternative from UPI to wallet with no hint why.
+    # Same isolation the rate-limit buckets get.
+    from src.downtime import reset_cache
+
+    reset_cache()
     yield
+    reset_cache()
     get_settings.cache_clear()
 
 

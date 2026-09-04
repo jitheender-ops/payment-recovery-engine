@@ -43,7 +43,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1490,6 +1490,95 @@ async def _stamp_audit_chain(session: AsyncSession) -> int:
         return 0
 
 
+async def _checkpoint_chain(session: AsyncSession) -> int:
+    """
+    Anchor a chain epoch when the interval has passed (src/audit_checkpoint.py).
+
+    Wrapped for the same reason as the stamp: an unkeyed chain in dev/test
+    must never fail the tick that runs after it.
+    """
+    try:
+        from src.audit_checkpoint import checkpoint_chain
+
+        return await checkpoint_chain(session)
+    except AuditChainNotKeyedError:
+        return 0
+
+
+async def _verify_audit_chain(session: AsyncSession) -> int:
+    """
+    The continuous half of the re-anchoring bargain.
+
+    Checkpoints alone make verification fast; nothing made it HAPPEN. An
+    attacker with database access is not slowed by a CLI nobody remembers to
+    run, so the tick runs the epoch verification itself: the tail is
+    recomputed every sweep and one old epoch is content-re-checked per
+    rotation — tampering surfaces in the tick line (and the logs) within one
+    rotation of happening, at O(recent history) cost per tick.
+
+    Returns events recomputed; -1 means the chain FAILED — the tick line
+    then reads -1, which is impossible to mistake for a quiet day.
+    """
+    try:
+        from src.audit_checkpoint import verify_chain_epoch
+
+        ok, _detail, checked = await verify_chain_epoch(session)
+        if not ok:
+            logger.error("AUDIT CHAIN VERIFICATION FAILED: %s", _detail)
+            return -1
+        return checked
+    except AuditChainNotKeyedError:
+        return 0
+
+
+async def prune_processed_events(
+    session: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """
+    Delete processed_events rows older than the retention window.
+
+    The table exists only to collide on its UNIQUE index: `is_duplicate_event`
+    inserts-and-catches, so a row's entire job is done the moment its event's
+    redelivery window closes — Razorpay retries for at most a day, and the
+    default retention is 30. Past that the rows are pure index weight on the
+    one constraint every single webhook pays for, which is the difference
+    between a hot small index and a cold enormous one at millions of users.
+
+    Bounded per tick like every sweep (batch_size), oldest first, and the
+    count it returns is reported in the tick line so pruning is visible —
+    a retention policy nobody can see is a retention policy nobody trusts.
+    0 retention disables the sweep entirely (keep-forever deployments).
+    """
+    from src.models import ProcessedEvent
+
+    retention_days = get_settings().processed_events_retention_days
+    if retention_days <= 0:
+        return 0
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(days=retention_days)
+    # Ids first, then delete by primary key: SQLAlchemy 2.0's delete() has no
+    # .limit(), and DELETE ... LIMIT is dialect-only. Bounded by batch_size
+    # like every other sweep, oldest first.
+    ids = (
+        (
+            await session.execute(
+                select(ProcessedEvent.id)
+                .where(ProcessedEvent.processed_at < cutoff)
+                .order_by(ProcessedEvent.processed_at.asc())
+                .limit(get_settings().scheduler_batch_size)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not ids:
+        return 0
+    await session.execute(
+        delete(ProcessedEvent).where(ProcessedEvent.id.in_(ids))
+    )
+    return len(ids)
+
+
 async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[str, int]:
     """One full pass. Returns what each sweep did, for logs and for tests."""
     now = now or datetime.now(UTC)
@@ -1549,9 +1638,18 @@ async def tick(session: AsyncSession, *, now: datetime | None = None) -> dict[st
         "due_cases_reported": await report_due_cases(session, now=now),
         # The writeback drain: queued merchant alerts → HMAC-signed POSTs.
         "alerts_delivered": await _deliver_alerts(session),
+        # Dedup hygiene: processed_events rows exist only to collide on the
+        # UNIQUE index, and Razorpay stops redelivering after a day — past
+        # retention they are dead weight in the hottest index in the system.
+        "processed_events_pruned": await prune_processed_events(session, now=now),
         # Last: every sweep above may have written case_events, and stamping
-        # them in the same tick keeps the chain contiguous.
+        # them in the same tick keeps the chain contiguous — then re-anchor
+        # an epoch checkpoint when the chain has grown past the interval, so
+        # verification stays O(recent history) as the trail grows — and RUN
+        # that verification, because anchors nobody checks are decoration.
         "events_stamped": await _stamp_audit_chain(session),
+        "chain_checkpointed": await _checkpoint_chain(session),
+        "chain_verified": await _verify_audit_chain(session),
     }
     await _stamp_heartbeat(session, counts, now)
     await session.commit()

@@ -150,6 +150,13 @@ class Settings(BaseSettings):
     # after rotating (existing rows stay readable, their hashes just stop
     # verifying until re-stamped).
     audit_chain_secret: SecretStr = SecretStr("")
+    # Chain re-anchoring (src/audit_checkpoint.py): once this many NEW events
+    # have been stamped past the newest checkpoint, the tick anchors another
+    # epoch. Verification then recomputes only the post-checkpoint tail and
+    # checks older epochs by keyed signature — O(recent history) instead of
+    # O(all history), with identical tamper-evidence. 0 disables anchoring
+    # (the chain still works; verify_chain stays O(all history)).
+    audit_checkpoint_interval_events: int = 5000
     # HMAC key for the voice webhook (POST /voice/turn). Telephony
     # providers sign their callbacks the way Razorpay signs webhooks; empty
     # means the endpoint refuses every request — closed until configured,
@@ -411,20 +418,39 @@ class Settings(BaseSettings):
     # prints it after every training run.
     xgboost_model_sha256: str = ""
 
+    # ── Redis (optional) ────────────────────────────────────────────────
+    # Unset (the default) keeps every rate limit in-process — correct at
+    # WEB_CONCURRENCY=1, which is what render.yaml pins and what every dev
+    # boot runs. Set it the moment the API tier goes multi-replica: the
+    # limiters (src/rate_limit.py) switch to INCR+EXPIRE and the limits
+    # become shared facts instead of per-worker guesses. Never required for
+    # correctness — an unreachable Redis degrades to the old behaviour.
+    redis_url: str = ""
+
     # ── Scheduler ────────────────────────────────────────────────────────
     # The worker that fires deferred `retry_at` attempts, reconciles webhook
     # events whose background task never ran, and expires promises to pay.
-    # Off means those three things silently never happen — which is exactly the
-    # state this codebase was in before src/scheduler.py existed.
+    # Off means those three things silently never happen — which is exactly
+    # the state this codebase was in before src/scheduler.py existed.
     scheduler_enabled: bool = True
     scheduler_interval_seconds: int = 60
     # Rows per sweep per tick. A cap so one backlog cannot hold the loop for
-    # minutes; the next tick picks up where this one stopped.
+    # minutes; the next tick picks up where this one stopped. The default
+    # sized a prototype (≈70-100k active cases/day ceiling); the scale
+    # deployment raises it — see docs/SCALING.md for the capacity math and
+    # why the sweeps are safe to race each other at any size.
     scheduler_batch_size: int = 50
     # How stale a `processed=False` webhook event must be before the reconciler
     # treats it as dropped. Must exceed the time a legitimate background task
     # takes, or the sweep races the task still doing the work.
     event_reconcile_after_seconds: int = 300
+    # Retention for processed_events — the webhook dedup table. Its rows exist
+    # ONLY to collide on the UNIQUE index: Razorpay redelivers a webhook for
+    # at most a day, so a month is ~30× the window. Pruning keeps the hot
+    # dedup index small at webhook-storm scale (millions of rows/year
+    # otherwise); the webhook_events replay log is untouched by this and
+    # remains append-only. 0 disables pruning.
+    processed_events_retention_days: int = 30
     # How stale a result='pending' attempt must be before the scheduler resolves
     # it as failed. A pending row is the write-ahead intent log; the executor's
     # own timeout bounds how long a legitimate call can hold one open, and this

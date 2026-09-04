@@ -1,0 +1,94 @@
+{
+  "model": "xgboost_baseline.joblib",
+  "sha256": "1dffddd2a195c5953963dde0b7513b2a6131713ff95e26d64be3d9be0ae758d7",
+  "trained_at": "2026-09-03T12:24:33.238783+00:00",
+  "label_source": "expected-value argmax over the bank simulator (eval/bank_profiles.py), not the rule heuristic",
+  "samples": 10000,
+  "train_samples": 8000,
+  "test_size": 0.2,
+  "seed": 42,
+  "retry_cost_inr": 2.0,
+  "feature_width": 25,
+  "failure_classes": [
+    "insufficient_funds",
+    "bank_downtime",
+    "network_error",
+    "upi_collect_timeout",
+    "payment_timeout",
+    "3ds_dropoff",
+    "issuer_decline",
+    "card_limit_exceeded",
+    "risk_check_failed",
+    "invalid_card",
+    "expired_instrument",
+    "fraud_block",
+    "hard_decline",
+    "customer_cancelled",
+    "unknown"
+  ],
+  "methods": [
+    "upi",
+    "card",
+    "netbanking",
+    "wallet"
+  ],
+  "action_labels": [
+    "retry_now",
+    "retry_at",
+    "switch_rail",
+    "nudge_customer",
+    "abandon"
+  ],
+  "label_counts": {
+    "retry_now": 9,
+    "retry_at": 628,
+    "switch_rail": 5621,
+    "nudge_customer": 2940,
+    "abandon": 802
+  },
+  "heldout": {
+    "retry_now": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 2.0
+    },
+    "retry_at": {
+      "precision": 0.9919,
+      "recall": 0.9762,
+      "f1-score": 0.984,
+      "support": 126.0
+    },
+    "switch_rail": {
+      "precision": 0.9973,
+      "recall": 0.9991,
+      "f1-score": 0.9982,
+      "support": 1124.0
+    },
+    "nudge_customer": {
+      "precision": 0.9949,
+      "recall": 0.9983,
+      "f1-score": 0.9966,
+      "support": 588.0
+    },
+    "abandon": {
+      "precision": 0.9937,
+      "recall": 0.9812,
+      "f1-score": 0.9874,
+      "support": 160.0
+    },
+    "macro avg": {
+      "precision": 0.9956,
+      "recall": 0.991,
+      "f1-score": 0.9932,
+      "support": 2000.0
+    },
+    "weighted avg": {
+      "precision": 0.996,
+      "recall": 0.996,
+      "f1-score": 0.996,
+      "support": 2000.0
+    }
+  },
+  "pin_hint": "XGBOOST_MODEL_SHA256=1dffddd2a195c5953963dde0b7513b2a6131713ff95e26d64be3d9be0ae758d7"
+}

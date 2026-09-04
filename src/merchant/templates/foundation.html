@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{# ──────────────────────────────────────────────────────────────────────────
+   /foundation — the scroll-told product story.
+
+   Shaped after Razorpay's Vulcan page: a dark ground, one idea per screen,
+   the narrative carried by scroll (hero → the problem → the reveal →
+   compounding intelligence), numbers that earn the next scroll. Everything
+   it states is a MEASURED number from eval/ (common random numbers, the
+   held-out harness the README stands behind) or a product fact — this is a
+   trust surface for a payments product; nothing on it may be vibes.
+
+   Progressive enhancement discipline (same as the console): the page is a
+   complete document without JS. The JS below only advances which section
+   is "lit"; every section is visible without it, in order, forever.
+   ────────────────────────────────────────────────────────────────────────── #}
+{% block robots %}<meta name="robots" content="index, follow">{% endblock %}
+{% block title %}The Payment Recovery Engine — recovery intelligence for failed payments{% endblock %}
+{% block og_title %}The Payment Recovery Engine{% endblock %}
+{% block og_desc %}Every failed payment, decided in milliseconds — grounded, audited, idempotent. ₹11.71L more recovered per ₹1Cr of failures.{% endblock %}
+
+{% block head %}
+<style>
+  /* The foundation page sets its own dark ground; it does not inherit the
+     console's paper theme — this is the product's cinema, not its desk. */
+  html,body{background:#0d0d0d;color:#f4f4f4}
+  body{font-family:'Spline Sans Mono',ui-monospace,monospace}
+  .fm{max-width:60rem;margin:0 auto;padding:0 clamp(1.2rem,4vw,3rem)}
+  .fm section{min-height:100svh;display:flex;flex-direction:column;
+    justify-content:center;gap:1.4rem;padding:14svh 0}
+  .eyebrow{color:#8fbfff;letter-spacing:.32em;font-size:.72rem;
+    text-transform:uppercase;margin:0}
+  h1,h2{color:#f4f4f4;line-height:1.05;letter-spacing:-.02em;margin:0}
+  h1{font-size:clamp(2.6rem,7vw,4.6rem);font-weight:700}
+  h2{font-size:clamp(2rem,5vw,3.4rem);font-weight:700}
+  .lede{color:#c8c8c8;font-size:clamp(1.05rem,2.2vw,1.35rem);
+    line-height:1.65;max-width:42rem;margin:0}
+  .lede b{color:#f4f4f4}
+  /* Scroll-lit sections: everything is visible by default; the JS only adds
+     a stronger presence to the section in view. Without JS, same content. */
+  .fm section{opacity:.35;transition:opacity .6s ease,transform .6s ease;
+    transform:translateY(1.4rem)}
+  .fm section.lit{opacity:1;transform:none}
+  @media (prefers-reduced-motion:reduce){
+    .fm section{opacity:1;transform:none;transition:none}
+  }
+  .rail-map{display:flex;flex-wrap:wrap;gap:.6rem;margin:0}
+  .rail-map span{border:1px solid #2c2c2c;border-radius:2rem;padding:.42rem 1rem;
+    color:#c8c8c8;font-size:.85rem}
+  .rail-map span.hot{border-color:#8fbfff;color:#8fbfff}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
+    gap:1.2rem;margin:0}
+  .stat{border:1px solid #222;border-radius:1rem;padding:1.6rem 1.4rem;
+    background:#101010}
+  .stat .n{font-size:clamp(2.2rem,4.6vw,3.2rem);font-weight:700;color:#8fbfff;
+    line-height:1;margin:.2rem 0 .8rem}
+  .stat .d{color:#c8c8c8;font-size:.95rem;line-height:1.55}
+  .stat .c{color:#666;font-size:.75rem;letter-spacing:.14em;text-transform:uppercase}
+  .sneak{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));
+    gap:.8rem;margin:0}
+  .sneak div{border-left:2px solid #8fbfff;padding:.2rem 0 .2rem 1rem;
+    color:#c8c8c8;font-size:.92rem;line-height:1.6}
+  .sneak b{color:#f4f4f4;display:block;font-size:1rem}
+  .fm footer{padding:4rem 0 6rem;color:#666;font-size:.85rem;
+    display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+  .fm footer a{color:#8fbfff}
+  .cta{display:inline-block;border:1px solid #8fbfff;color:#8fbfff;
+    padding:.9rem 1.8rem;border-radius:.5rem;text-decoration:none;
+    letter-spacing:.06em;font-size:.95rem}
+  .cta:hover{background:#8fbfff;color:#0d0d0d}
+</style>
+{% endblock %}
+
+{% block body %}
+<main class="fm" id="main">
+
+  <section>
+    <p class="eyebrow" data-fm>Step into the recovery</p>
+    <h1>Failed payments are not the end of the sale.</h1>
+    <p class="lede">Indian checkouts fail in the high teens, every day. The
+      <b>Payment Recovery Engine</b> decides — in milliseconds — whether, when
+      and on which rail to chase each one. Grounded in real case facts.
+      Bounded by deterministic guardrails. Audited end to end.</p>
+    <div class="rail-map" aria-label="The decision space">
+      <span>retry now</span><span>retry later</span><span class="hot">switch rail</span>
+      <span>nudge</span><span>abandon</span>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow" data-fm>Payments are complex</p>
+    <h2>A failed payment carries its own story.</h2>
+    <p class="lede">Insufficient funds, issuer declines, bank downtime, 3DS
+      dropoffs, network errors — each block clears on its own clock. A fixed
+      3-retry schedule ignores all of them, burns attempts on hard declines,
+      and calls the noise a strategy.</p>
+    <div class="sneak" role="list">
+      <div role="listitem"><b>Hard declines</b>never retried — the blocklist
+        is deterministic, not a judgement call.</div>
+      <div role="listitem"><b>Bank down right now</b>routed around, live, from
+        the gateway's own downtime feed.</div>
+      <div role="listitem"><b>A promised date</b>buys real silence — the
+        chase stops until the customer's own deadline.</div>
+      <div role="listitem"><b>"Band karo"</b>honoured in any phrasing, any
+        channel, before anything else the system does.</div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow" data-fm>The engine</p>
+    <h2>One case at a time, decided four ways.</h2>
+    <p class="lede">A deterministic classifier reads the error code. An
+      XGBoost policy weighs the case against <b>simulated bank outcomes</b>.
+      Every rupee it can ever state is grounded in a database row, and a
+      12-rule guardrail sits between the decision and the money — the LLM
+      never authorizes a charge.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow" data-fm>Compounding intelligence</p>
+    <h2>Measured, not promised.</h2>
+    <div class="stats">
+      <div class="stat">
+        <div class="c">Recovery rate</div>
+        <div class="n">+11.03pp</div>
+        <div class="d">over fixed 3-retry, 95% CI [+10.54, +11.52], 25,000
+          paired scenarios under common random numbers.</div>
+      </div>
+      <div class="stat">
+        <div class="c">Net revenue</div>
+        <div class="n">₹11.71L</div>
+        <div class="d">additional per ₹1Cr of failed volume — after retry
+          costs, versus the fixed baseline.</div>
+      </div>
+      <div class="stat">
+        <div class="c">False retries</div>
+        <div class="n">0.0%</div>
+        <div class="d">zero attempts spent on payments the engine knew were
+          uncollectable.</div>
+      </div>
+      <div class="stat">
+        <div class="c">Fewer attempts</div>
+        <div class="n">−0.41</div>
+        <div class="d">per case: recovers more while trying less — the
+          customer hears from the engine less.</div>
+      </div>
+    </div>
+    <p class="lede" style="font-size:.9rem;color:#666">5,000 scenarios × 5
+      seeds, differenced pairwise against the same random draws. The harness
+      drops any row whose decisions fall back under errors — it refuses to
+      report a number it did not measure.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow" data-fm>Every channel answers back</p>
+    <h2>Recovery is a conversation.</h2>
+    <p class="lede">A Hinglish voice agent that only speaks grounded numbers.
+      Promises with silence until the promised day. Instalment plans, B2B
+      statements, disputes that freeze the chase — every reply becomes state
+      the engine respects.</p>
+    <div class="sneak" role="list">
+      <div role="listitem"><b>Voice</b>an AI that introduces itself as one,
+        abstains when unsure, and never invents a rupee.</div>
+      <div role="listitem"><b>Receivables</b>one statement per buyer, not
+        four messages — escalated by person, not volume.</div>
+      <div role="listitem"><b>Audit</b>hash-chained case events, keyed and
+        tamper-evident, verified on every sweep.</div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow" data-fm>See it</p>
+    <h2>One command, no credentials.</h2>
+    <p class="lede">The demo runs the entire engine offline — seeded book,
+      live sweeps, the console, every page state — against a fake gateway.
+      Nothing leaves the machine.</p>
+    <p style="margin:0"><code style="color:#8fbfff;font-size:1.05rem">./run.sh --demo</code></p>
+    <a class="cta" href="/console" style="margin-top:.6rem">Open the console →</a>
+  </section>
+
+  <footer>
+    <span>Payment Recovery Engine · every number on this page is from the
+      repo's own eval harness</span>
+    <a href="/console">Console</a> · <a href="/model">The decision model</a>
+  </footer>
+</main>
+
+<script>
+  // The only JS on the page: which section is "lit". Every section is
+  // visible without this; it adds emphasis, not content.
+  (function () {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    var sections = document.querySelectorAll('.fm section');
+    if (!('IntersectionObserver' in window)) {
+      sections.forEach(function (s) { s.classList.add('lit'); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) e.target.classList.add('lit');
+      });
+    }, { threshold: 0.35 });
+    sections.forEach(function (s) { io.observe(s); });
+  })();
+</script>
+{% endblock %}

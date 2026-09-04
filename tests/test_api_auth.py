@@ -67,7 +67,9 @@ def test_root_sends_a_human_to_the_product(monkeypatch: Any) -> None:
 
     resp = client.get("/", follow_redirects=False)
     assert resp.status_code in (302, 307)
-    assert resp.headers["location"] == "/console"
+    # /foundation, the scroll-told product story — the console stays a
+    # click deeper for the operator.
+    assert resp.headers["location"] == "/foundation"
 
 
 def test_schema_requires_the_key_in_production(monkeypatch: Any) -> None:

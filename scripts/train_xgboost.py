@@ -14,10 +14,20 @@ Labels now come from the bank simulator's own probabilities: for each scenario,
 compute the expected net recovery of every action in the action space and take
 the argmax. That is a signal the rules do not already contain, so the model can
 disagree with them — and a held-out split makes the score mean something.
+
+Every run also writes <output>.card.json — the model card. The joblib is a
+1MB binary with no provenance, so "is this model stale? trained on what?" had
+no answer once it left the machine that trained it. The card answers it:
+what trained it (taxonomy, action space, feature width — the things a model
+is silently FROZEN at, see xgboost_baseline's width refusal), when, how many
+samples, from which seed, at what retry cost, and the SHA-256 to pin in
+XGBOOST_MODEL_SHA256. Compared against the live taxonomy at load time, a
+stale model names itself before it can mislabel a decision.
 """
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -123,7 +133,9 @@ def main() -> None:
     X = np.array(X_list)
     y = np.array(y_list)
 
-    counts = {ACTION_LABELS[i]: int((y == i).sum()) for i in range(len(ACTION_LABELS))}
+    counts: dict[str, int] = {
+        ACTION_LABELS[i]: int((y == i).sum()) for i in range(len(ACTION_LABELS))
+    }
     print(f"Label distribution (expected-value argmax): {counts}")
 
     # XGBoost requires every label in [0, num_class) to be present; retry_now
@@ -168,6 +180,13 @@ def main() -> None:
     y_pred = model.predict(X_test)
     labels_present = sorted(set(y_test) | set(y_pred))
     print("\nHeld-out performance:\n")
+    report = classification_report(
+        y_test, y_pred,
+        labels=labels_present,
+        target_names=[ACTION_LABELS[i] for i in labels_present],
+        zero_division=0,
+        output_dict=True,
+    )
     print(classification_report(
         y_test, y_pred,
         labels=labels_present,
@@ -175,6 +194,60 @@ def main() -> None:
         zero_division=0,
     ))
     print(f"Model saved to {args.output}")
+
+    write_model_card(args, X.shape[1], counts, report)
+
+
+def write_model_card(
+    args: argparse.Namespace,
+    feature_width: int,
+    label_counts: dict[str, int],
+    heldout_report: dict[str, Any],
+) -> None:
+    """
+    The provenance record next to the joblib, as JSON.
+
+    Everything here is either a fact the training run already had or a hash of
+    code the model is frozen against. The card is written AFTER the joblib and
+    records the joblib's own SHA-256, so the pair is verifiable: pin the digest
+    in XGBOOST_MODEL_SHA256 and the loader refuses any file whose bytes were
+    swapped without a matching card.
+    """
+    import hashlib
+    import json
+
+    from src.agent.xgboost_baseline import FAILURE_CLASSES, METHODS
+
+    model_path = Path(args.output)
+    digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+
+    card = {
+        "model": model_path.name,
+        "sha256": digest,
+        "trained_at": datetime.now(UTC).isoformat(),
+        "label_source": "expected-value argmax over the bank simulator "
+                        "(eval/bank_profiles.py), not the rule heuristic",
+        "samples": args.n_samples,
+        "train_samples": int(args.n_samples * (1 - args.test_size)),
+        "test_size": args.test_size,
+        "seed": args.seed,
+        "retry_cost_inr": args.retry_cost_inr,
+        "feature_width": feature_width,
+        "failure_classes": list(FAILURE_CLASSES),
+        "methods": list(METHODS),
+        "action_labels": list(ACTION_LABELS),
+        "label_counts": label_counts,
+        "heldout": {
+            name: {m: round(float(v), 4) for m, v in stats.items()}
+            for name, stats in heldout_report.items()
+            if isinstance(stats, dict)
+        },
+        "pin_hint": f"XGBOOST_MODEL_SHA256={digest}",
+    }
+    card_path = model_path.with_suffix(".card.json")
+    card_path.write_text(json.dumps(card, indent=2) + "\n")
+    print(f"Model card written to {card_path}")
+    print(f"Pin this in .env: XGBOOST_MODEL_SHA256={digest}")
 
 
 if __name__ == "__main__":

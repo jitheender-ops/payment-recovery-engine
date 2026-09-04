@@ -30,6 +30,20 @@
 <meta http-equiv="refresh" content="8; url={{ page_path }}?r=1">
 {% endif %}
 <title>{% block title %}Your payment{% endblock %}</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+{# Link previews: the recovery link travels inside an SMS, and in WhatsApp and
+   Instagram inboxes a bare onrender.com URL with no card looks exactly like
+   the phishing it is not — the merchant's name and the page's purpose,
+   unfurled, are the trust signal that earns the tap. Absolute URLs because
+   unfurlers fetch them cold, with no session and no page context. og:image
+   is an SVG card some scrapers rasterize poorly; the tags still carry, and
+   a merchant with a hosted PNG can override og:image in .env later. #}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{{ merchant_name or 'Payment Recovery' }}">
+<meta property="og:title" content="{% block og_title %}Your pending payment{% endblock %}">
+<meta property="og:description" content="{% block og_desc %}A secure, expiring link to complete your pending payment — powered by Razorpay.{% endblock %}">
+<meta property="og:image" content="{{ public_base_url or '' }}/static/og-card.svg">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
@@ -301,6 +315,19 @@
     h1{font-size:1.75rem}
     .amount{font-size:3.6rem}
     .amount-long{font-size:2.8rem}
+  }
+  {# The recovered state is a receipt: a customer who wants it on paper gets
+     the money facts and the reference, not the interactive chrome, the
+     opt-out box, or a page cut off mid-trust-strip. Every interactive piece
+     collapses; the printed page states what was paid and when. #}
+  @media print{
+    header,.trust,opt-out,.promise-box,details,form,.help,.no-print,
+    footer nav,.flash{display:none!important}
+    body{background:#fff;color:#000}
+    .card,.note{border:1px solid #999;box-shadow:none;break-inside:avoid}
+    .amount{font-size:1.6rem}
+    a{color:#000;text-decoration:none}
+    a[href]::after{content:""}
   }
 </style>
 </head>

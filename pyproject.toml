@@ -68,6 +68,15 @@ dev = [
     # taking the whole suite down with it rather than one file.
     "hypothesis>=6.100.0",
 ]
+# The multi-replica tier: shared rate limiting (src/rate_limit.py) moves the
+# limiters to Redis the moment REDIS_URL is set. Deliberately NOT a base
+# dependency — one-worker deployments (the default, dev, the demo) never
+# import it, and the code fails open to in-process counting when the package
+# or the server is missing. Install with .[scale] when the API goes
+# multi-replica; see docs/SCALING.md phase 2.
+scale = [
+    "redis>=5.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]

@@ -136,3 +136,38 @@ def test_a_swapped_model_file_is_refused_when_a_pin_is_set(tmp_path: Any, monkey
     )
     # Matching pin, unpickleable bytes: still rules, but it got PAST the pin.
     assert XGBoostBaseline(model_path=str(path)).is_trained is False
+
+
+def test_every_training_run_writes_a_matching_model_card(tmp_path: Any) -> None:
+    """The joblib is an opaque binary with no provenance; the card IS the
+    provenance. The pairing contract: same directory, same stem, a SHA-256
+    that matches the joblib's actual bytes, and the feature width the loader
+    refuses stale models against."""
+    import hashlib
+    import json
+    import subprocess
+    import sys
+
+    out = tmp_path / "m.joblib"
+    card_path = out.with_suffix(".card.json")
+
+    # Run the real CLI exactly as the Dockerfile does — the card is the
+    # script's contract, not the trainer helper's.
+    res = subprocess.run(
+        [sys.executable, "scripts/train_xgboost.py", "--n-samples", "5000",
+         "--output", str(out)],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stderr[-400:]
+    assert out.is_file() and card_path.is_file(), "training wrote no model card"
+
+    card = json.loads(card_path.read_text())
+    assert card["sha256"] == hashlib.sha256(out.read_bytes()).hexdigest(), (
+        "the card's digest does not match the joblib beside it"
+    )
+    from src.agent.xgboost_baseline import FAILURE_CLASSES, METHODS
+    assert card["feature_width"] == len(FAILURE_CLASSES) + len(METHODS) + 6
+    assert card["action_labels"] == ["retry_now", "retry_at", "switch_rail",
+                                     "nudge_customer", "abandon"]
+    assert card["pin_hint"].startswith("XGBOOST_MODEL_SHA256=")
+    assert sum(card["label_counts"].values()) == card["samples"]

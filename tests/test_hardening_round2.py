@@ -580,13 +580,17 @@ def test_rate_limit_window_releases(
 ) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
-    customer_routes._RATE_LIMIT_BUCKETS.clear()
+    from src import rate_limit as rl
+
+    rl.clear_all()
     request = _FakeRequest("9.9.9.9")
-    bucket = customer_routes._RATE_LIMIT_BUCKETS.setdefault("pay:9.9.9.9", deque())
-    bucket.append(0.0)  # ancient timestamp
-    monkeypatch.setattr(customer_routes.time, "monotonic", lambda: 1e9)
+    # An ancient timestamp: the window must have released it.
+    bucket = rl._BUCKETS.setdefault("pay:9.9.9.9", deque())
+    bucket.append(0.0)
+    monkeypatch.setattr(rl.time, "monotonic", lambda: 1e9)
     customer_routes._check_rate_limit(request, kind="pay", limit=1)
-    customer_routes._RATE_LIMIT_BUCKETS.clear()
+    monkeypatch.undo()
+    rl.clear_all()
     get_settings.cache_clear()
 
 

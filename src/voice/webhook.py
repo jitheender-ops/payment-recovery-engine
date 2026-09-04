@@ -29,13 +29,13 @@ import hmac
 import logging
 import time
 import uuid
-from collections import deque
 from hashlib import sha256
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from src import rate_limit
 from src.auth import client_ip
 from src.cases import record_opt_out
 from src.config import get_settings, reveal
@@ -51,34 +51,16 @@ router = APIRouter()
 # ── Rate limiting ───────────────────────────────────────────────────────────
 # Signature auth proves the caller knows the secret; it says nothing about
 # VOLUME. A leaked VOICE_WEBHOOK_SECRET (or a provider bug looping callbacks)
-# would burn Sarvam STT/TTS quota and LLM tokens unbounded. Same in-process
-# fixed-window limiter the customer page uses, sized for a live call: a
-# conversation turns over every few seconds, so MAX_TURNS (12) plus retries
-# and redeliveres must fit comfortably inside the window.
-# ponytail: per-IP buckets, one worker — same deployment reality as the
-# customer page's limiter; a multi-worker deployment needs the shared store.
-_VOICE_RATE_WINDOW_SECONDS = 60.0
+# would burn Sarvam STT/TTS quota and LLM tokens unbounded. Fixed-window
+# limiter per IP — in-process until REDIS_URL is set, shared across workers
+# after (src/rate_limit.py) — sized for a live call: a conversation turns
+# over every few seconds, so MAX_TURNS (12) plus retries and redeliveries
+# must fit comfortably inside the window.
 _VOICE_TURN_LIMIT = 60        # signed turns per IP per window
-_VOICE_RATE_BUCKETS: dict[str, deque[float]] = {}
 
 
 def _check_voice_rate_limit(request: Request) -> None:
-    key = f"voice:{client_ip(request)}"
-    now_mono = time.monotonic()
-    bucket = _VOICE_RATE_BUCKETS.setdefault(key, deque())
-    while bucket and now_mono - bucket[0] > _VOICE_RATE_WINDOW_SECONDS:
-        bucket.popleft()
-    if len(bucket) >= _VOICE_TURN_LIMIT:
-        logger.warning("Voice rate limit hit: %s (%d in window)", key, len(bucket))
-        raise HTTPException(status_code=429, detail="Too many requests")
-    bucket.append(now_mono)
-    if len(_VOICE_RATE_BUCKETS) > 10_000:
-        stale = [
-            k for k, v in _VOICE_RATE_BUCKETS.items()
-            if not v or now_mono - v[-1] > _VOICE_RATE_WINDOW_SECONDS
-        ]
-        for stale_key in stale:
-            del _VOICE_RATE_BUCKETS[stale_key]
+    rate_limit.check(f"voice:{client_ip(request)}", _VOICE_TURN_LIMIT)
 
 
 def _voice_secret() -> str:

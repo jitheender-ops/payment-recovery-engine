@@ -13,6 +13,7 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
@@ -225,6 +226,26 @@ async def _recovery_page_headers(request: Request, call_next: Any) -> Response:
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         response.headers["Cache-Control"] = "no-store, private"
         response.headers["Referrer-Policy"] = "no-referrer"
+    elif request.url.path.startswith(("/console", "/voice/demo", "/foundation")):
+        # The operator surfaces carry live rupee figures, case references and
+        # action buttons (dispute resolution, link admin) behind a session
+        # cookie — the same UI-redress and shared-cache concerns the money
+        # page has, minus the token-in-URL (so a lax referrer is fine and
+        # `no-store` is the one that matters most: a console page left in a
+        # shared-browser or proxy cache is a data leak). The public landing is
+        # /console itself and frames safely too — DENY everywhere here is
+        # the simpler, stricter posture.
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        # Session-authed pages must never come from a cache; the public
+        # landing joins them so a stale marketing page cannot outlive a
+        # product change.
+        response.headers["Cache-Control"] = "no-store, private"
+    # Every HTML surface, token-bearing or not: MIME-sniffing off. A
+    # template that ever echoes anything content-type-shaped must not be
+    # interpreted as something else by an old proxy.
+    if "text/html" in response.headers.get("content-type", ""):
+        response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 
@@ -239,10 +260,34 @@ async def health_check() -> dict[str, str]:
     return {"status": "healthy"}
 
 
+# ── Brand assets: favicon + link-preview card ─────────────────────────────
+# Served from memory, not a static mount: two small files a template would
+# otherwise 404 on every page load (the favicon) or that must exist at a
+# stable absolute URL for link unfurlers (the og:image), which cache by URL
+# and cannot see session state anyway. Inline Response also keeps CSP simple
+# — no new origins anywhere.
+
+_FAVICON: bytes = (Path(__file__).parent / "static" / "favicon.svg").read_bytes()
+_OG_IMAGE: bytes = (Path(__file__).parent / "static" / "og-default.svg").read_bytes()
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon() -> Response:
+    return Response(content=_FAVICON, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/static/og-card.svg", include_in_schema=False)
+async def og_card() -> Response:
+    """The link-preview image. Absolute, cacheable, no secrets in it."""
+    return Response(content=_OG_IMAGE, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
 @app.get("/", include_in_schema=False)
 async def root() -> RedirectResponse:
-    """Bare domain root — send a human straight to the product, not a JSON blob."""
-    return RedirectResponse(url="/console")
+    """Bare domain root — the scroll-told product story, not a JSON blob."""
+    return RedirectResponse(url="/foundation")
 
 
 @app.get("/status")

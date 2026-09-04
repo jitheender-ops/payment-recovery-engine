@@ -443,6 +443,9 @@ async def test_tick_reports_what_each_sweep_did(
             "plans_reconciled": 0,
             "alerts_delivered": 0,
             "events_stamped": 0,
+            "processed_events_pruned": 0,
+            "chain_checkpointed": 0,
+            "chain_verified": 0,
         }
 
 

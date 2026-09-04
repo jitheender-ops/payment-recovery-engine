@@ -26,6 +26,16 @@
 <meta name="color-scheme" content="light">
 {% block robots %}<meta name="robots" content="noindex, nofollow">{% endblock %}
 <title>{% block title %}Recovery Console{% endblock %}</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+{# Previews for the PUBLIC pages under this base (the landing especially):
+   the operator pages are noindex (see robots below) and unfurlers obey that,
+   so these tags only ever describe product pages in the wild. #}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{{ merchant_name or 'Payment Recovery Engine' }}">
+<meta property="og:title" content="{% block og_title %}Payment Recovery Engine{% endblock %}">
+<meta property="og:description" content="{% block og_desc %}AI-decided, guardrail-bounded payment recovery — retries, promises, voice, B2B receivables.{% endblock %}">
+<meta property="og:image" content="{{ public_base_url or '' }}/static/og-card.svg">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=Spline+Sans+Mono:wght@400;500;600&display=swap">

@@ -28,8 +28,6 @@ Three rules hold this file together:
 from __future__ import annotations
 
 import logging
-import time
-from collections import deque
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,14 +35,18 @@ from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+# HTTPException is re-exported by this import even though the limiter that
+# raised it moved to src/rate_limit.py: the route handlers' tests (and the
+# /pay flows) reference it through this module, and the 429 their callers
+# see is this surface's contract.
+from fastapi import APIRouter, Depends, HTTPException, Request  # noqa: F401
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src import recovery_link
+from src import rate_limit, recovery_link
 from src.agent.actions import PaymentRail
 from src.auth import client_ip
 from src.config import get_settings
@@ -149,37 +151,26 @@ def _aging(due_at: datetime | None) -> tuple[str | None, int | None]:
 # This is the one public, unauthenticated surface in the product (the token in
 # the URL is the credential), and until now nothing throttled it: token
 # guessing, /pay hammering and slow-loris loops were all free. A fixed window
-# per client IP, in-process — which is exactly right for the deployment this
-# ships on (one uvicorn worker; render.yaml pins WEB_CONCURRENCY=1) and
-# deliberately NOT a Redis dependency. Two limits because they protect
-# different things: page views are cheap reads, /pay mints Razorpay objects.
+# per client IP, in-process when REDIS_URL is unset — exactly right for the
+# deployment this ships on (one uvicorn worker; render.yaml pins
+# WEB_CONCURRENCY=1) — and shared across workers via Redis the moment the
+# API tier goes multi-replica (src/rate_limit.py owns that switch).
+# Two limits because they protect different things: page views are cheap
+# reads, /pay mints Razorpay objects.
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
 _PAGE_LIMIT = 30          # page views per window per IP
 _PAY_LIMIT = 6            # payment starts per window per IP — link creation is the expensive call
-_RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+# Kept as an alias for the tests that clear it between cases; the buckets
+# themselves now live in src/rate_limit.py (one store, one GC pass).
+_RATE_LIMIT_BUCKETS = rate_limit._BUCKETS
 
 
 def _check_rate_limit(request: Request, *, kind: str, limit: int) -> None:
     """Raise 429 once an IP exhausts its window budget for this kind of call."""
-    key = f"{kind}:{client_ip(request)}"
-    now_mono = time.monotonic()
-    bucket = _RATE_LIMIT_BUCKETS.setdefault(key, deque())
-    while bucket and now_mono - bucket[0] > _RATE_LIMIT_WINDOW_SECONDS:
-        bucket.popleft()
-    if len(bucket) >= limit:
-        logger.warning("Rate limit hit: %s (%d in window)", key, len(bucket))
-        raise HTTPException(status_code=429, detail="Too many requests")
-    bucket.append(now_mono)
-    # GC once the map grows beyond the expected population of live clients:
-    # drop every bucket whose newest hit has aged out of the window — not just
-    # empty ones, or a slow drip from many IPs grows the dict without bound.
-    if len(_RATE_LIMIT_BUCKETS) > 10_000:
-        stale = [
-            k for k, v in _RATE_LIMIT_BUCKETS.items()
-            if not v or now_mono - v[-1] > _RATE_LIMIT_WINDOW_SECONDS
-        ]
-        for stale_key in stale:
-            del _RATE_LIMIT_BUCKETS[stale_key]
+    rate_limit.check(
+        f"{kind}:{client_ip(request)}", limit,
+        window=_RATE_LIMIT_WINDOW_SECONDS,
+    )
 
 
 async def _load(
@@ -631,6 +622,7 @@ async def recovery_page(
             "t": t,
             "lang": lang,
             "merchant_name": settings.merchant_name or None,
+            "public_base_url": settings.public_base_url or None,
             "whatsapp": settings.support_whatsapp or None,
             "state": state,
             "detail": detail,
@@ -1473,6 +1465,7 @@ async def statement_page(
             "t": t,
             "lang": lang,
             "merchant_name": settings.merchant_name,
+            "public_base_url": settings.public_base_url or None,
             "account_name": account.display_name or account.account_ref,
             "invoices": invoices,
             "outstanding": _money(outstanding),

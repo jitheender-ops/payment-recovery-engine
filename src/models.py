@@ -741,3 +741,36 @@ class VoiceCallQueue(Base):
         Index("ix_voice_call_queue_recovery_case_id", "recovery_case_id"),
         Index("ix_voice_call_queue_state_created", "state", "created_at"),
     )
+
+
+class AuditCheckpoint(Base):
+    """
+    Periodic anchor of the case_events hash chain (src/audit_checkpoint.py).
+
+    One row per epoch: the event id the epoch ends at, the chain head hash at
+    that boundary, and a keyed signature binding the two. Verification after
+    an epoch exists recomputes only the post-checkpoint tail and checks older
+    stretches against these signatures — O(recent history) instead of
+    O(all history), with the same tamper-evidence: rewriting any row inside
+    an old epoch changes that epoch's head, breaking its checkpoint
+    signature; forging a checkpoint requires AUDIT_CHAIN_SECRET.
+    """
+
+    __tablename__ = "audit_checkpoints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    last_event_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    head_event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    events_through: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The rotation marker (see audit_checkpoint.verify_chain_epoch): when
+    # this epoch's stretch was last re-verified FROM CONTENT. NULL = due.
+    # Every verification run recomputes the oldest NULL epoch and stamps it,
+    # so O(all history) re-reading is spread across runs in rotation order
+    # instead of repeating per run or — worse — never happening at all.
+    content_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

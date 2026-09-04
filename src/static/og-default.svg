@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- Link-preview card: dark product ground, the stat that earns the click. -->
+  <rect width="1200" height="630" fill="#0d0d0d"/>
+  <circle cx="1060" cy="90" r="180" fill="#101820"/>
+  <circle cx="1060" cy="90" r="120" fill="#16222e"/>
+  <text x="90" y="130" font-family="system-ui, sans-serif" font-size="34"
+        fill="#8fbfff" letter-spacing="6">PAYMENT RECOVERY ENGINE</text>
+  <text x="86" y="250" font-family="system-ui, sans-serif" font-size="96"
+        font-weight="700" fill="#f4f4f4">₹11.71L more recovered</text>
+  <text x="86" y="340" font-family="system-ui, sans-serif" font-size="96"
+        font-weight="700" fill="#f4f4f4">per ₹1Cr of failures</text>
+  <text x="90" y="430" font-family="system-ui, sans-serif" font-size="36" fill="#c8c8c8">
+    Decisions in milliseconds. Every rupee grounded, audited, idempotent.</text>
+  <text x="90" y="560" font-family="system-ui, sans-serif" font-size="30"
+        fill="#8fbfff">+11.03pp recovery · 15% fewer attempts · 0 false retries</text>
+</svg>
