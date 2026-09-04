@@ -40,15 +40,25 @@
         ("batch",    "Batch",    "Recover across a cohort, and measure it", none),
     ]),
     ("Receivables", [
-        ("accounts", "Buyers",   "Who owes you, and who you can reach", "disputes"),
+        ("accounts",    "Buyers",       "Who owes you, and who you can reach", "disputes"),
+        ("receivables", "Receivables",  "Aging, ladder and outstanding", none),
+        ("promises",    "Promises",     "Who committed to pay and whether they did", none),
+        ("plans",       "Plans",        "Instalment schedules and their progress", none),
+        ("disputes",    "Disputes",     "Frozen invoices awaiting your verdict", "disputes"),
     ]),
     ("Customer", [
         ("messages", "Messages", "What your customers actually read", none),
         ("customer", "Customer", "The page they open, and whether they did", none),
+        ("voice",    "Voice",    "The call queue, outcomes and safety gates", "calls"),
     ]),
     ("Trust", [
-        ("ops",      "Engine",   "Is the machinery running", "calls"),
-        ("evidence", "Evidence", "Does the agent beat the baseline", none),
+        ("ops",                    "Engine",    "Is the machinery running", "calls"),
+        ("evidence",               "Evidence",  "Does the agent beat the baseline", none),
+        ("safety",                 "Safety",    "Every safeguard, its live state", none),
+        ("activity",               "Activity",  "The audit trail, event by event", none),
+        ("analytics/performance",  "Analytics", "Recovery performance and economics", none),
+        ("search",                 "Search",    "Find any payment, case or invoice", none),
+        ("settings",               "Settings",  "What is configured and what is not", none),
     ]),
 ] %}
 <nav class="nav">
@@ -79,6 +89,21 @@
       {% endfor %}
     </div>
   </div>
+
+  {# Bring the current page into view on a strip too wide to fit it.
+     At twenty-one items the Trust group sits past the right edge on a 1280px
+     screen, so a merchant on /console/safety saw no highlighted item at all
+     and the strip read as "you are nowhere". Enhancement, not content: with
+     no JavaScript every link still works and the strip still scrolls by
+     hand — this only saves the scrolling. `nearest`, so a page whose item is
+     already visible does not jump. #}
+  <script>
+    (function () {
+      var on = document.querySelector('.subnav-item.is-on');
+      if (!on || !on.scrollIntoView) return;
+      on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    })();
+  </script>
 
   {# ── Under 720px: a drawer, where the group labels fit ──────────────── #}
   <details class="navdraw">

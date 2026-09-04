@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill %}
+{% block title %}Settings · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("settings", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Trust</div>
+    <h1 class="ptitle">Settings</h1>
+    <p class="psub">What is configured and what is not. Read-only.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    <section class="sec">
+      <h2 class="sec-t">Integrations</h2>
+      <div class="tw">
+        <table class="ct">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for i in data.settings.integrations %}
+            <tr>
+              <td>{{ i.name }}</td>
+              <td>{{ severity_pill('info' if i.configured else 'stop', 'Configured' if i.configured else 'Not configured') }}</td>
+              <td>{{ i.detail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" style="margin-top:2rem">
+      <h2 class="sec-t">Notification channels</h2>
+      <div class="tw">
+        <table class="ct">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in data.settings.channels %}
+            <tr>
+              <td>{{ c.name }}</td>
+              <td>
+                {% if c.status == 'coming' %}
+                  {{ severity_pill('wait', 'Coming') }}
+                {% elif c.status == 'active' %}
+                  {{ severity_pill('info', 'Active') }}
+                {% else %}
+                  {{ severity_pill('stop', 'Not configured') }}
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" style="margin-top:2rem">
+      <h2 class="sec-t">Chase bounds</h2>
+      <div class="tw">
+        <table class="ct">
+          <thead>
+            <tr>
+              <th>Risk type</th>
+              <th class="n">Max attempts</th>
+              <th class="n">Window (hours)</th>
+              <th>Rail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for b in data.settings.bounds %}
+            <tr>
+              <td>{{ b.risk_type }}</td>
+              <td class="n">{{ b.max_attempts }}</td>
+              <td class="n">{{ b.window_hours }}</td>
+              <td>{{ b.rail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" style="margin-top:2rem">
+      <h2 class="sec-t">Ladder rungs</h2>
+      <div class="tw">
+        <table class="ct">
+          <thead>
+            <tr>
+              <th>Level</th>
+              <th class="n">Days</th>
+              <th>Tone</th>
+              <th>Addresses</th>
+              <th>Channels</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in data.settings.rungs %}
+            <tr>
+              <td>{{ r.level }}</td>
+              <td class="n">{{ r.days }}</td>
+              <td>{{ r.tone }}</td>
+              <td>{{ r.addresses }}</td>
+              <td>{{ r.channels }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" style="margin-top:2rem">
+      <h2 class="sec-t">Operational settings</h2>
+      <div class="tw">
+        <table class="ct">
+          <tbody>
+            <tr>
+              <td>Blackout</td>
+              <td>{{ "%02d"|format(data.settings.blackout_start) }}:00–{{ "%02d"|format(data.settings.blackout_end) }}:00 IST</td>
+            </tr>
+            <tr>
+              <td>Consent window</td>
+              <td class="n">{{ data.settings.consent_window }}h</td>
+            </tr>
+            <tr>
+              <td>Max retries</td>
+              <td class="n">{{ data.settings.max_retries }}</td>
+            </tr>
+            <tr>
+              <td>Max nudges per 24h</td>
+              <td class="n">{{ data.settings.max_nudges_24h }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+</main>
+{% endblock %}

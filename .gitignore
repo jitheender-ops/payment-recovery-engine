@@ -92,3 +92,6 @@ eval/results/.llm_decision_cache.jsonl
 # regenerated on demand — nothing here is a project artifact.
 agentdb.rvf
 agentdb.rvf.lock
+
+# Local tooling state — a project id belonging to a tool, not to this repo.
+.freebuff/

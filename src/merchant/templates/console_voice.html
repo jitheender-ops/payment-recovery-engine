@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill %}
+{% block title %}Voice calls · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("voice", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Customer</div>
+    <h1 class="ptitle">Voice calls</h1>
+    <p class="psub">The call queue, outcomes, and the four safety gates that run on every turn.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    {% if not data.voice.total and not data.voice_calls.has_data %}
+      {{ empty_state("No calls", "No voice calls have been attempted yet.") }}
+    {% else %}
+      {% if data.voice.total %}
+      <div class="grid grid-3" style="margin-bottom:2rem">
+        {{ stat_tile("Queued", data.voice.queued) }}
+        {{ stat_tile("Claimed", data.voice.claimed) }}
+        {{ stat_tile("Done", data.voice.done) }}
+        {{ stat_tile("Failed", data.voice.failed, tone="red" if data.voice.failed else "") }}
+        {{ stat_tile("Opted out", data.voice.opted_out) }}
+      </div>
+      {% endif %}
+
+      {% if data.voice_calls.has_data %}
+      <section class="sec">
+        <h2 class="sec-t">Call detail</h2>
+        <p class="sec-s">Per-call safety gate status. Each gate is checked on every voice turn.</p>
+        <div class="tw">
+          <table class="ct">
+            <thead>
+              <tr>
+                <th>Reference</th>
+                <th>State</th>
+                <th class="n">Amount</th>
+                <th>Created</th>
+                <th>Gates</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in data.voice_calls.calls %}
+              <tr>
+                <td class="ref">{{ c.subject_ref }}</td>
+                <td>{{ c.state }}</td>
+                <td class="n">{{ c.amount }}</td>
+                <td>{{ c.created }}</td>
+                <td>
+                  {% if c.opted_out %}
+                    <span style="color:var(--red)">Call ended — customer opted out</span>
+                  {% elif c.abstain_reason %}
+                    <span style="color:var(--ink-2)">{{ c.abstain_reason }}</span>
+                  {% else %}
+                    {% for gate_name, gate_label in [('retrieval_passed','Retrieval'), ('facts_available','Facts'), ('instructions_sanitised','Sanitised'), ('response_grounded','Grounded'), ('opt_out_checked','Opt-out')] %}
+                    <span class="sev sev-{{ 'info' if c.gates[gate_name] else 'stop' }}" style="font-size:.58rem;padding:.12rem .35rem">
+                      {{ gate_label }}
+                    </span>
+                    {% endfor %}
+                  {% endif %}
+                  {% if not c.has_transcript %}
+                    <div style="font-size:0.75rem;color:var(--ink-3);margin-top:0.25rem;">Turn-by-turn text is not stored for this call</div>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

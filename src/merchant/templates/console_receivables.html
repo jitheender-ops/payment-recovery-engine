@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill %}
+{% block title %}Receivables · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}
+<style>
+  .ladder{list-style:none;margin:1.1rem 0 0;padding:0;
+          border-left:2px solid var(--line-2);margin-left:.7rem}
+  .rung{display:grid;
+        grid-template-columns:2.1rem 5.5rem 4.5rem 1fr auto;
+        align-items:center;gap:.9rem;
+        padding:.8rem 0 .8rem 1.1rem;position:relative;
+        border-bottom:1px solid var(--line);color:var(--ink-3)}
+  .rung:last-child{border-bottom:0}
+  .rung::before{content:"";position:absolute;left:-6px;top:50%;
+                width:10px;height:10px;margin-top:-5px;border-radius:50%;
+                background:var(--paper);border:2px solid var(--line-2)}
+  .rung-live::before{background:var(--green);border-color:var(--green)}
+  .rung-live{color:var(--ink)}
+  .rung-n{font-family:var(--mono);font-size:.78rem;color:var(--ink-3);
+          border:1px solid var(--line-2);border-radius:5px;
+          text-align:center;padding:.1rem 0}
+  .rung-live .rung-n{color:var(--green-deep);border-color:var(--green-line);
+                     background:var(--green-tint)}
+  .rung-tone{font-weight:600;font-size:.95rem;letter-spacing:-.01em;
+             text-transform:capitalize}
+  .rung-day{font-family:var(--mono);font-size:.78rem;color:var(--ink-3)}
+  .rung-who{font-size:.82rem;color:var(--ink-3);text-transform:capitalize}
+  .rung-count{font-size:.85rem;font-weight:600;white-space:nowrap}
+  .rung-live .rung-count{color:var(--green-deep)}
+  .rung-detail{grid-column:1 / -1;font-size:.76rem;color:var(--ink-3);
+               padding-left:.1rem}
+  @media (max-width:680px){
+    .rung{grid-template-columns:2.1rem 1fr auto;row-gap:.25rem}
+    .rung-day{grid-column:2}
+    .rung-who{grid-column:2;grid-row:3}
+    .rung-count{grid-column:3;grid-row:1}
+    .rung-detail{grid-column:1 / -1;grid-row:4}
+  }
+</style>
+{% endblock %}
+{% block body %}
+{{ console_nav("receivables", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Receivables</div>
+    <h1 class="ptitle">Aging, ladder and outstanding</h1>
+    <p class="psub">This is the B2B finance view — aging, escalation and what is owed.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b><p>This page shows nothing rather than something wrong. Every figure here is read live.</p></div>
+  {% else %}
+    <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem">
+      {{ stat_tile("Outstanding balance", data.outstanding.outstanding, none, "green") }}
+      {{ stat_tile("Open cases", data.outstanding.open_cases) }}
+      {{ stat_tile("Part-paid cases", data.outstanding.part_paid_cases) }}
+      {{ stat_tile("Days to pay", data.days_to_pay | default('—')) }}
+    </div>
+
+    <section class="sec">
+      <h2 class="sec-t">Aging buckets</h2>
+      <div class="tw">
+        <table class="ct">
+          <thead><tr><th>Label</th><th class="n">Count</th><th class="n">Outstanding</th></tr></thead>
+          <tbody>
+            {% for b in data.aging %}
+            <tr>
+              <td>{{ b.label }}</td>
+              <td class="n">{{ b.count }}</td>
+              <td class="n">{{ b.outstanding }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sec" style="margin-top:2rem">
+      <h2 class="sec-t">The ladder</h2>
+      <p class="sec-s">Where each buyer account sits right now. One contact per account per rung.
+        {% if data.ladder.window_open %}
+        B2B contact hours are open now.
+        {% else %}
+        Outside B2B contact hours. Nothing fires until {{ data.ladder.next_window }}.
+        {% endif %}
+      </p>
+      <ol class="ladder">
+        {% for stage in data.ladder.stages | reverse %}
+        <li class="rung {% if stage.accounts %}rung-live{% endif %}">
+          <span class="rung-n">{{ stage.level }}</span>
+          <span class="rung-tone">{{ stage.tone }}</span>
+          <span class="rung-day">day {{ stage.days }}</span>
+          <span class="rung-who">{{ stage.addresses }}</span>
+          <span class="rung-count">
+            {% if stage.accounts %}{{ stage.accounts }} account{{ "s" if stage.accounts != 1 }}{% else %}—{% endif %}
+          </span>
+          <span class="rung-detail">
+            {{ stage.channels }}{% if not stage.spends_budget %} · no contact budget spent{% endif %}
+            {% if stage.gap_hours %} · next rung in {{ stage.gap_hours | round | int }}h{% endif %}
+            · a broken promise here resumes at rung {{ stage.after_break }}
+          </span>
+        </li>
+        {% endfor %}
+      </ol>
+      {% if data.ladder.open_call_tasks %}
+      <p class="sec-s" style="margin-top:.9rem">{{ data.ladder.open_call_tasks }} call task{{ "s" if data.ladder.open_call_tasks != 1 }} raised for your team at the urgent rung. These never spend a customer's contact budget.</p>
+      {% if data.ladder.tasks %}
+      <div class="tw" style="margin-top:.75rem">
+        <table class="ct">
+          <thead><tr><th>Account</th><th>Raised</th><th>Why</th><th>Done?</th></tr></thead>
+          <tbody>
+            {% for t in data.ladder.tasks %}
+            <tr>
+              <td>{{ t.account }}</td>
+              <td class="faint mono">{{ t.raised }}</td>
+              <td class="faint">{{ t.why or t.kind }}</td>
+              <td>
+                <form method="post" action="/console/task/done">
+                  <input type="hidden" name="task_id" value="{{ t.id }}">
+                  <button class="btn-mini" type="submit">Called them</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      {% endif %}
+    </section>
+
+    <div style="margin-top:2rem; display:flex; gap:1.5rem; flex-wrap:wrap">
+        <a href="/console/promises">Promises{% if data.promises.pending %} ({{ data.promises.pending }} pending, {{ data.promises.pending_amount }}){% endif %}</a>
+        <a href="/console/plans">Plans{% if data.plans.active %} ({{ data.plans.active }} active){% endif %}</a>
+        <a href="/console/disputes">Disputes{% if data.disputes.disputes %} ({{ data.disputes.disputes | length }} open){% endif %}</a>
+    </div>
+
+  {% endif %}
+</main>
+{% endblock %}

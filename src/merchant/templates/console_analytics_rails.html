@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Bank × rail · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("analytics/rails", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Analytics</div>
+    <h1 class="ptitle">Bank × rail</h1>
+    <p class="psub">Which bank fails on which rail — the evidence behind switch_rail.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    {% if not data.routing.has_data %}
+      {{ empty_state("No data", "There is no routing data to show yet.") }}
+    {% else %}
+      <section class="sec">
+        <h2 class="sec-t">Banks</h2>
+        <div class="tw">
+          <table class="ct">
+            <thead>
+              <tr>
+                <th>Bank</th>
+                <th class="n">Failures</th>
+                <th class="n">Retryable</th>
+                <th class="n">Retryable %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for b in data.routing.banks %}
+              <tr>
+                <td>{{ b.bank }}</td>
+                <td class="n">{{ b.failures }}</td>
+                <td class="n">{{ b.retryable }}</td>
+                <td class="n">{{ b.retryable_pct }}%</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="sec" style="margin-top:2rem">
+        <h2 class="sec-t">Methods</h2>
+        <div style="max-width:32rem">
+          {% for m in data.routing.methods %}
+            {{ bar(m.method, m.pct ~ '%', m.frac) }}
+          {% endfor %}
+        </div>
+      </section>
+      <section class="sec" style="margin-top:2rem">
+        <h2 class="sec-t">Rails</h2>
+        <div class="tw">
+          <table class="ct">
+            <thead>
+              <tr>
+                <th>Rail</th>
+                <th class="n">Transactions</th>
+                <th class="n">Success %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in data.routing.rails %}
+              <tr>
+                <td>{{ r.rail }}</td>
+                <td class="n">{{ r.txns }}</td>
+                <td class="n">{{ r.success_pct }}%</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

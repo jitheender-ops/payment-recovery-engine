@@ -72,7 +72,15 @@ def _authorized(raw: bytes, signature: str | None) -> bool:
     if not secret or not signature:
         return False
     expected = hmac.new(secret.encode(), raw, sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    # Bytes against bytes, with the attacker-chosen side coerced by "replace".
+    # compare_digest raises TypeError on a str holding non-ASCII, and an HTTP
+    # header value may legally be obs-text (0x80-0xFF) — so a non-ASCII
+    # signature header used to surface as a 500 on this public endpoint
+    # instead of the 401 fail-closed promises. Same construction as
+    # recovery_link.py and the console session cookie.
+    return hmac.compare_digest(
+        expected.encode("ascii"), (signature or "").encode("utf-8", "replace")
+    )
 
 
 async def _resolve_facts(body: dict[str, Any]) -> Any:

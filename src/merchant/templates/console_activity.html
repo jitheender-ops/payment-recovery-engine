@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Activity trail · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("activity", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Trust</div>
+    <h1 class="ptitle">Activity trail</h1>
+    <p class="psub">Every event the engine recorded, and whether it is sealed.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    <div style="margin-bottom:2rem;padding:1rem;border-radius:8px;border:1px solid var(--line);
+                background:{{ 'var(--well)' if not data.activity.chain_keyed else ('#E6F4EA' if data.activity.chain_intact else '#FCE8E6') }};
+                color:{{ 'var(--ink-2)' if not data.activity.chain_keyed else ('var(--green-deep)' if data.activity.chain_intact else 'var(--red)') }}">
+      {% if data.activity.chain_intact %}
+        <strong>Chain intact</strong>
+      {% elif not data.activity.chain_keyed %}
+        <strong>AUDIT_CHAIN_SECRET not set</strong>
+      {% else %}
+        <strong>Chain broken</strong>
+      {% endif %}
+    </div>
+    {% if not data.activity.has_data %}
+      {{ empty_state("No activity", "No events have been recorded yet.") }}
+    {% else %}
+      <section class="sec">
+        <div class="tw">
+          <table class="ct">
+            <thead>
+              <tr>
+                <th class="n">#</th>
+                <th>Event</th>
+                <th>Actor</th>
+                <th>Reference</th>
+                <th>State</th>
+                <th>Reason</th>
+                <th>When</th>
+                <th>Verified</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for e in data.activity.events %}
+              <tr>
+                <td class="n">{{ e.id }}</td>
+                <td>{{ e.event }}</td>
+                <td>{{ e.actor }}</td>
+                <td class="ref">{{ e.reference }}</td>
+                <td>{{ e.state }}</td>
+                <td>{{ e.reason }}</td>
+                <td>{{ e.when }}</td>
+                <td>
+                  {% if e.verified %}
+                    {{ severity_pill('info', 'Verified') }}
+                  {% elif e.stamped and not e.verified %}
+                    {{ severity_pill('stop', 'Unverified') }}
+                  {% elif not e.stamped %}
+                    {{ severity_pill('wait', 'Unsealed') }}
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

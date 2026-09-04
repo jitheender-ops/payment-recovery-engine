@@ -216,3 +216,36 @@ def test_behind_a_trusted_proxy_the_forwarded_address_is_used(
         assert not ip_allowed(req, "198.51.100.0/24")
     finally:
         get_settings.cache_clear()
+
+
+def test_a_direct_connection_cannot_spoof_the_forwarded_address(
+    monkeypatch: Any,
+) -> None:
+    """
+    EXPLOIT: with the trusted-proxy flag on and no peer check, an attacker
+    who can reach the app directly pads X-Forwarded-For and the allowlist
+    reads the rightmost entry — their own typing — as the client. With
+    TRUSTED_PROXY_IPS set, only a request that actually arrived through one
+    of those proxies gets its header read; a direct connection is judged by
+    its socket peer, so a padded header cannot talk its way in. (HMAC would
+    still stop the webhook itself; this is the defence-in-depth half.)
+    """
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.5")
+    get_settings.cache_clear()
+    try:
+        # The peer IS the trusted proxy: the header is read, the allowlist
+        # sees the real Razorpay address and lets it in.
+        req = _request("10.0.0.5", xff="203.0.113.7")
+        assert ip_allowed(req, "203.0.113.0/24")
+        # Direct connection, header claims to be Razorpay: judged by the
+        # socket peer, refused.
+        req = _request("192.0.2.1", xff="203.0.113.7")
+        assert not ip_allowed(req, "203.0.113.0/24")
+        # Padding the header to put the spoofed address rightmost changes
+        # nothing: the header is discarded, not merely read differently.
+        req = _request("192.0.2.1", xff="198.51.100.9, 203.0.113.7")
+        assert not ip_allowed(req, "203.0.113.0/24")
+    finally:
+        get_settings.cache_clear()

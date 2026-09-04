@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Search · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("search", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Trust</div>
+    <h1 class="ptitle">Search</h1>
+    <p class="psub">Find any payment, case, invoice or account by reference.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    <form method="get" action="/console/search" style="margin-top:1.4rem;margin-bottom:2rem;">
+      <div style="display:flex;gap:.5rem;max-width:36rem">
+        <input type="text" name="q" value="{{ data.search.query }}" placeholder="Payment ID, case ID, invoice number…"
+               style="flex:1;font-family:var(--mono);padding:0.5rem;border:1px solid var(--line);border-radius:4px;" class="paid-f">
+        <button type="submit" style="padding:0.5rem 1rem;background:var(--ink);color:white;border:none;border-radius:4px;cursor:pointer;">Search</button>
+      </div>
+    </form>
+    {% if data.search.query %}
+      {% if not data.search.cases and not data.search.payments and not data.search.accounts %}
+        <div class="empty">
+          <p>Nothing matched. Search works on payment IDs, order IDs, case IDs, invoice numbers and account references — never on customer email or phone.</p>
+        </div>
+      {% else %}
+        {% if data.search.cases %}
+        <section class="sec">
+          <h2 class="sec-t">Cases</h2>
+          <ul style="list-style:none;padding:0;margin:0">
+            {% for c in data.search.cases %}
+            <li style="padding:.5rem 0;border-bottom:1px solid var(--line)"><a href="{{ c.url }}" class="ref">{{ c.id }}</a> - {{ c.detail }}</li>
+            {% endfor %}
+          </ul>
+        </section>
+        {% endif %}
+        {% if data.search.payments %}
+        <section class="sec" style="margin-top:2rem">
+          <h2 class="sec-t">Payments</h2>
+          <ul style="list-style:none;padding:0;margin:0">
+            {% for p in data.search.payments %}
+            <li style="padding:.5rem 0;border-bottom:1px solid var(--line)"><a href="{{ p.url }}" class="ref">{{ p.id }}</a> - {{ p.detail }}</li>
+            {% endfor %}
+          </ul>
+        </section>
+        {% endif %}
+        {% if data.search.accounts %}
+        <section class="sec" style="margin-top:2rem">
+          <h2 class="sec-t">Accounts</h2>
+          <ul style="list-style:none;padding:0;margin:0">
+            {% for a in data.search.accounts %}
+            <li style="padding:.5rem 0;border-bottom:1px solid var(--line)"><a href="{{ a.url }}" class="ref">{{ a.id }}</a> - {{ a.detail }}</li>
+            {% endfor %}
+          </ul>
+        </section>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Recovery by hour · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("analytics/hours", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Analytics</div>
+    <h1 class="ptitle">Recovery by hour</h1>
+    <p class="psub">When recoveries land, and where the blackout sits.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    <div class="grid-3" style="margin-bottom:2rem">
+      {{ stat_tile("Total recovered", data.hours.total_recovered) }}
+    </div>
+    <section class="sec">
+      <h2 class="sec-t">24-hour distribution</h2>
+      <svg viewBox="0 0 720 200" style="width:100%;height:auto;margin-top:1rem" role="img" aria-label="Recoveries by hour of day">
+        {% for h in data.hours.hours %}
+        <rect x="{{ h.hour * 30 }}" y="{{ 180 - (h.frac * 160) }}" width="26" height="{{ h.frac * 160 }}"
+              fill="{{ 'var(--well)' if h.blackout else 'var(--green)' }}" rx="3" />
+        <text x="{{ h.hour * 30 + 13 }}" y="196" text-anchor="middle"
+              style="font-family:var(--mono);font-size:9px;fill:var(--ink-3)">{{ h.label[:2] }}</text>
+        {% endfor %}
+      </svg>
+      <p style="margin-top:1rem;font-size:.88rem;color:var(--ink-2)">
+        Blackout: {{ data.hours.blackout_start }}:00–{{ data.hours.blackout_end }}:00 IST. No retries fire during this window. Read from settings, not hardcoded.
+      </p>
+    </section>
+  {% endif %}
+</main>
+{% endblock %}

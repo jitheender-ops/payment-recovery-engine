@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state %}
+{% block title %}Payment plans · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}
+<style>
+  .pips{display:inline-flex;gap:3px}
+  .pip{width:8px;height:8px;border-radius:50%;background:var(--line-2)}
+  .pip-on{background:var(--green)}
+</style>
+{% endblock %}
+{% block body %}
+{{ console_nav("plans", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Receivables</div>
+    <h1 class="ptitle">Payment plans</h1>
+    <p class="psub">Instalment schedules and their progress.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b><p>This page shows nothing rather than something wrong. Every figure here is read live.</p></div>
+  {% else %}
+    {% if not data.plans.total %}
+      {{ empty_state("No plans", "No instalment schedules are active.") }}
+    {% else %}
+      <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem">
+        {{ stat_tile("Total", data.plans.total) }}
+        {{ stat_tile("Active", data.plans.active) }}
+        {{ stat_tile("Completed", data.plans.completed, none, "green") }}
+        {{ stat_tile("Defaulted", data.plans.defaulted, none, "red" if data.plans.defaulted > 0 else none) }}
+      </div>
+
+      {% if data.plans.plans %}
+      <section class="sec">
+        <h2 class="sec-t">Active plans</h2>
+        <div class="tw">
+          <table class="ct">
+            <thead><tr><th>Reference</th><th>Progress</th><th>Paid/Total</th><th class="n">Target amount</th></tr></thead>
+            <tbody>
+              {% for pl in data.plans.plans %}
+              <tr>
+                <td class="mono">{{ pl.subject_ref }}</td>
+                <td>
+                  <span class="pips" role="img" aria-label="{{ pl.paid }} of {{ pl.instalments }} instalments paid">
+                    {% for i in range(pl.instalments) %}<b class="pip {% if i < pl.paid %}pip-on{% endif %}"></b>{% endfor %}
+                  </span>
+                </td>
+                <td class="faint nowrap">{{ pl.paid }}/{{ pl.instalments }}</td>
+                <td class="n">{{ pl.target }}{% if pl.settled %}<span class="faint"> settled</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

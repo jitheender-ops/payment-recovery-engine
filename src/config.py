@@ -353,6 +353,19 @@ class Settings(BaseSettings):
     # with fewer entries than this falls back to the socket peer rather than
     # trusting a forgeable one.
     trusted_proxy_hops: int = 1
+    # IPs or CIDRs of the reverse proxies you control, comma-separated.
+    # X-Forwarded-For is only worth reading when this request actually ARRIVED
+    # through one of them — every other hop of the header is whatever the
+    # client sent. When this is set, client_ip() verifies the socket peer
+    # against the list first: a request that did not come through a listed
+    # proxy is judged by its socket peer, so a direct connection padding the
+    # header can no longer impersonate an address (which would otherwise
+    # defeat the webhook IP allowlist, the rate limits and the console login
+    # lockout). Empty = unverified trust: the header is read from any peer,
+    # which is safe ONLY when the proxy chain is the only way into the app
+    # (Render's LB, a firewall dropping direct traffic). A deployment where
+    # the app is also reachable directly MUST set this.
+    trusted_proxy_ips: str = ""
     # The merchant's display name, shown as the page's trust anchor: an SMS
     # link asking for money with no visible merchant name reads as phishing,
     # and the UPI app studies put interface identity at the top of the trust
@@ -525,6 +538,30 @@ class Settings(BaseSettings):
                 "on the guardrail that decides what gets auto-retried. Set "
                 "AMOUNT_CEILING_PAISE instead, in paise (₹50,000 = 5000000), "
                 "and remove AMOUNT_CEILING_INR."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_unverified_proxy_trust(self) -> Settings:
+        """
+        Say once at boot when the header is trusted without a peer check.
+
+        BEHIND_TRUSTED_PROXY=true with TRUSTED_PROXY_IPS empty reads
+        X-Forwarded-For from any peer. That is correct for Render (the LB is
+        the only way in) and wrong for any deployment where the app is also
+        reachable directly — a padded header then spoofs every per-IP limit
+        and the webhook allowlist. A warning, not an error: the legit
+        deployment exists and must keep working; this is the nudge that makes
+        the operator say which one they are.
+        """
+        if self.behind_trusted_proxy and not self.trusted_proxy_ips.strip():
+            logger.warning(
+                "BEHIND_TRUSTED_PROXY=true without TRUSTED_PROXY_IPS: "
+                "X-Forwarded-For is trusted from any peer. Safe only when the "
+                "proxy chain is the only way into the app (e.g. Render's LB). "
+                "If the app is also reachable directly, set TRUSTED_PROXY_IPS "
+                "to your proxies' addresses so a direct connection cannot "
+                "forge the header."
             )
         return self
 

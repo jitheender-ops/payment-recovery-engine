@@ -309,7 +309,7 @@ watches pip + actions daily/weekly.
 ```
 
 All four green is the definition of "done" (AGENTS.md). As of this
-document: **924 tests passing, ruff clean, mypy --strict clean across
+document: **1,008 tests passing, ruff clean, mypy --strict clean across
 96 files, migration chain consistent on both SQLite and Postgres, semgrep
 + gitleaks clean in CI**.
 

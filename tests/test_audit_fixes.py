@@ -414,6 +414,80 @@ def test_a_short_header_falls_back_to_the_socket_peer(monkeypatch: Any) -> None:
     get_settings.cache_clear()
 
 
+def test_with_proxy_ips_a_direct_connection_cannot_spoof_the_header(
+    monkeypatch: Any,
+) -> None:
+    """
+    EXPLOIT (padded header on a direct connection): with the trusted-proxy
+    flag on, the app trusts the RIGHTMOST header entry — which a client that
+    can reach the app directly writes itself. TRUSTED_PROXY_IPS closes that:
+    the socket peer is checked against the list first, and a peer that is not
+    one of our proxies has an attacker-controlled header that gets discarded
+    entirely — the socket peer is the truth again.
+    """
+    from src.auth import client_ip
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1")
+    # Direct connection padding the header: must NOT be read as 5.6.7.8.
+    req = _Req("1.2.3.4, 5.6.7.8", host="192.0.2.5")
+    assert client_ip(req) == "192.0.2.5"  # type: ignore[arg-type]
+    # An unparseable peer with no trust chain is its own truth, not the header.
+    assert client_ip(_Req("5.6.7.8", host="unknown")) == "unknown"  # type: ignore[arg-type]
+    get_settings.cache_clear()
+
+
+def test_with_proxy_ips_a_verified_peer_still_reads_the_header(
+    monkeypatch: Any,
+) -> None:
+    """The other half of the same rule: a request that DID arrive through a
+    listed proxy has a header its egress proxy appended, so the rightmost
+    entry stays trustworthy. Refusing to read it would key every limit on
+    the proxy's own address."""
+    from src.auth import client_ip
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1")
+    req = _Req("1.2.3.4, 5.6.7.8", host="10.0.0.1")
+    assert client_ip(req) == "5.6.7.8"  # type: ignore[arg-type]
+    get_settings.cache_clear()
+
+
+def test_proxy_ips_accept_cidrs(monkeypatch: Any) -> None:
+    """The list takes IPs or CIDRs, so a whole proxy subnet can be named
+    without enumerating it — the same matching rule as the webhook allowlist."""
+    from src.auth import client_ip
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.0/8, 192.168.0.5")
+    assert client_ip(_Req("1.2.3.4, 5.6.7.8", host="10.9.8.7")) == "5.6.7.8"  # type: ignore[arg-type]
+    assert client_ip(_Req("1.2.3.4, 5.6.7.8", host="192.168.0.5")) == "5.6.7.8"  # type: ignore[arg-type]
+    assert client_ip(_Req("5.6.7.8", host="198.51.100.7")) == "198.51.100.7"  # type: ignore[arg-type]
+    get_settings.cache_clear()
+
+
+def test_empty_proxy_ips_keeps_the_unverified_read(monkeypatch: Any) -> None:
+    """Render's LB is the only way into the service, so there is no proxy
+    address to pin and the header is trusted from any peer — the pre-fix
+    behaviour, preserved for exactly that deployment. The precondition is
+    documented on the setting and warned about at boot."""
+    from src.auth import client_ip
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEHIND_TRUSTED_PROXY", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)
+    req = _Req("1.2.3.4, 5.6.7.8", host="10.0.0.1")
+    assert client_ip(req) == "5.6.7.8"  # type: ignore[arg-type]
+    get_settings.cache_clear()
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 7. Body size cap on the signed surfaces
 # ══════════════════════════════════════════════════════════════════════════

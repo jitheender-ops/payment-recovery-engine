@@ -550,7 +550,7 @@ a case with no customer on it is a 404 rather than an empty page.
 
 Separate from the ops dashboard and built for a different reader: the merchant
 whose revenue is leaking, not the operator debugging the machinery. One public
-page, ten gated ones, all served by the API itself.
+page, twenty-two gated ones, all served by the API itself.
 
 | Route | Who | What |
 |---|---|---|
@@ -568,6 +568,13 @@ page, ten gated ones, all served by the API itself.
 | `GET /console/batch` | gated | Preview a cohort, approve it, execute it, measure it |
 | `GET /console/ops` | gated | Is the machinery running — sweeps, heartbeat, and whether the audit hash chain still verifies |
 | `GET /console/evidence` | gated | Does the agent beat the baseline, with paired CIs |
+| `GET /console/receivables` · `/promises` · `/plans` · `/disputes` | gated | The B2B layer as four pages rather than four blocks capped at eight rows on the ledger — aging and the ladder, every promise and whether it held, instalment schedules, and the disputes that freeze their cases |
+| `GET /console/voice` | gated | The call queue, its outcomes, and the four grounding gates per call |
+| `GET /console/analytics/*` | gated | `performance` · `rails` · `hours` · `economics`. The first three read live tables; `economics` also shows the eval comparison and labels it **evaluation harness · simulated bank outcomes** wherever it appears |
+| `GET /console/safety` | gated | Every safeguard and its live state, each read from the module that enforces it — bounds from settings, the rate limiter's shared-vs-per-process mode from `REDIS_URL`, the audit chain from an actual `verify_chain()`. Anything unconfigured reads **NOT CONFIGURED**, never green |
+| `GET /console/activity` | gated | The audit trail. "Verified" appears only where the row is stamped **and** the chain verifies — a stamped row inside a broken chain is not evidence |
+| `GET /console/search` | gated | Payment, order, case, invoice and account references. Deliberately **not** customer email or phone: that would turn the PII contract into a lookup service |
+| `GET /console/settings` | gated | What is configured and what is not, without printing a secret; bounds render from `chasers/policy.py` and the rungs from `receivables/ladder.py` |
 
 **"Why did the engine do that?" is answerable rule by rule.** The case page
 has always said *whether* the guardrail approved an attempt and reproduced its
@@ -916,7 +923,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**924 tests across 59 files, 81% statement coverage over `src/`.** The money
+**1,008 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

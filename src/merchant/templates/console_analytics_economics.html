@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Recovery economics · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("analytics/economics", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Analytics</div>
+    <h1 class="ptitle">Recovery economics</h1>
+    <p class="psub">What the engine recovered, what it cost, and whether it was worth it.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    {% if not data.economics.has_data %}
+      {{ empty_state("No data", "There is no economic data to show yet.") }}
+    {% else %}
+      <div class="grid-3" style="margin-bottom:2rem">
+        {{ stat_tile("At risk", data.economics.at_risk) }}
+        {{ stat_tile("Recovered", data.economics.recovered, "sev-info") }}
+        {{ stat_tile("Net", data.economics.net_recovered, "sev-info") }}
+      </div>
+      <section class="sec">
+        <h2 class="sec-t">Operational costs</h2>
+        <div class="tw">
+          <table class="ct">
+            <tbody>
+              <tr>
+                <td>Total attempts</td>
+                <td class="n">{{ data.economics.total_attempts }}</td>
+              </tr>
+              <tr>
+                <td>Cost per attempt</td>
+                <td class="n">{{ data.economics.retry_cost_per }}</td>
+              </tr>
+              <tr>
+                <td>Total retry cost</td>
+                <td class="n">{{ data.economics.total_retry_cost }}</td>
+              </tr>
+              <tr>
+                <td>Efficiency</td>
+                <td class="n">{{ data.economics.efficiency }}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% if data.eval.available %}
+      <section class="sec" style="margin-top:2rem">
+        <h2 class="sec-t">Policy comparison</h2>
+        <p class="eval-label" style="background:var(--well);border:1px solid var(--line);border-radius:8px;padding:.8rem 1rem;margin:.8rem 0;font-size:.88rem;color:var(--ink-2)">
+          <strong>Evaluation harness · simulated bank outcomes.</strong> These figures
+          are from the offline harness, not from this merchant's production traffic.
+          Do not present them as live performance.
+        </p>
+        <div class="tw">
+          <table class="ct">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th class="n">Recovery %</th>
+                <th class="n">Attempts</th>
+                <th class="n">False retry %</th>
+                <th class="n">Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in data.eval.policies %}
+              <tr class="{{ 'pill-g' if p.best else '' }}">
+                <td>{{ p.name }}</td>
+                <td class="n">{{ p.recovery_pct }}%</td>
+                <td class="n">{{ p.attempts }}</td>
+                <td class="n">{{ p.false_retry_pct }}%</td>
+                <td class="n">{{ p.net }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

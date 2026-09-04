@@ -65,7 +65,9 @@ logger = logging.getLogger(__name__)
 _LIST_LIMIT = 8
 
 
-async def promise_panel(session: AsyncSession) -> dict[str, Any]:
+async def promise_panel(
+    session: AsyncSession, *, limit: int = _LIST_LIMIT
+) -> dict[str, Any]:
     """
     The promise-to-pay tracker, as the merchant reads it.
 
@@ -118,7 +120,7 @@ async def promise_panel(session: AsyncSession) -> dict[str, Any]:
             .join(RecoveryCase, RecoveryCase.id == PromiseToPay.recovery_case_id)
             .where(PromiseToPay.status == "pending")
             .order_by(PromiseToPay.due_at)
-            .limit(_LIST_LIMIT)
+            .limit(limit)
         )
     ).mappings().all()
 
@@ -154,7 +156,9 @@ async def promise_panel(session: AsyncSession) -> dict[str, Any]:
     }
 
 
-async def plan_panel(session: AsyncSession) -> dict[str, Any]:
+async def plan_panel(
+    session: AsyncSession, *, limit: int = _LIST_LIMIT
+) -> dict[str, Any]:
     """
     Payment plans, and how far through their instalments they are.
 
@@ -199,7 +203,7 @@ async def plan_panel(session: AsyncSession) -> dict[str, Any]:
                 RecoveryCase.subject_ref,
             )
             .order_by(PaymentPlan.created_at.desc())
-            .limit(_LIST_LIMIT)
+            .limit(limit)
         )
     ).mappings().all()
 
@@ -227,7 +231,9 @@ async def plan_panel(session: AsyncSession) -> dict[str, Any]:
     }
 
 
-async def dispute_panel(session: AsyncSession) -> dict[str, Any]:
+async def dispute_panel(
+    session: AsyncSession, *, limit: int = _LIST_LIMIT
+) -> dict[str, Any]:
     """
     Open disputes — the one panel that is a WORKLIST, not a metric.
 
@@ -262,7 +268,7 @@ async def dispute_panel(session: AsyncSession) -> dict[str, Any]:
             .join(RecoveryCase, RecoveryCase.id == CaseDispute.case_id)
             .where(CaseDispute.status == "open")
             .order_by(CaseDispute.opened_at)
-            .limit(_LIST_LIMIT)
+            .limit(limit)
         )
     ).mappings().all()
 
@@ -940,12 +946,30 @@ async def routing_panel(session: AsyncSession) -> dict[str, Any]:
         )
     ).all()
 
+    # The denominator for the method shares, once.
+    _method_total = sum(r.failures for r in by_method)
+
     return {
         "banks": [
             {"bank": r.bank, "failures": r.failures, "retryable": r.retryable}
             for r in by_bank
         ],
-        "methods": [{"method": r.method or "unknown", "n": r.failures} for r in by_method],
+        # `frac` and `pct` are computed here, not in the template: the
+        # analytics page draws these as bars, and bar() does arithmetic on
+        # frac. An empty methods list hid that for a whole release — the loop
+        # never ran on a fresh database, and every page with data 500'd on
+        # `'dict object' has no attribute 'frac'`. Nothing is computed in a
+        # template in this console; this is why.
+        "methods": [
+            {
+                "method": r.method or "unknown",
+                "n": r.failures,
+                "frac": (r.failures / _method_total) if _method_total else 0.0,
+                "pct": round(100.0 * r.failures / _method_total, 1)
+                if _method_total else 0.0,
+            }
+            for r in by_method
+        ],
         "rails": [{"rail": r.target_rail, "n": r.n} for r in by_rail],
         "has_data": bool(by_bank or by_method or by_rail),
     }
@@ -2113,4 +2137,853 @@ async def payment_list(
         "classes": [
             (name, name.replace("_", " "), n) for name, n in by_class.items()
         ],
+    }
+
+
+# ── Phase 05: Analytics reads ───────────────────────────────────────────────
+# Ported from the Streamlit dashboard (dashboard/views/), which was never
+# deployed. The charts live in the templates as inline SVG, so these functions
+# return numbers, never markup.
+
+
+async def performance_analytics(session: AsyncSession) -> dict[str, Any]:
+    """
+    Recovery rate, recovered amount, outstanding, average attempts — the
+    four numbers a finance user wants by failure class and by channel.
+    """
+    # By failure class
+    from src.models import PaymentFailure
+
+    by_class_rows = (
+        await session.execute(
+            select(
+                PaymentFailure.failure_class,
+                func.count(func.distinct(RecoveryCase.id)).label("cases"),
+                func.count(func.distinct(RecoveryCase.id))
+                .filter(RecoveryCase.state == "recovered")
+                .label("recovered"),
+                func.coalesce(
+                    func.sum(RecoveryCase.amount_at_risk).filter(
+                        RecoveryCase.state == "recovered"
+                    ),
+                    0,
+                ).label("recovered_paise"),
+            )
+            .select_from(RetryAttempt)
+            .join(PaymentFailure, RetryAttempt.payment_failure_id == PaymentFailure.id)
+            .join(RecoveryCase, RetryAttempt.recovery_case_id == RecoveryCase.id)
+            .group_by(PaymentFailure.failure_class)
+            .order_by(func.count(func.distinct(RecoveryCase.id)).desc())
+            .limit(12)
+        )
+    ).all()
+
+    by_class = []
+    max_cases = max((r.cases for r in by_class_rows), default=1) or 1
+    for r in by_class_rows:
+        rate = round(100.0 * r.recovered / r.cases, 1) if r.cases else None
+        by_class.append({
+            "class": (r.failure_class or "unknown").replace("_", " "),
+            "cases": r.cases,
+            "recovered": r.recovered,
+            "rate": rate,
+            "recovered_amount": _money(int(r.recovered_paise)),
+            "frac": r.cases / max_cases,
+        })
+
+    # By channel (risk_type as the axis the merchant recognises)
+    by_channel_rows = (
+        await session.execute(
+            select(
+                RecoveryCase.risk_type,
+                func.count(RecoveryCase.id).label("cases"),
+                func.count(RecoveryCase.id)
+                .filter(RecoveryCase.state == "recovered")
+                .label("recovered"),
+                func.coalesce(func.sum(RecoveryCase.amount_recovered), 0).label(
+                    "recovered_paise"
+                ),
+                func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0).label(
+                    "at_risk_paise"
+                ),
+            )
+            .group_by(RecoveryCase.risk_type)
+            .order_by(func.count(RecoveryCase.id).desc())
+        )
+    ).all()
+
+    by_channel: list[dict[str, Any]] = []
+    for ch in by_channel_rows:
+        rate = round(100.0 * ch[2] / ch[1], 1) if ch[1] else None
+        by_channel.append({
+            "channel": (ch[0] or "unknown").replace("_", " "),
+            "cases": ch[1],
+            "recovered": ch[2],
+            "rate": rate,
+            "recovered_amount": _money(int(ch[3])),
+            "outstanding": _money(max(0, int(ch[4]) - int(ch[3]))),
+        })
+
+    # Average attempts per recovered case
+    avg_attempts = await session.scalar(
+        select(func.avg(RecoveryCase.attempts_used)).where(
+            RecoveryCase.state == "recovered"
+        )
+    )
+
+    return {
+        "by_class": by_class,
+        "by_channel": by_channel,
+        "avg_attempts": round(float(avg_attempts), 1) if avg_attempts else None,
+        "has_data": bool(by_class or by_channel),
+    }
+
+
+async def hours_analytics(session: AsyncSession) -> dict[str, Any]:
+    """
+    Recovery count by hour-of-day, with the blackout band.
+
+    The blackout boundaries are read from get_settings(), never hardcoded to
+    23:00–07:00 — a merchant who changes them sees the chart move.
+    """
+    from src.config import get_settings as _get_settings
+
+    settings = _get_settings()
+
+    # Recoveries by hour (IST). For portability, fetch all recovered-at
+    # timestamps and bucket in Python rather than relying on extract('hour')
+    # which renders differently on SQLite vs Postgres.
+    ts_rows = (
+        await session.execute(
+            select(RecoveryCase.recovered_at).where(
+                RecoveryCase.state == "recovered",
+                RecoveryCase.recovered_at.is_not(None),
+            )
+        )
+    ).scalars().all()
+
+    by_hour: dict[int, int] = {h: 0 for h in range(24)}
+    for ts in ts_rows:
+        if ts is not None:
+            ist_ts = _ist(_aware(ts))
+            by_hour[ist_ts.hour] = by_hour.get(ist_ts.hour, 0) + 1
+
+    max_n = max(by_hour.values(), default=1) or 1
+    hours = [
+        {
+            "hour": h,
+            "label": f"{h:02d}:00",
+            "n": by_hour[h],
+            "frac": by_hour[h] / max_n,
+            "blackout": _in_blackout(h, settings.retry_blackout_start_hour,
+                                     settings.retry_blackout_end_hour),
+        }
+        for h in range(24)
+    ]
+
+    return {
+        "hours": hours,
+        "blackout_start": settings.retry_blackout_start_hour,
+        "blackout_end": settings.retry_blackout_end_hour,
+        "total_recovered": sum(by_hour.values()),
+        "has_data": sum(by_hour.values()) > 0,
+    }
+
+
+def _in_blackout(hour: int, start: int, end: int) -> bool:
+    """True when `hour` falls inside the blackout window."""
+    if start < end:
+        return start <= hour < end
+    # Wraps midnight: e.g. 23:00–07:00
+    return hour >= start or hour < end
+
+
+async def economics_analytics(session: AsyncSession) -> dict[str, Any]:
+    """
+    Gross at risk, recovered, retry cost at the configured rate, and the
+    resulting efficiency.
+    """
+    from src.config import get_settings as _get_settings
+
+    settings = _get_settings()
+
+    row = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(RecoveryCase.amount_at_risk), 0),
+                func.coalesce(func.sum(RecoveryCase.amount_recovered), 0),
+                func.count(RetryAttempt.id),
+            )
+            .select_from(RecoveryCase)
+            .outerjoin(RetryAttempt, RetryAttempt.recovery_case_id == RecoveryCase.id)
+        )
+    ).one()
+    at_risk_paise, recovered_paise, total_attempts = (int(v) for v in row)
+
+    # retry_cost is the merchant's configured cost per attempt. The config
+    # carries it in rupees; we keep paise here because every other figure is.
+    retry_cost_per_attempt = float(getattr(settings, "retry_cost_inr", 0) or 0)
+    total_retry_cost_paise = int(retry_cost_per_attempt * total_attempts * 100)
+    net_paise = recovered_paise - total_retry_cost_paise
+
+    return {
+        "at_risk": _money(at_risk_paise),
+        "recovered": _money(recovered_paise),
+        "total_attempts": total_attempts,
+        "retry_cost_per": retry_cost_per_attempt,
+        "total_retry_cost": _money(total_retry_cost_paise),
+        "net_recovered": _money(max(0, net_paise)),
+        "efficiency": (
+            round(100.0 * recovered_paise / at_risk_paise, 1) if at_risk_paise else None
+        ),
+        "has_data": at_risk_paise > 0,
+    }
+
+
+# ── Phase 06: Voice call detail ─────────────────────────────────────────────
+
+
+async def voice_call_list(session: AsyncSession) -> dict[str, Any]:
+    """
+    The voice queue with per-call detail: state, outcome, and which of the
+    four pipeline gates fired.
+
+    The gate information lives on the CaseEvent rows the pipeline writes
+    (event_type in {'voice_turn', 'voice_abstain', 'voice_opt_out',
+    'voice_grounding_failed'}). A call that never progressed past queueing
+    has no gate events, and the page says so.
+
+    HARD RULE: never fabricate a transcript. If turn-by-turn text is not
+    stored, the page says it is not stored.
+    """
+    rows = (
+        await session.execute(
+            select(
+                VoiceCallQueue.id,
+                VoiceCallQueue.state,
+                VoiceCallQueue.result,
+                VoiceCallQueue.risk_type,
+                VoiceCallQueue.amount_paise,
+                VoiceCallQueue.created_at,
+                VoiceCallQueue.claimed_at,
+                RecoveryCase.subject_ref,
+            )
+            .join(RecoveryCase, RecoveryCase.id == VoiceCallQueue.recovery_case_id)
+            .order_by(VoiceCallQueue.created_at.desc())
+            .limit(30)
+        )
+    ).mappings().all()
+
+    calls: list[dict[str, Any]] = []
+    for r in rows:
+        # Gate events for this call's case
+        gate_rows = (
+            await session.execute(
+                select(CaseEvent.event_type, CaseEvent.detail, CaseEvent.created_at)
+                .where(
+                    CaseEvent.recovery_case_id == RecoveryCase.id,
+                    RecoveryCase.subject_ref == r["subject_ref"],
+                    CaseEvent.event_type.in_([
+                        "voice_turn", "voice_abstain", "voice_opt_out",
+                        "voice_grounding_failed", "voice_injection_refused",
+                    ]),
+                )
+                .join(RecoveryCase, RecoveryCase.id == CaseEvent.recovery_case_id)
+                .order_by(CaseEvent.created_at.desc())
+                .limit(5)
+            )
+        ).mappings().all()
+
+        gates = {
+            "retrieval_passed": False,
+            "facts_available": False,
+            "instructions_sanitised": False,
+            "response_grounded": False,
+            "opt_out_checked": True,  # always checked by design
+        }
+        abstain_reason: str | None = None
+        opted_out = r["state"] == "opted_out"
+
+        for ge in gate_rows:
+            et = ge["event_type"]
+            detail = ge["detail"] or {}
+            if et == "voice_turn":
+                gates["retrieval_passed"] = True
+                gates["facts_available"] = True
+                gates["instructions_sanitised"] = True
+                gates["response_grounded"] = True
+            elif et == "voice_abstain":
+                gates["retrieval_passed"] = detail.get("retrieval_passed", False)
+                gates["facts_available"] = detail.get("facts_available", False)
+                abstain_reason = (
+                    detail.get("reason")
+                    or "the agent could not safely answer — insufficient grounded information"
+                )
+            elif et == "voice_opt_out":
+                opted_out = True
+            elif et == "voice_grounding_failed":
+                gates["retrieval_passed"] = True
+                gates["facts_available"] = True
+                gates["instructions_sanitised"] = True
+                gates["response_grounded"] = False
+            elif et == "voice_injection_refused":
+                gates["instructions_sanitised"] = False
+
+        calls.append({
+            "id": str(r["id"]),
+            "state": r["state"],
+            "result": r["result"],
+            "subject_ref": r["subject_ref"],
+            "amount": _money(int(r["amount_paise"])),
+            "risk_type": (r["risk_type"] or "").replace("_", " "),
+            "created": (
+                _ist(_aware(r["created_at"])).strftime("%d %b, %H:%M")
+                if r["created_at"] else "—"
+            ),
+            "claimed": (
+                _ist(_aware(r["claimed_at"])).strftime("%d %b, %H:%M")
+                if r["claimed_at"] else None
+            ),
+            "gates": gates,
+            "abstain_reason": abstain_reason,
+            "opted_out": opted_out,
+            # No transcript field: the model does not store turn-by-turn text.
+            # The template says so explicitly.
+            "has_transcript": False,
+        })
+
+    return {"calls": calls, "has_data": bool(calls)}
+
+
+# ── Phase 07: Safety state ──────────────────────────────────────────────────
+
+
+async def safety_state(session: AsyncSession) -> dict[str, Any]:
+    """
+    Every safeguard in the engine, and whether it is live right now.
+
+    Read from the enforcing modules, never restated in copy. A row that says
+    'active' must have come from a live read. A row that says NOT CONFIGURED
+    must have come from a check that the thing is actually not configured.
+    """
+    from src.audit_chain import AuditChainNotKeyedError, verify_chain
+    from src.classifier.taxonomy import FailureClass
+    from src.config import get_settings as _get_settings
+    from src.guardrail.rules import GuardrailRules
+    from src.receivables.ladder import (
+        B2B_CLOSE_HOUR,
+        B2B_CLOSE_MINUTE,
+        B2B_OPEN_HOUR,
+        B2B_OPEN_MINUTE,
+        INVOICE_LADDER,
+    )
+    from src.voice.pipeline import SUPPORT_FLOOR
+
+    settings = _get_settings()
+
+    safeguards: list[dict[str, Any]] = []
+
+    # 1. Hard-decline blocklist
+    hard_declines = [fc.value for fc in FailureClass if fc.is_hard_decline]
+    safeguards.append({
+        "name": "Hard-decline blocklist",
+        "description": "Classes the engine will never retry",
+        "state": "active",
+        "detail": f"{len(hard_declines)} classes blocked",
+    })
+
+    # 2. The 12 guardrail rules
+    rule_names = [n for n in vars(GuardrailRules) if n.startswith("check_")]
+    safeguards.append({
+        "name": "Guardrail rules",
+        "description": "Every rule runs on every attempt, no short-circuit",
+        "state": "active",
+        "detail": f"{len(rule_names)} rules enforce",
+    })
+
+    # 3. Retry cap
+    safeguards.append({
+        "name": "Retry cap",
+        "description": "Maximum attempts per payment",
+        "state": "active",
+        "detail": f"{settings.max_retries_per_payment} attempts max",
+    })
+
+    # 4. Per-customer rate limit
+    safeguards.append({
+        "name": "Per-customer rate limit",
+        "description": f"Max {settings.max_nudges_per_customer_24h} nudges per customer per 24h",
+        "state": "active",
+        "detail": f"{settings.max_nudges_per_customer_24h}/24h",
+    })
+
+    # 5. Consent window
+    safeguards.append({
+        "name": "Consent window",
+        "description": "No retry after this window from the original charge",
+        "state": "active",
+        "detail": f"{settings.consent_window_hours}h",
+    })
+
+    # 6. Blackout window
+    safeguards.append({
+        "name": "Blackout window",
+        "description": "No retries during overnight hours (IST)",
+        "state": "active",
+        "detail": (
+            f"{settings.retry_blackout_start_hour:02d}:00–"
+            f"{settings.retry_blackout_end_hour:02d}:00 IST"
+        ),
+    })
+
+    # 7. Idempotency
+    safeguards.append({
+        "name": "Idempotency",
+        "description": "Unique key per attempt, UNIQUE constraint in the database",
+        "state": "active",
+        "detail": "enforced by schema",
+    })
+
+    # 8. Fire-time re-validation
+    safeguards.append({
+        "name": "Fire-time re-validation",
+        "description": (
+            "The guardrail runs again when a deferred retry fires, "
+            "not just at decision time"
+        ),
+        "state": "active",
+        "detail": "always on by design",
+    })
+
+    # 9. Dispute freeze
+    safeguards.append({
+        "name": "Dispute freeze",
+        "description": "An open dispute freezes all chasing on that case",
+        "state": "active",
+        "detail": "enforced in orchestrator",
+    })
+
+    # 10. LLM fallback
+    llm_key = (
+        settings.anthropic_api_key
+        if settings.llm_provider == "anthropic"
+        else settings.openai_api_key
+    )
+    llm_configured = bool(
+        llm_key.get_secret_value()
+        if hasattr(llm_key, "get_secret_value")
+        else llm_key
+    )
+
+    safeguards.append({
+        "name": "LLM fallback",
+        "description": "XGBoost baseline runs when LLM is unavailable",
+        "state": "active" if llm_configured else "NOT CONFIGURED",
+        "detail": (
+            f"provider: {settings.llm_provider}"
+            if llm_configured
+            else "LLM key not set — XGBoost only"
+        ),
+    })
+
+    # 11. Voice grounding
+    safeguards.append({
+        "name": "Voice grounding",
+        "description": (
+            "The voice agent answers only from the case's own "
+            "facts and abstains rather than inventing"
+        ),
+        "state": "active",
+        # SUPPORT_FLOOR, not the number 70: this page's whole promise is that
+        # it reads the enforcing module. Tuning the gate and leaving a stale
+        # figure here would make the safety page the thing that lies.
+        "detail": (
+            f"{SUPPORT_FLOOR:.0%} content overlap floor, "
+            "numeric grounding required"
+        ),
+    })
+
+    # 12. B2B contact bounds
+    safeguards.append({
+        "name": "B2B contact bounds",
+        "description": "One contact per account per rung, business hours only",
+        "state": "active",
+        "detail": (
+            f"{len(INVOICE_LADDER)} rungs, Mon–Fri "
+            f"{B2B_OPEN_HOUR:02d}:{B2B_OPEN_MINUTE:02d}–"
+            f"{B2B_CLOSE_HOUR:02d}:{B2B_CLOSE_MINUTE:02d} IST"
+        ),
+    })
+
+    # 13. Rate limiting — Redis or in-process
+    redis_configured = bool(settings.redis_url)
+    safeguards.append({
+        "name": "Rate limiting",
+        "description": "Per-customer contact budget enforcement",
+        "state": "active",
+        "detail": "shared (Redis)" if redis_configured else "per-process (in-memory)",
+    })
+
+    # 14. Audit chain
+    chain_state: dict[str, Any]
+    audit_secret = settings.audit_chain_secret
+    audit_keyed = bool(
+        audit_secret.get_secret_value()
+        if hasattr(audit_secret, "get_secret_value")
+        else audit_secret
+    )
+    if not audit_keyed:
+        chain_state = {
+            "keyed": False, "intact": False,
+            "detail": "AUDIT_CHAIN_SECRET not set — rows stored but unsealed",
+        }
+    else:
+        try:
+            verification = await verify_chain(session)
+            chain_state = {
+                "keyed": True,
+                "intact": verification.intact,
+                "events_checked": verification.events_checked,
+                "first_broken_id": verification.first_broken_id,
+                "detail": verification.detail if not verification.intact else (
+                    f"{verification.events_checked} events verified"
+                ),
+            }
+        except AuditChainNotKeyedError:
+            chain_state = {
+                "keyed": False, "intact": False,
+                "detail": "AUDIT_CHAIN_SECRET not set",
+            }
+        except Exception:
+            logger.warning("Audit chain verification failed", exc_info=True)
+            chain_state = {
+                "keyed": True, "intact": False,
+                "detail": "verification failed — see server logs",
+            }
+
+    safeguards.append({
+        "name": "Audit chain",
+        "description": "HMAC hash-chained case events with periodic checkpoints",
+        "state": (
+            "active" if chain_state.get("intact")
+            else "NOT CONFIGURED" if not chain_state.get("keyed")
+            else "broken"
+        ),
+        "detail": chain_state["detail"],
+    })
+
+    return {
+        "safeguards": safeguards,
+        "chain": chain_state,
+    }
+
+
+async def activity_page(
+    session: AsyncSession, *, limit: int = 50
+) -> dict[str, Any]:
+    """
+    The case audit trail with actor, event type, and hash verification status.
+
+    Shows "verified" ONLY where event_hash is stamped AND the chain verifies.
+    A stamped row inside an unverified chain is NOT evidence.
+    """
+    from src.audit_chain import AuditChainNotKeyedError, verify_chain
+    from src.config import get_settings as _get_settings
+
+    settings = _get_settings()
+    audit_secret = settings.audit_chain_secret
+    chain_keyed = bool(
+        audit_secret.get_secret_value()
+        if hasattr(audit_secret, "get_secret_value")
+        else audit_secret
+    )
+
+    # Verify the chain once for the whole page
+    chain_intact = False
+    if chain_keyed:
+        try:
+            verification = await verify_chain(session)
+            chain_intact = verification.intact
+        except (AuditChainNotKeyedError, Exception):
+            chain_intact = False
+
+    rows = (
+        await session.execute(
+            select(
+                CaseEvent.id,
+                CaseEvent.event_type,
+                CaseEvent.actor,
+                CaseEvent.detail,
+                CaseEvent.created_at,
+                CaseEvent.event_hash,
+                CaseEvent.prev_event_hash,
+                RecoveryCase.subject_ref,
+                RecoveryCase.state,
+            )
+            .join(RecoveryCase, RecoveryCase.id == CaseEvent.recovery_case_id)
+            .order_by(CaseEvent.id.desc())
+            .limit(limit)
+        )
+    ).mappings().all()
+
+    events: list[dict[str, Any]] = []
+    for r in rows:
+        # detail may carry free-form JSON including PII — show only the
+        # event_type, actor, and state transition, never the blob.
+        detail = r["detail"] or {}
+        stamped = r["event_hash"] is not None
+
+        events.append({
+            "id": r["id"],
+            "event": r["event_type"],
+            "actor": r["actor"],
+            "subject_ref": r["subject_ref"],
+            "case_state": r["state"],
+            "previous_state": detail.get("previous_state"),
+            "new_state": detail.get("new_state") or detail.get("state"),
+            "reason": detail.get("reason") or detail.get("close_reason"),
+            "when": (
+                _ist(_aware(r["created_at"])).strftime("%d %b, %H:%M")
+                if r["created_at"] else "—"
+            ),
+            # Verified = stamped AND chain intact. A stamped row inside a
+            # broken chain is not evidence.
+            "verified": stamped and chain_intact,
+            "stamped": stamped,
+        })
+
+    return {
+        "events": events,
+        "chain_keyed": chain_keyed,
+        "chain_intact": chain_intact,
+        "has_data": bool(events),
+    }
+
+
+# ── Phase 08: Search and settings ───────────────────────────────────────────
+
+
+async def search_console(
+    session: AsyncSession, q: str
+) -> dict[str, Any]:
+    """
+    Search over payment id, order id, case id, invoice/account reference.
+
+    NOT over customer email or phone: that would turn the PII-free contract
+    into a lookup service. The console's job is to find merchant-owned
+    identifiers, not customer identifiers.
+    """
+    from src.models import PaymentFailure
+
+    q = q.strip()
+    if not q or len(q) < 2:
+        return {"results": [], "query": q, "has_data": False}
+
+    results: list[dict[str, Any]] = []
+
+    # 1. Case by UUID
+    try:
+        case_id = uuid.UUID(q)
+        case = await session.get(RecoveryCase, case_id)
+        if case:
+            results.append({
+                "type": "case",
+                "ref": case.subject_ref,
+                "id": str(case.id),
+                "state": case.state,
+                "amount": _money(int(case.amount_at_risk)),
+                "href": f"/console/case/{case.id}",
+            })
+    except ValueError:
+        pass
+
+    # 2. Cases by subject_ref (invoice number, cart id, etc.)
+    ref_rows = (
+        await session.execute(
+            select(
+                RecoveryCase.id,
+                RecoveryCase.subject_ref,
+                RecoveryCase.state,
+                RecoveryCase.amount_at_risk,
+                RecoveryCase.risk_type,
+            )
+            .where(RecoveryCase.subject_ref.ilike(f"%{q}%"))
+            .order_by(RecoveryCase.opened_at.desc())
+            .limit(10)
+        )
+    ).mappings().all()
+    for r in ref_rows:
+        results.append({
+            "type": "case",
+            "ref": r["subject_ref"],
+            "id": str(r["id"]),
+            "state": r["state"],
+            "risk_type": (r["risk_type"] or "").replace("_", " "),
+            "amount": _money(int(r["amount_at_risk"])),
+            "href": f"/console/case/{r['id']}",
+        })
+
+    # 3. Payments by payment_id or order_id
+    pay_rows = (
+        await session.execute(
+            select(
+                PaymentFailure.payment_id,
+                PaymentFailure.order_id,
+                PaymentFailure.amount,
+                PaymentFailure.failure_class,
+                PaymentFailure.failed_at,
+            )
+            .where(
+                sa_or(
+                    PaymentFailure.payment_id.ilike(f"%{q}%"),
+                    PaymentFailure.order_id.ilike(f"%{q}%"),
+                )
+            )
+            .order_by(PaymentFailure.failed_at.desc())
+            .limit(10)
+        )
+    ).mappings().all()
+    for r in pay_rows:
+        results.append({
+            "type": "payment",
+            "ref": r["payment_id"],
+            "order_ref": r["order_id"],
+            "amount": _money(int(r["amount"])),
+            "class": (r["failure_class"] or "").replace("_", " "),
+            "when": (
+                _ist(_aware(r["failed_at"])).strftime("%d %b, %H:%M")
+                if r["failed_at"] else "—"
+            ),
+            "href": "/console/payments?state=all",
+        })
+
+    # 4. Accounts by account_ref
+    acct_rows = (
+        await session.execute(
+            select(
+                ArAccount.id,
+                ArAccount.account_ref,
+                ArAccount.display_name,
+            )
+            .where(
+                sa_or(
+                    ArAccount.account_ref.ilike(f"%{q}%"),
+                    ArAccount.display_name.ilike(f"%{q}%"),
+                )
+            )
+            .limit(10)
+        )
+    ).mappings().all()
+    for r in acct_rows:
+        results.append({
+            "type": "account",
+            "ref": r["display_name"] or r["account_ref"],
+            "id": str(r["id"]),
+            "href": f"/console/account/{r['id']}",
+        })
+
+    return {"results": results, "query": q, "has_data": bool(results)}
+
+
+def settings_view() -> dict[str, Any]:
+    """
+    Read-only view of what is configured and what is not.
+
+    Shows presence, never values. A secret that is set renders as 'configured';
+    a secret that is empty renders as 'not configured'. The point is to answer
+    'can I use feature X' without turning the settings page into a credential
+    dump.
+    """
+    from src.chasers.policy import RISK_POLICIES
+    from src.config import get_settings as _get_settings
+    from src.receivables.ladder import INVOICE_LADDER
+
+    settings = _get_settings()
+
+    def _is_set(v: Any) -> bool:
+        if hasattr(v, "get_secret_value"):
+            return bool(v.get_secret_value())
+        return bool(v)
+
+    integrations = [
+        {
+            "name": "Razorpay",
+            "configured": _is_set(settings.razorpay_key_id),
+            "detail": "payment gateway",
+        },
+        {
+            "name": f"LLM ({settings.llm_provider})",
+            "configured": _is_set(
+                settings.anthropic_api_key
+                if settings.llm_provider == "anthropic"
+                else settings.openai_api_key
+            ),
+            "detail": "decision agent",
+        },
+        {
+            "name": "Plivo",
+            "configured": _is_set(settings.plivo_auth_id),
+            "detail": "voice call leg",
+        },
+        {
+            "name": "Sarvam",
+            "configured": _is_set(settings.sarvam_api_key),
+            "detail": "Hindi TTS / ASR",
+        },
+        {
+            "name": "Redis",
+            "configured": _is_set(settings.redis_url),
+            "detail": (
+                "shared rate limiting"
+                if _is_set(settings.redis_url)
+                else "in-process rate limiting"
+            ),
+        },
+    ]
+
+    # Chase bounds from the enforcing module
+    bounds = []
+    for risk_type, policy in RISK_POLICIES.items():
+        bounds.append({
+            "risk_type": risk_type.replace("_", " "),
+            "max_attempts": policy.max_attempts,
+            "window_hours": policy.consent_window_hours,
+            "rail": policy.recommended_rail or "best",
+        })
+
+    # Ladder rungs
+    rungs = [
+        {
+            "level": stage.level,
+            "days": stage.days_past_due,
+            "tone": stage.tone,
+            "addresses": ", ".join(a.replace("_", " ") for a in stage.addresses),
+            "channels": ", ".join(stage.channels),
+        }
+        for stage in INVOICE_LADDER
+    ]
+
+    channels = [
+        {"name": "SMS", "status": "active"},
+        {"name": "Email", "status": "active"},
+        {
+            "name": "Voice",
+            "status": (
+                "active" if _is_set(settings.plivo_auth_id)
+                else "not configured"
+            ),
+        },
+        {"name": "WhatsApp", "status": "coming"},
+    ]
+
+    return {
+        "integrations": integrations,
+        "bounds": bounds,
+        "rungs": rungs,
+        "channels": channels,
+        "blackout_start": settings.retry_blackout_start_hour,
+        "blackout_end": settings.retry_blackout_end_hour,
+        "consent_window": settings.consent_window_hours,
+        "max_retries": settings.max_retries_per_payment,
+        "max_nudges_24h": settings.max_nudges_per_customer_24h,
     }

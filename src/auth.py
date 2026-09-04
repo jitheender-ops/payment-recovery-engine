@@ -23,6 +23,26 @@ from src.config import get_settings, reveal
 logger = logging.getLogger(__name__)
 
 
+def _addr_in_cidrs(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, cidrs: str) -> bool:
+    """
+    Is `addr` inside any comma-separated IP/CIDR entry of `cidrs`?
+
+    A malformed entry is skipped with a warning rather than raising: this runs
+    on request paths, and a typo in one CIDR must not turn every request into
+    a 500.
+    """
+    for entry in cidrs.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            logger.warning("Ignoring malformed allowlist entry %r", entry)
+    return False
+
+
 def client_ip(request: Request) -> str:
     """
     The client IP rate limits and lockouts key on.
@@ -36,10 +56,34 @@ def client_ip(request: Request) -> str:
     the platform LB. With no trusted proxy — or fewer entries than trusted
     hops, meaning the header was not written by the chain we expect — the
     header is attacker-controlled and ignored: the socket peer is the truth.
+
+    THE PRECONDITION, AND WHO ENFORCES IT: reading the header at all assumes
+    this request arrived through the proxy chain, because a request that did
+    not has an attacker-controlled header and `entries[-hops]` is then the
+    attacker's choice. The chain being the only way in is a network property
+    no header can prove, so when TRUSTED_PROXY_IPS is set, client_ip() checks
+    the socket peer against it first: a peer outside the list did NOT come
+    through a trusted proxy, its header is discarded, and the socket peer is
+    returned — a direct connection padding X-Forwarded-For cannot impersonate
+    an address. When TRUSTED_PROXY_IPS is empty the header is trusted from
+    any peer (Render's LB case), and the deployment precondition — the app
+    must not be reachable outside the chain — is documented in
+    Settings.trusted_proxy_ips and warned about at boot.
     """
     settings = get_settings()
     if settings.behind_trusted_proxy:
         hops = max(1, settings.trusted_proxy_hops)
+        peer = request.client.host if request.client else "unknown"
+        if settings.trusted_proxy_ips:
+            try:
+                peer_addr = ipaddress.ip_address(peer)
+            except ValueError:
+                peer_addr = None
+            if peer_addr is None or not _addr_in_cidrs(
+                peer_addr, settings.trusted_proxy_ips
+            ):
+                # Not one of our proxies: the whole header is attacker-typed.
+                return peer
         entries = [
             part.strip()
             for part in request.headers.get("x-forwarded-for", "").split(",")
@@ -47,6 +91,7 @@ def client_ip(request: Request) -> str:
         ]
         if len(entries) >= hops:
             return entries[-hops]
+        return peer
     return request.client.host if request.client else "unknown"
 
 
@@ -81,16 +126,7 @@ def ip_allowed(request: Request, allowlist: str) -> bool:
         logger.warning("Webhook from unparseable client address %r — refused", peer)
         return False
 
-    for entry in allowlist.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            if addr in ipaddress.ip_network(entry, strict=False):
-                return True
-        except ValueError:
-            logger.warning("Ignoring malformed webhook allowlist entry %r", entry)
-    return False
+    return _addr_in_cidrs(addr, allowlist)
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:

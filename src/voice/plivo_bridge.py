@@ -92,7 +92,13 @@ def _authorized(raw: bytes, signature: str | None) -> bool:
     if not secret or not signature:
         return False
     expected = hmac.new(secret.encode(), raw, sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    # Bytes against bytes, with the attacker-chosen side coerced by "replace":
+    # compare_digest raises TypeError on a non-ASCII str, and an HTTP header
+    # may legally carry obs-text, so a non-ASCII signature must be a clean
+    # 401 rather than a 500. Same construction as src/voice/webhook.py.
+    return hmac.compare_digest(
+        expected.encode("ascii"), (signature or "").encode("utf-8", "replace")
+    )
 
 
 # ── per-call state (audio + turn counter) ────────────────────────────────
@@ -179,7 +185,13 @@ def _sign_getinput(call_uuid: str, n: int) -> str:
 
 
 def _check_getinput_sig(call_uuid: str, n: int, sig: str) -> bool:
-    return hmac.compare_digest(_sign_getinput(call_uuid, n), sig or "")
+    # Same bytes-vs-bytes coercion as _authorized: the sig arrives in the
+    # URL query string and may be any bytes; compare_digest on a non-ASCII
+    # str raises TypeError, which would surface as a 500 on the callback.
+    return hmac.compare_digest(
+        _sign_getinput(call_uuid, n).encode("ascii"),
+        (sig or "").encode("utf-8", "replace"),
+    )
 
 
 def _hangup_xml(farewell: str | None = None) -> str:

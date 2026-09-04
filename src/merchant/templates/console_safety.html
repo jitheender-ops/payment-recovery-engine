@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Safety center · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("safety", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Trust</div>
+    <h1 class="ptitle">Safety center</h1>
+    <p class="psub">Every safeguard in this engine, its live state, and where it is enforced.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    <section class="sec">
+      <h2 class="sec-t">Safeguards</h2>
+      <div class="tw">
+        <table class="ct">
+          <thead>
+            <tr>
+              <th>Safeguard</th>
+              <th>Description</th>
+              <th>State</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in data.safety.safeguards %}
+            <tr>
+              <td>{{ s.name }}</td>
+              <td>{{ s.description }}</td>
+              <td>
+                {% if s.state == 'active' %}
+                  {{ severity_pill('info', 'Active') }}
+                {% elif s.state == 'NOT CONFIGURED' %}
+                  {{ severity_pill('stop', 'Not configured') }}
+                {% elif s.state == 'broken' %}
+                  {{ severity_pill('stop', 'Broken') }}
+                {% else %}
+                  {{ s.state }}
+                {% endif %}
+              </td>
+              <td>{{ s.detail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section class="sec" style="margin-top:2rem">
+      <h2 class="sec-t">Audit chain</h2>
+      <div style="background:var(--well);padding:1rem;border-radius:8px;border:1px solid var(--line);">
+        {% if not data.safety.chain.keyed %}
+          <p style="margin:0;color:var(--ink-2)">AUDIT_CHAIN_SECRET not set — rows stored but unsealed.</p>
+        {% elif data.safety.chain.intact %}
+          <p style="margin:0;color:var(--green)">Intact. {{ data.safety.chain.count }} events verified.</p>
+        {% else %}
+          <p style="margin:0;color:var(--red)">Broken. {{ data.safety.chain.detail }}</p>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+</main>
+{% endblock %}

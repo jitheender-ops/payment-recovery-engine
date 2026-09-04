@@ -99,6 +99,20 @@ def test_a_wrong_signature_is_refused(bridge: TestClient) -> None:
     assert r.status_code == 401
 
 
+def test_a_non_ascii_signature_is_a_401_not_a_500(bridge: TestClient) -> None:
+    """Same fail-closed rule as /voice/turn: compare_digest raises TypeError
+    on a non-ASCII str, and an HTTP header may legally carry obs-text, so a
+    raw \xE9\xE9\xE9 signature must be a clean 401, not an unhandled 500."""
+    r = bridge.post(
+        "/plivo/answer", content=b"CallUUID=x",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Voice-Signature": b"\xe9\xe9\xe9",
+        },
+    )
+    assert r.status_code == 401
+
+
 # ── TTS audio serving ──────────────────────────────────────────────────────
 
 
@@ -147,6 +161,8 @@ def test_getinput_action_urls_carry_a_signature_bound_to_the_call(
     assert "call_uuid=cu_2" in xml and "n=1" in xml and "sig=" in xml
     # The tamper check: a wrong n fails, the right one passes.
     assert _check_getinput_sig("cu_2", 1, "wrong") is False
+    # A non-ASCII sig (legal in a URL query string) must fail, not raise.
+    assert _check_getinput_sig("cu_2", 1, "\u00e9\u00e9\u00e9") is False
     # Extract the sig back out of the XML to prove it verifies.
     marker = "sig="
     sig = xml.split(marker, 1)[1].split('"', 1)[0].split("&", 1)[0]

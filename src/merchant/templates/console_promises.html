@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state %}
+{% block title %}Promises to pay · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}
+<style>
+  .split{display:flex;height:8px;border-radius:999px;overflow:hidden;
+         margin-top:1.1rem;background:var(--well)}
+  .split-kept{background:var(--green)}
+  .split-broken{background:var(--red)}
+  .split-key{display:flex;gap:1.2rem;margin-top:.55rem;
+             font-size:.83rem;color:var(--ink-3)}
+</style>
+{% endblock %}
+{% block body %}
+{{ console_nav("promises", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Receivables</div>
+    <h1 class="ptitle">Promises to pay</h1>
+    <p class="psub">Who committed to pay, and whether they did.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b><p>This page shows nothing rather than something wrong. Every figure here is read live.</p></div>
+  {% else %}
+    {% if not data.promises.total %}
+      {{ empty_state("No promises yet", "A promise to pay is recorded when a customer commits to a date.") }}
+    {% else %}
+      <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem">
+        {{ stat_tile("Total promises", data.promises.total) }}
+        {{ stat_tile("Pending", data.promises.pending, data.promises.pending_amount ~ " promised") }}
+        {{ stat_tile("Kept rate", data.promises.kept_rate ~ "%" if data.promises.kept_rate is not none else "—") }}
+        {{ stat_tile("Broken", data.promises.broken, none, "red" if data.promises.broken > 0 else none) }}
+      </div>
+
+      <section class="sec">
+        {% set resolved = data.promises.kept + data.promises.broken %}
+        {% if resolved %}
+        <div class="split" role="img" aria-label="{{ data.promises.kept }} kept, {{ data.promises.broken }} broken">
+          <span class="split-kept" style="flex:{{ data.promises.kept }}"></span>
+          <span class="split-broken" style="flex:{{ data.promises.broken }}"></span>
+        </div>
+        <div class="split-key">
+          <span><b class="green">{{ data.promises.kept }}</b> kept{% if data.promises.kept_late %} <span class="faint">({{ data.promises.kept_late }} inside the grace window)</span>{% endif %}</span>
+          <span><b class="red">{{ data.promises.broken }}</b> broken</span>
+        </div>
+        {% endif %}
+
+        {% if data.promises.upcoming %}
+        <h2 class="sec-t" style="margin-top:2rem">Upcoming promises</h2>
+        <div class="tw">
+          <table class="ct">
+            <thead><tr><th>Due</th><th>Reference</th><th>Channel</th><th class="n">Amount</th></tr></thead>
+            <tbody>
+              {% for p in data.promises.upcoming %}
+              <tr>
+                <td class="mono nowrap">{{ p.due }}</td>
+                <td class="mono">{{ p.subject_ref }}</td>
+                <td class="faint">{{ p.channel }}{% if p.reminded %} · reminded{% endif %}{% if p.autopay %} · <span class="green">autopay</span>{% endif %}</td>
+                <td class="n">{{ p.amount }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      </section>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

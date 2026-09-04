@@ -31,11 +31,40 @@ _LOCKOUT_SECONDS = 300.0
 # minutes — a free "annoy the admin" button. Keyed per client; an empty key
 # (no proxy header and no socket peer) still gets its own bucket so it can
 # never lock out everyone either.
-# ponytail: process-global dict, unbounded key count — a flood of spoofed
-# keys grows it. Cap with an LRU (or move behind a session store) if the
-# dashboard is ever exposed beyond the operator's tunnel.
+#
+# Distinct (spoofed) keys must not grow these maps without bound: entries are
+# removed on a successful sign-in, but a flood of wrong guesses from many
+# keys never signs in. Same bounded-GC discipline as the merchant console's
+# login throttle (src/merchant/routes.py): sweep past a threshold, dropping
+# only the dead entries — buckets whose window has rolled off and locks that
+# have expired.
+_GC_AT = 10_000
 _FAILURES: dict[str, deque[float]] = {}
 _LOCKED_UNTIL: dict[str, float] = {}
+
+
+def _gc_state(now: float) -> None:
+    """
+    Drop dead entries from the throttle maps past _GC_AT.
+
+    Dead = a bucket whose window has rolled off (empty, or older than the
+    window) and a lock that has already expired. Neither can affect a future
+    decision — a cleared bucket starts fresh, an expired lock lets the next
+    attempt through — so removing them changes no behaviour, it only stops
+    the maps from being the thing that fills. Live locks and fresh buckets
+    are untouched. Runs on the failure-write path, where the maps grow.
+    """
+    if len(_FAILURES) + len(_LOCKED_UNTIL) < _GC_AT:
+        return
+    stale_failures = [
+        key for key, bucket in _FAILURES.items()
+        if not bucket or now - bucket[-1] > _FAILURE_WINDOW_SECONDS
+    ]
+    for key in stale_failures:
+        del _FAILURES[key]
+    stale_locks = [key for key, until in _LOCKED_UNTIL.items() if until <= now]
+    for key in stale_locks:
+        del _LOCKED_UNTIL[key]
 
 
 def _locked_out(key: str, now: float) -> bool:
@@ -43,6 +72,7 @@ def _locked_out(key: str, now: float) -> bool:
 
 
 def _record_failure(key: str, now: float) -> None:
+    _gc_state(now)
     bucket = _FAILURES.setdefault(key, deque())
     while bucket and now - bucket[0] > _FAILURE_WINDOW_SECONDS:
         bucket.popleft()

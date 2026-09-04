@@ -161,6 +161,12 @@ services:
       # address and every visitor shares one rate-limit bucket.
       - key: TRUSTED_PROXY_HOPS
         value: "1"
+      # TRUSTED_PROXY_IPS is deliberately ABSENT: Render's proxy is the only
+      # way into this service, so trusting the header from any peer is safe
+      # here. Set it (to your proxies' IPs/CIDRs) only if this service ever
+      # becomes reachable outside Render's LB — e.g. you publish the container
+      # port directly — because a direct connection can then pad
+      # X-Forwarded-For and spoof every per-IP limit and the webhook allowlist.
       - key: SCHEDULER_ENABLED
         value: "true"
       - key: SCHEDULER_INTERVAL_SECONDS

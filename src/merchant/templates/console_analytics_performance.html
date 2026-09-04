@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill, bar %}
+{% block title %}Recovery performance · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("analytics/performance", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Analytics</div>
+    <h1 class="ptitle">Recovery performance</h1>
+    <p class="psub">Recovery rate, volume and outcomes by failure class and recovery type.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b>
+    <p>This page shows nothing rather than something wrong.</p></div>
+  {% else %}
+    {% if not data.performance.has_data %}
+      {{ empty_state("No data", "There is no performance data to show yet.") }}
+    {% else %}
+      <div class="grid-3" style="margin-bottom:2rem">
+        {{ stat_tile("Average attempts", data.performance.avg_attempts or '—') }}
+      </div>
+      <section class="sec">
+        <h2 class="sec-t">By failure class</h2>
+        <div style="max-width:32rem">
+        {% for c in data.performance.by_class %}
+          {{ bar(c.class, c.rate ~ '%' if c.rate is not none else '—', c.frac) }}
+        {% endfor %}
+        </div>
+      </section>
+      <section class="sec" style="margin-top:2rem">
+        <h2 class="sec-t">By channel</h2>
+        <div class="tw">
+          <table class="ct">
+            <thead>
+              <tr>
+                <th>Channel</th>
+                <th class="n">Cases</th>
+                <th class="n">Recovered</th>
+                <th class="n">Rate</th>
+                <th class="n">Outstanding</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in data.performance.by_channel %}
+              <tr>
+                <td>{{ row.channel }}</td>
+                <td class="n">{{ row.cases }}</td>
+                <td class="n">{{ row.recovered }}</td>
+                <td class="n">{{ row.rate }}%</td>
+                <td class="n">{{ row.outstanding }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

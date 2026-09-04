@@ -374,6 +374,22 @@ def _password_configured() -> bool:
     return bool(_console_password())
 
 
+def _cookie_secure() -> bool:
+    """
+    Whether the console's cookies carry the Secure attribute.
+
+    Development is exempt: the app is on localhost (plain http) and the demo
+    tunnel, where a Secure cookie would silently never be stored and the
+    console would look logged-out for no visible reason. Everywhere else —
+    staging AND production — the surface is deployed and serving real money
+    figures behind a TLS-terminating proxy, so the session cookie and the
+    preview marker must never be accepted over a plaintext leg. Keying off
+    ``!= "development"`` rather than ``== "production"`` is the point:
+    staging is a real deployment with real data, and render.yaml deploys it.
+    """
+    return get_settings().app_env != "development"
+
+
 def _mint_session() -> str:
     # Only called once the password is configured and matched, so the signing
     # key is never empty here.
@@ -415,13 +431,48 @@ _LOGIN_MAX_FAILURES = 6
 _LOGIN_LOCKOUT_SECONDS = 300.0
 _LOGIN_FAILURES: dict[str, deque[float]] = {}
 _LOGIN_LOCKED_UNTIL: dict[str, float] = {}
+# Distinct IPs must not grow these maps without bound. Entries are removed on
+# a successful login, but a distributed guesser (or a slow drip across many
+# addresses) never logs in, so without a sweep the failure history is a
+# per-IP memory leak on a public endpoint. Same bounded-GC discipline as
+# src/rate_limit.py: sweep only once the maps pass a threshold, and only the
+# dead entries — ones that can never affect a future decision.
+_LOGIN_GC_AT = 10_000
 
 
 def _login_locked_seconds(ip: str) -> int:
     return max(0, int(_LOGIN_LOCKED_UNTIL.get(ip, 0.0) - time.monotonic()))
 
 
+def _gc_login_state() -> None:
+    """
+    Drop dead entries from the login-throttle maps past _LOGIN_GC_AT.
+
+    Dead = a bucket whose window has rolled off (empty or older than the
+    window) and a lock that has already expired. Neither can affect a future
+    decision — a cleared bucket starts fresh, an expired lock lets the next
+    attempt through — so removing them changes no behaviour, it only stops
+    the maps from being the thing that fills. Live locks and fresh buckets
+    are untouched. Runs on the failure-write path, where the maps grow.
+    """
+    now = time.monotonic()
+    if len(_LOGIN_FAILURES) + len(_LOGIN_LOCKED_UNTIL) < _LOGIN_GC_AT:
+        return
+    stale_failures = [
+        ip for ip, bucket in _LOGIN_FAILURES.items()
+        if not bucket or now - bucket[-1] > _LOGIN_WINDOW_SECONDS
+    ]
+    for ip in stale_failures:
+        del _LOGIN_FAILURES[ip]
+    stale_locks = [
+        ip for ip, until in _LOGIN_LOCKED_UNTIL.items() if until <= now
+    ]
+    for ip in stale_locks:
+        del _LOGIN_LOCKED_UNTIL[ip]
+
+
 def _record_login_failure(ip: str) -> None:
+    _gc_login_state()
     now = time.monotonic()
     bucket = _LOGIN_FAILURES.setdefault(ip, deque())
     while bucket and now - bucket[0] > _LOGIN_WINDOW_SECONDS:
@@ -884,7 +935,7 @@ async def login_submit(request: Request) -> Any:
             max_age=_SESSION_TTL_SECONDS,
             httponly=True,
             samesite="lax",
-            secure=get_settings().app_env == "production",
+            secure=_cookie_secure(),
             path="/console",
         )
         return response
@@ -1259,13 +1310,13 @@ async def console_resolve_dispute(request: Request) -> Any:
         logger.warning(
             "Dispute resolve refused: id=%r outcome=%r", dispute_id, outcome
         )
-        return RedirectResponse("/console/live", status_code=303)
+        return RedirectResponse("/console/disputes", status_code=303)
 
     try:
         key = uuid.UUID(dispute_id)
     except ValueError:
         logger.warning("Dispute resolve: malformed id %r", dispute_id)
-        return RedirectResponse("/console/live", status_code=303)
+        return RedirectResponse("/console/disputes", status_code=303)
 
     from src.receivables.disputes import resolve_dispute
     from src.receivables.models import CaseDispute
@@ -1284,7 +1335,7 @@ async def console_resolve_dispute(request: Request) -> Any:
     # Redirect rather than render: a refresh on a rendered POST re-submits the
     # verdict, and while resolve_dispute is idempotent, the merchant should not
     # be relying on that to avoid re-deciding a case by pressing F5.
-    return RedirectResponse("/console/live", status_code=303)
+    return RedirectResponse("/console/disputes", status_code=303)
 
 
 @router.post("/console/task/done", response_class=HTMLResponse)
@@ -1623,7 +1674,7 @@ async def console_customer_open(request: Request) -> Any:
         max_age=_PREVIEW_TTL_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=get_settings().app_env == "production",
+        secure=_cookie_secure(),
         path="/recover",
     )
     return response
@@ -1666,3 +1717,210 @@ async def console_evidence(request: Request) -> Any:
             "data": {"eval": _eval_summary()},
         },
     )
+
+
+# ── Phase 04: Receivables ───────────────────────────────────────────────────
+
+
+@router.get("/console/receivables", response_class=HTMLResponse)
+async def console_receivables(request: Request) -> Any:
+    """Aging, ladder and outstanding — the B2B finance view."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        from src.receivables import aging as ar_aging_mod
+
+        aging = []
+        for bucket in await ar_aging_mod.aging_buckets(session):
+            aging.append({
+                "label": bucket["label"],
+                "count": bucket["count"],
+                "outstanding": _money(int(bucket["outstanding_paise"])),
+            })
+        return {
+            "outstanding": await console_data.outstanding_total(session),
+            "days_to_pay": await ar_aging_mod.avg_days_to_pay(session),
+            "aging": aging,
+            "ladder": await console_data.ladder_panel(session),
+            "promises": await console_data.promise_panel(session),
+            "plans": await console_data.plan_panel(session),
+            "disputes": await console_data.dispute_panel(session),
+        }
+
+
+    return await _render_console(request, "console_receivables.html", build)
+
+
+@router.get("/console/promises", response_class=HTMLResponse)
+async def console_promises(request: Request) -> Any:
+    """Who committed to pay, and whether they did."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"promises": await console_data.promise_panel(session)}
+
+    return await _render_console(request, "console_promises.html", build)
+
+
+@router.get("/console/plans", response_class=HTMLResponse)
+async def console_plans(request: Request) -> Any:
+    """Instalment schedules and their progress."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"plans": await console_data.plan_panel(session)}
+
+    return await _render_console(request, "console_plans.html", build)
+
+
+@router.get("/console/disputes", response_class=HTMLResponse)
+async def console_disputes(request: Request) -> Any:
+    """Frozen invoices awaiting your verdict."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"disputes": await console_data.dispute_panel(session)}
+
+    return await _render_console(request, "console_disputes.html", build)
+
+
+# ── Phase 05: Analytics ─────────────────────────────────────────────────────
+
+
+@router.get("/console/analytics/performance", response_class=HTMLResponse)
+async def console_analytics_performance(request: Request) -> Any:
+    """Recovery rate, volume and outcomes by failure class and recovery type."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"performance": await console_data.performance_analytics(session)}
+
+    return await _render_console(
+        request, "console_analytics_performance.html", build
+    )
+
+
+@router.get("/console/analytics/rails", response_class=HTMLResponse)
+async def console_analytics_rails(request: Request) -> Any:
+    """Bank × rail — the evidence behind switch_rail."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"routing": await console_data.routing_panel(session)}
+
+    return await _render_console(request, "console_analytics_rails.html", build)
+
+
+@router.get("/console/analytics/hours", response_class=HTMLResponse)
+async def console_analytics_hours(request: Request) -> Any:
+    """When recoveries land, and where the blackout sits."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"hours": await console_data.hours_analytics(session)}
+
+    return await _render_console(request, "console_analytics_hours.html", build)
+
+
+@router.get("/console/analytics/economics", response_class=HTMLResponse)
+async def console_analytics_economics(request: Request) -> Any:
+    """What the engine recovered, what it cost, and whether it was worth it."""
+    gated = _gate(request)
+    if gated is not None:
+        return gated
+
+    data: dict[str, Any] = {}
+    nav = None
+    db_ok = True
+    try:
+        async with async_session_factory() as session:
+            data["economics"] = await console_data.economics_analytics(session)
+            nav = await _nav_counts(session)
+    except Exception:
+        logger.exception("Analytics economics could not read the database")
+        db_ok = False
+
+    # The eval data is read from disk, not the database — include it even
+    # when db is down, because the eval file is never the thing that breaks.
+    data["eval"] = _eval_summary()
+
+    return templates.TemplateResponse(
+        request, "console_analytics_economics.html",
+        {
+            "merchant_name": get_settings().merchant_name or None,
+            "db_ok": db_ok, "data": data, "nav": nav,
+        },
+    )
+
+
+# ── Phase 06: Voice ─────────────────────────────────────────────────────────
+
+
+@router.get("/console/voice", response_class=HTMLResponse)
+async def console_voice(request: Request) -> Any:
+    """The call queue, outcomes, and the four safety gates."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {
+            "voice": await console_data.voice_panel(session),
+            "voice_calls": await console_data.voice_call_list(session),
+        }
+
+    return await _render_console(request, "console_voice.html", build)
+
+
+# ── Phase 07: Trust Surfaces ────────────────────────────────────────────────
+
+
+@router.get("/console/safety", response_class=HTMLResponse)
+async def console_safety(request: Request) -> Any:
+    """Every safeguard in the engine, its live state."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"safety": await console_data.safety_state(session)}
+
+    return await _render_console(request, "console_safety.html", build)
+
+
+@router.get("/console/activity", response_class=HTMLResponse)
+async def console_activity(request: Request) -> Any:
+    """The audit trail, event by event."""
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"activity": await console_data.activity_page(session)}
+
+    return await _render_console(request, "console_activity.html", build)
+
+
+# ── Phase 08: Search & Settings ─────────────────────────────────────────────
+
+
+@router.get("/console/search", response_class=HTMLResponse)
+async def console_search(request: Request) -> Any:
+    """Find any payment, case, invoice or account by reference."""
+    q = request.query_params.get("q", "").strip()
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"search": await console_data.search_console(session, q)}
+
+    return await _render_console(request, "console_search.html", build)
+
+
+@router.get("/console/settings", response_class=HTMLResponse)
+async def console_settings(request: Request) -> Any:
+    """What is configured and what is not. Read-only."""
+    gated = _gate(request)
+    if gated is not None:
+        return gated
+
+    # Settings reads no database — only config and module constants.
+    nav = None
+    try:
+        async with async_session_factory() as session:
+            nav = await _nav_counts(session)
+    except Exception:
+        logger.warning("Navigation counts unavailable on /console/settings")
+
+    return templates.TemplateResponse(
+        request, "console_settings.html",
+        {
+            "merchant_name": get_settings().merchant_name or None,
+            "db_ok": True,
+            "nav": nav,
+            "data": {"settings": console_data.settings_view()},
+        },
+    )
+

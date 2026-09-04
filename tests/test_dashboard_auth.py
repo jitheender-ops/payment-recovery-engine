@@ -95,6 +95,63 @@ def test_one_clients_lockout_does_not_lock_out_another(monkeypatch: Any) -> None
         auth.reset_throttle("operator")
 
 
+def test_the_throttle_prunes_stale_keys(monkeypatch: Any) -> None:
+    """A flood of wrong guesses from many spoofed keys must not grow the
+    maps without bound — past the GC threshold, rolled-off buckets and
+    expired locks are dropped, while live locks and fresh buckets survive
+    untouched, because that is the throttling actually working.
+    """
+    import time
+    from collections import deque
+
+    import dashboard.auth as auth
+
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    # The maps are process-global; save and restore so the rest of the suite
+    # (which shares them) is unaffected.
+    saved_failures = auth._FAILURES
+    saved_locked = auth._LOCKED_UNTIL
+    auth._FAILURES = {}
+    auth._LOCKED_UNTIL = {}
+    try:
+        monkeypatch.setattr(auth, "_GC_AT", 2)
+        now = time.monotonic()
+
+        # Five distinct spoofed keys whose failures rolled off the window and
+        # whose locks have expired — pure dead weight.
+        for i in range(5):
+            key = f"spoofed-{i}"
+            auth._FAILURES[key] = deque([now - 120.0])
+            auth._LOCKED_UNTIL[key] = now - 1.0
+        # A live lockout must survive the sweep or the throttle stops
+        # throttling.
+        auth._FAILURES["live-lock"] = deque([now])
+        auth._LOCKED_UNTIL["live-lock"] = now + 300.0
+        # A fresh failure with no lock: bucket stays (its window is live).
+        auth._FAILURES["fresh"] = deque([now])
+
+        auth._gc_state(now)
+
+        assert "live-lock" in auth._FAILURES
+        assert "live-lock" in auth._LOCKED_UNTIL
+        assert "fresh" in auth._FAILURES
+        for i in range(5):
+            assert f"spoofed-{i}" not in auth._FAILURES
+            assert f"spoofed-{i}" not in auth._LOCKED_UNTIL
+
+        # And the write path sweeps too: recording a failure past the
+        # threshold drops the stale set.
+        auth._FAILURES["stale-again"] = deque([now - 120.0])
+        auth._LOCKED_UNTIL["stale-again"] = now - 1.0
+        auth._record_failure("new-key", now)
+        assert "stale-again" not in auth._FAILURES
+        assert "stale-again" not in auth._LOCKED_UNTIL
+        assert "new-key" in auth._FAILURES
+    finally:
+        auth._FAILURES = saved_failures
+        auth._LOCKED_UNTIL = saved_locked
+
+
 def test_the_views_directory_is_not_named_pages(monkeypatch: Any) -> None:
     """
     Streamlit auto-registers every module under a directory named `pages/` next

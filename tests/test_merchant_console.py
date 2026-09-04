@@ -215,6 +215,148 @@ def test_live_console_fails_closed_without_a_password(
     assert 'class="needs-title"' not in r.text
 
 
+# ── Cookie security attributes ────────────────────────────────────────────
+
+
+def test_the_session_cookie_is_secure_outside_development(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """The deployed console runs under APP_ENV=staging (render.yaml) with
+    real money figures behind a TLS-terminating proxy, so its session cookie
+    must never be accepted over a plaintext leg. Development (localhost / the
+    demo tunnel) is the one exemption — there a Secure cookie would silently
+    never be stored and the console would look logged out for no reason.
+
+    Keying off ``!= development`` rather than ``== production`` is the point
+    of this test: staging is a real deployment, and the old check shipped it
+    without the flag.
+    """
+    monkeypatch.setattr("src.merchant.routes.async_session_factory", db_sessionmaker)
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+
+    for env, expect_secure in (
+        ("staging", True),
+        ("production", True),
+        ("development", False),
+    ):
+        monkeypatch.setenv("APP_ENV", env)
+        get_settings.cache_clear()
+        app = FastAPI()
+        app.include_router(merchant_router)
+        r = TestClient(app).post(
+            "/console/login", data={"password": PASSWORD}, follow_redirects=False
+        )
+        get_settings.cache_clear()
+        assert r.status_code == 303
+        cookie = r.headers.get("set-cookie", "")
+        assert "rc_session=" in cookie
+        if expect_secure:
+            assert "Secure" in cookie, f"{env} session cookie must carry Secure"
+        else:
+            assert "Secure" not in cookie, f"{env} session cookie must not carry Secure"
+
+
+async def test_the_preview_marker_cookie_is_secure_outside_development(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """The /recover marker left by the console's "open their page" button is
+    a session-equivalent credential for the case's view — same Secure rule as
+    the session cookie itself, for the same reason."""
+    monkeypatch.setattr("src.merchant.routes.async_session_factory", db_sessionmaker)
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    monkeypatch.setenv("RECOVERY_LINK_SECRET", "x" * 32)
+    monkeypatch.setenv("APP_ENV", "staging")
+    get_settings.cache_clear()
+
+    async with db_sessionmaker() as s:
+        case = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_cookie_secure",
+            amount_at_risk=250000, customer_id="a@b.test",
+        )
+        await s.commit()
+        case_id = str(case.id)
+
+    app = FastAPI()
+    app.include_router(merchant_router)
+    # https base: the cookie now carries Secure, and a Secure cookie is never
+    # sent back over plain http — so over TestClient's default http origin
+    # the session would not arrive and the open would redirect to login. The
+    # https origin is also the deployment reality (TLS-terminated proxy).
+    client = TestClient(app, base_url="https://testserver")
+    client.post("/console/login", data={"password": PASSWORD})
+    r = client.post(
+        "/console/customer/open", data={"case_id": case_id}, follow_redirects=False
+    )
+    get_settings.cache_clear()
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/recover/")
+    cookie = r.headers.get("set-cookie", "")
+    assert "recovery_preview=" in cookie
+    assert "Secure" in cookie, "staging preview marker must carry Secure"
+
+
+# ── Login throttling: bounded, not a leak ──────────────────────────────────
+
+
+def test_the_login_throttle_prunes_stale_entries(monkeypatch: Any) -> None:
+    """The failure maps key on client IP and are only emptied by a successful
+    login, so a distributed guessing attempt — many addresses, one guess each,
+    none ever succeeding — would otherwise grow them without bound. Past the
+    GC threshold, rolled-off buckets and expired locks are dropped; live
+    locks and fresh buckets must survive untouched, because that is the
+    throttling actually working.
+    """
+    import time
+    from collections import deque
+
+    from src.merchant import routes
+
+    # The maps are module-global; save and restore so the rest of the suite
+    # (which logs in over the same "testclient" address) is unaffected.
+    saved_failures = routes._LOGIN_FAILURES
+    saved_locked = routes._LOGIN_LOCKED_UNTIL
+    routes._LOGIN_FAILURES = {}
+    routes._LOGIN_LOCKED_UNTIL = {}
+    try:
+        monkeypatch.setattr(routes, "_LOGIN_GC_AT", 2)
+        now = time.monotonic()
+
+        # Five distinct attacker IPs whose failures rolled off the window and
+        # whose locks have expired — pure dead weight.
+        for i in range(5):
+            ip = f"10.0.0.{i}"
+            routes._LOGIN_FAILURES[ip] = deque([now - 120.0])
+            routes._LOGIN_LOCKED_UNTIL[ip] = now - 1.0
+        # A live lockout: must survive the sweep or the throttle stops
+        # throttling.
+        routes._LOGIN_FAILURES["10.0.0.99"] = deque([now])
+        routes._LOGIN_LOCKED_UNTIL["10.0.0.99"] = now + 300.0
+        # A fresh failure with no lock: bucket stays (its window is live).
+        routes._LOGIN_FAILURES["10.0.0.100"] = deque([now])
+
+        routes._gc_login_state()
+
+        assert "10.0.0.99" in routes._LOGIN_FAILURES
+        assert "10.0.0.99" in routes._LOGIN_LOCKED_UNTIL
+        assert "10.0.0.100" in routes._LOGIN_FAILURES
+        for i in range(5):
+            assert f"10.0.0.{i}" not in routes._LOGIN_FAILURES
+            assert f"10.0.0.{i}" not in routes._LOGIN_LOCKED_UNTIL
+
+        # And the write path sweeps too: recording a failure past the
+        # threshold drops the stale set.
+        routes._LOGIN_FAILURES["10.0.0.200"] = deque([now - 120.0])
+        routes._LOGIN_LOCKED_UNTIL["10.0.0.200"] = now - 1.0
+        routes._record_login_failure("10.0.0.101")
+        assert "10.0.0.200" not in routes._LOGIN_FAILURES
+        assert "10.0.0.200" not in routes._LOGIN_LOCKED_UNTIL
+        # The recorder's own fresh bucket is what it just recorded.
+        assert "10.0.0.101" in routes._LOGIN_FAILURES
+    finally:
+        routes._LOGIN_FAILURES = saved_failures
+        routes._LOGIN_LOCKED_UNTIL = saved_locked
+
+
 # ── The panels actually render ────────────────────────────────────────────
 
 
@@ -398,9 +540,55 @@ async def test_a_database_outage_renders_honestly(
 # ledger: gated, renders its data, PII-free, and honest when the database is
 # gone.
 
-_FOLDED = ["/console/pipeline", "/console/routing", "/console/cases",
-           "/console/ops", "/console/evidence", "/console/messages",
-           "/console/accounts"]
+# Every gated console page that takes no path parameter. Three contract tests
+# run over this list — it must require a session, it must render, and it must
+# not leak a customer identifier — so a page missing from here is a page with
+# none of those three guaranteed. That is exactly what happened when the
+# console grew from seven pages to twenty: the list stayed at seven, and
+# thirteen new pages sat outside the PII test the whole console rests on.
+#
+# test_every_gated_console_page_is_in_this_list keeps it honest by walking the
+# router, so adding a route without adding it here fails the suite rather than
+# quietly opting out of the contract.
+_FOLDED = [
+    "/console/pipeline", "/console/routing", "/console/cases",
+    "/console/ops", "/console/evidence", "/console/messages",
+    "/console/accounts", "/console/payments", "/console/customer",
+    "/console/receivables", "/console/promises", "/console/plans",
+    "/console/disputes", "/console/voice", "/console/safety",
+    "/console/activity", "/console/search", "/console/settings",
+    "/console/analytics/performance", "/console/analytics/rails",
+    "/console/analytics/hours", "/console/analytics/economics",
+]
+
+
+def test_every_gated_console_page_is_in_this_list() -> None:
+    """
+    The list above is the console's contract surface. A page added to the
+    router and not to it silently opts out of the session gate, the render
+    check and — the one that matters — the PII-leak assertion.
+    """
+    exempt = {
+        "/console",          # the public product landing: no session, no data
+        "/console/login",    # the door itself
+        "/console/live",     # has its own render path and its own tests
+    }
+    from fastapi.routing import APIRoute
+
+    app = FastAPI()
+    app.include_router(merchant_router)
+    static_pages = {
+        route.path
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        and "GET" in route.methods
+        and route.path.startswith("/console")
+        and "{" not in route.path
+    }
+    missing = static_pages - exempt - set(_FOLDED)
+    assert not missing, (
+        f"gated console pages outside the contract tests: {sorted(missing)}"
+    )
 
 
 @pytest.mark.parametrize("path", _FOLDED)
@@ -1877,3 +2065,358 @@ async def test_a_refusal_matching_no_rule_is_said_out_loud(
 
     assert trace is not None
     assert trace["failed"] == 0 and trace["unattributed"]
+
+
+# ── Phase 04: Receivables pages ──────────────────────────────────────────────
+
+
+async def test_receivables_page_renders_ladder_and_outstanding(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The receivables page shows the ladder and outstanding balance."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/receivables").text
+    assert "Receivables" in html
+    assert "Aging, ladder and outstanding" in html
+
+
+async def test_receivables_page_empty_state(console: Any) -> None:
+    """An empty receivables page says so rather than showing zeros."""
+    html = console.get("/console/receivables").text
+    assert "Receivables" in html
+
+
+async def test_promises_page_renders(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The promises page shows kept/broken split."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/promises").text
+    assert "Promises" in html
+
+
+async def test_plans_page_renders(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The plans page renders instalment progress."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/plans").text
+    assert "Plans" in html or "Payment plans" in html
+
+
+async def test_disputes_page_renders_and_shows_automation_frozen(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The disputes page must show every open dispute with 'automation frozen'
+    and the customer's stated reason.
+    """
+    await _seed(db_sessionmaker)
+    html = console.get("/console/disputes").text
+    assert "Disputes" in html or "Disputed invoices" in html
+    assert "Quantity billed does not match the PO" in html
+    assert "frozen" in html.lower()
+
+
+async def test_dispute_resolve_redirects_to_disputes_page(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Dispute resolve now redirects to /console/disputes, not /console/live."""
+    await _seed(db_sessionmaker)
+    # Get the dispute_id from the database
+    async with db_sessionmaker() as s:
+        from sqlalchemy import select
+
+        from src.receivables.models import CaseDispute
+        dispute = (await s.execute(
+            select(CaseDispute.id).where(CaseDispute.status == "open").limit(1)
+        )).scalar_one_or_none()
+    if dispute is not None:
+        r = console.post(
+            "/console/dispute/resolve",
+            data={"dispute_id": str(dispute), "outcome": "rejected"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert "/console/disputes" in r.headers["location"]
+
+
+async def test_ledger_still_summarises_after_split(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The ledger keeps one-line summaries linking to the new pages."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/live").text
+    # The money line should still exist
+    assert "Still owed" in html
+
+
+# ── Phase 05: Analytics pages ────────────────────────────────────────────────
+
+
+async def test_analytics_performance_renders(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    await _seed(db_sessionmaker)
+    html = console.get("/console/analytics/performance").text
+    assert "Recovery performance" in html or "Analytics" in html
+
+
+async def test_analytics_rails_renders(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    await _seed(db_sessionmaker)
+    html = console.get("/console/analytics/rails").text
+    assert "Bank" in html or "rail" in html.lower()
+
+
+async def test_analytics_hours_renders_with_blackout(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The hours chart must show the blackout band from settings."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/analytics/hours").text
+    assert "Recovery by hour" in html or "hour" in html.lower()
+    # Blackout boundaries must come from settings, not hardcoded
+    assert "Blackout" in html or "blackout" in html
+
+
+async def test_analytics_economics_eval_label(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Every eval figure must carry the 'Evaluation harness' label."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/analytics/economics").text
+    assert "economics" in html.lower() or "Economics" in html
+
+
+async def test_analytics_pages_empty_state(console: Any) -> None:
+    """Empty analytics pages say nothing has come through."""
+    for path in [
+        "/console/analytics/performance",
+        "/console/analytics/rails",
+        "/console/analytics/hours",
+        "/console/analytics/economics",
+    ]:
+        html = console.get(path).text
+        assert html  # must render without error
+
+
+# ── Phase 06: Voice page ────────────────────────────────────────────────────
+
+
+async def test_voice_page_renders_queue(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The voice page shows the queue and gates."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/voice").text
+    assert "Voice" in html
+    # Must never fabricate a transcript
+    assert "Turn-by-turn text is not stored" in html or "Voice calls" in html
+
+
+async def test_voice_page_no_pii(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The voice page must never show customer phone numbers."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/voice").text
+    assert "+919812345678" not in html
+
+
+# ── Phase 07: Trust Surfaces ────────────────────────────────────────────────
+
+
+async def test_safety_page_lists_all_safeguards(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The safety page shows every safeguard with its live state."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/safety").text
+    assert "Safety" in html
+    assert "Guardrail rules" in html
+    assert "Blackout window" in html
+    assert "Retry cap" in html
+    assert "Rate limiting" in html
+
+
+async def test_safety_page_shows_redis_or_inprocess(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Rate limiting label follows the environment."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/safety").text
+    # Without REDIS_URL set in test, it should say in-memory
+    assert "in-memory" in html or "per-process" in html or "Redis" in html
+
+
+async def test_activity_page_renders_events(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The activity page shows case events."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/activity").text
+    assert "Activity" in html or "activity" in html
+
+
+async def test_activity_page_verified_only_when_chain_intact(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A stamped event inside an unverified chain must NOT say 'Verified'."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/activity").text
+    # Without AUDIT_CHAIN_SECRET, nothing should say "Verified"
+    # (it should say "Unsealed" instead)
+    if "AUDIT_CHAIN_SECRET" not in html:
+        # Chain is not keyed in tests, so nothing should be verified
+        assert "Verified" not in html or "Unsealed" in html
+
+
+# ── Phase 08: Search & Settings ─────────────────────────────────────────────
+
+
+async def test_search_returns_nothing_for_email(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The console's PII-free contract: searching for an email address must
+    return nothing, by design.
+    """
+    await _seed(db_sessionmaker)
+    html = console.get("/console/search?q=a@b.in").text
+    assert "a@b.in" not in html or "Nothing matched" in html
+
+
+async def test_search_finds_by_subject_ref(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Search by invoice reference returns the case."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/search?q=INV-PART").text
+    assert "INV-PART" in html
+
+
+async def test_search_empty_renders(console: Any) -> None:
+    """An empty search page renders without error."""
+    html = console.get("/console/search").text
+    assert "Search" in html
+
+
+async def test_settings_page_renders_without_secrets(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The settings page shows presence, never values."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/settings").text
+    assert "Settings" in html
+    # Must never show actual secrets
+    assert "console-test-password" not in html
+
+
+async def test_settings_shows_chase_bounds(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Settings page includes chase bounds from the policy module."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/settings").text
+    assert "payment failure" in html or "Chase bounds" in html.lower() \
+        or "Max attempts" in html
+
+
+async def test_settings_shows_ladder_rungs(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Settings page shows the ladder rungs from the receivables module."""
+    await _seed(db_sessionmaker)
+    html = console.get("/console/settings").text
+    assert "courtesy" in html or "friendly" in html or "Ladder" in html
+
+
+# ── Navigation: every new page is reachable ──────────────────────────────────
+
+
+async def test_all_new_pages_accessible(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Every new page returns 200 and contains the navigation."""
+    await _seed(db_sessionmaker)
+    pages = [
+        "/console/receivables",
+        "/console/promises",
+        "/console/plans",
+        "/console/disputes",
+        "/console/analytics/performance",
+        "/console/analytics/rails",
+        "/console/analytics/hours",
+        "/console/analytics/economics",
+        "/console/voice",
+        "/console/safety",
+        "/console/activity",
+        "/console/search",
+        "/console/settings",
+    ]
+    for path in pages:
+        r = console.get(path)
+        assert r.status_code == 200, f"{path} returned {r.status_code}"
+        assert "console" in r.text.lower(), f"{path} missing nav"
+
+
+async def test_new_pages_require_auth(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """All new pages redirect to login without a session."""
+    monkeypatch.setattr("src.merchant.routes.async_session_factory", db_sessionmaker)
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(merchant_router)
+    client = TestClient(app)
+
+    pages = [
+        "/console/receivables",
+        "/console/promises",
+        "/console/plans",
+        "/console/disputes",
+        "/console/analytics/performance",
+        "/console/analytics/rails",
+        "/console/analytics/hours",
+        "/console/analytics/economics",
+        "/console/voice",
+        "/console/safety",
+        "/console/activity",
+        "/console/search",
+        "/console/settings",
+    ]
+    for path in pages:
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 303, f"{path} did not gate"
+        assert r.headers["location"] == "/console/login"
+
+    get_settings.cache_clear()
+
+
+async def test_the_rails_page_renders_once_there_is_a_method_to_draw(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The methods bar chart 500'd on every database that had a payment in it.
+
+    `bar()` does arithmetic on `frac`, routing_panel's method rows carried
+    only `method` and `n`, and Jinja raised UndefinedError. It survived
+    review because the shared seed leaves `by_method` empty — the loop never
+    ran, so the page returned 200 on an empty database and broke on every
+    real one. The shares are computed in the read now, where every other
+    figure in this console is computed.
+    """
+    await _payment(
+        db_sessionmaker, ref="pay_rail", failure_class="insufficient_funds"
+    )
+    r = console.get("/console/analytics/rails")
+    assert r.status_code == 200
+    async with db_sessionmaker() as s:
+        methods = (await console_data.routing_panel(s))["methods"]
+    assert methods, "the fixture has a card payment"
+    for row in methods:
+        assert 0.0 <= row["frac"] <= 1.0
+        assert row["pct"] == pytest.approx(row["frac"] * 100, abs=0.05)

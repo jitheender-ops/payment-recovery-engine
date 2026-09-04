@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles, stat_tile, empty_state, severity_pill %}
+{% block title %}Disputed invoices · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}{% endblock %}
+{% block body %}
+{{ console_nav("disputes", merchant_name, nav) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Receivables</div>
+    <h1 class="ptitle">Disputed invoices</h1>
+    <p class="psub">Chasing is frozen on these until you uphold or reject the dispute.</p>
+  </header>
+  {% if not db_ok %}
+    <div class="empty"><b>Can't reach the database.</b><p>This page shows nothing rather than something wrong. Every figure here is read live.</p></div>
+  {% else %}
+    {% if not data.disputes.open and not data.disputes.upheld and not data.disputes.rejected %}
+      {{ empty_state("No disputes", "A dispute freezes the case until you decide. Nothing needs you here.") }}
+    {% else %}
+      <div class="grid-3" style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:2rem">
+        {% set open_foot = severity_pill('stop') ~ " Automation frozen" if data.disputes.open > 0 else none %}
+        {{ stat_tile("Open", data.disputes.open, open_foot | safe if open_foot else none) }}
+        {{ stat_tile("Upheld", data.disputes.upheld) }}
+        {{ stat_tile("Rejected", data.disputes.rejected) }}
+      </div>
+
+      {% if data.disputes.disputes %}
+      <section class="sec">
+        <h2 class="sec-t">Open disputes</h2>
+        <p class="sec-s"><strong>Automation frozen</strong> — chasing will not resume until you decide.</p>
+        <div class="tw" style="margin-top:1rem">
+          <table class="ct">
+            <thead><tr><th>Reference</th><th class="n">Outstanding</th><th>Days open</th><th>What they said</th><th>Your verdict</th></tr></thead>
+            <tbody>
+              {% for d in data.disputes.disputes %}
+              <tr>
+                <td class="mono">{{ d.subject_ref }}</td>
+                <td class="n red">{{ d.outstanding }}</td>
+                <td class="faint nowrap">{{ d.days_open }}d</td>
+                <td class="faint">{{ d.reason }}</td>
+                <td class="verdict">
+                  <form method="post" action="/console/dispute/resolve" style="display:inline-block;margin-right:4px">
+                    <input type="hidden" name="dispute_id" value="{{ d.id }}">
+                    <input type="hidden" name="outcome" value="rejected">
+                    <button class="btn-mini" type="submit">Invoice stands</button>
+                  </form>
+                  <form method="post" action="/console/dispute/resolve" style="display:inline-block">
+                    <input type="hidden" name="dispute_id" value="{{ d.id }}">
+                    <input type="hidden" name="outcome" value="upheld">
+                    <button class="btn-mini btn-mini-quiet" type="submit">They're right</button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

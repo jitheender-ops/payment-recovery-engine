@@ -242,6 +242,21 @@ async def test_the_webhook_refuses_a_bad_signature(client: Any) -> None:
     assert r.status_code == 401
 
 
+async def test_a_non_ascii_signature_is_a_401_not_a_500(client: Any) -> None:
+    """An HTTP header value may legally carry obs-text (0x80-0xFF), and
+    compare_digest raises TypeError on a non-ASCII str — so a raw \xE9\xE9\xE9
+    signature header used to surface as an unhandled 500 on this public,
+    unauthenticated endpoint instead of the fail-closed 401. The signature
+    is the one input an attacker fully controls here; it must refuse, never
+    crash. (Bytes, not str: httpx refuses to ASCII-encode a str header.)"""
+    r = client.post(
+        "/voice/turn",
+        json={"transcript": "hello"},
+        headers={"x-voice-signature": b"\xe9\xe9\xe9"},
+    )
+    assert r.status_code == 401
+
+
 async def test_the_webhook_has_a_volume_ceiling(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
