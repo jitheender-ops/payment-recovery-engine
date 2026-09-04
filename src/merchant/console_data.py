@@ -1638,3 +1638,139 @@ async def case_detail(session: AsyncSession, case_id: str) -> dict[str, Any] | N
             "siblings": siblings,
         } if account else None,
     }
+
+
+async def customer_view(
+    session: AsyncSession, *, limit: int = 60
+) -> dict[str, Any]:
+    """
+    The other side of every case: what the customer can see, and whether they
+    have looked.
+
+    The console shows the engine's reasoning in full and the customer's own
+    view not at all, so an operator could say what the guardrail decided and
+    not what the person on the other end was actually shown. This is that
+    half — per case, the state the customer's page is in, whether they have
+    opened it, and what they did from it.
+
+    **No link is listed here, deliberately.** A `/recover/<token>` URL is a
+    bearer credential: whoever holds it can see and pay that case. A console
+    page that printed one per row would be a page of live credentials, sitting
+    in a browser cache and a screenshot. The operator opens one at a time
+    instead, through a POST that mints a fresh short-lived token and writes an
+    audit row (see routes.console_customer_open) — the same reasoning
+    src/demo.py states for why only the offline demo lists them.
+
+    PII-free like every other console read: `subject_ref`, never customer_id.
+    """
+    from src.config import get_settings, reveal
+    from src.models import RetryLedger
+    from src.receivables.models import CaseDispute
+
+    settings = get_settings()
+    # mint() returns None with no secret, and every nudge then ships without a
+    # link. That is a deployment fact the operator should read here rather
+    # than discover from a button that does nothing.
+    links_on = bool(reveal(settings.recovery_link_secret))
+
+    cases = list((await session.execute(
+        select(RecoveryCase)
+        .order_by(RecoveryCase.opened_at.desc())
+        .limit(limit)
+    )).scalars().all())
+    ids = [c.id for c in cases]
+    if not ids:
+        return {
+            "links_on": links_on,
+            "ttl_hours": min(
+                settings.recovery_link_ttl_hours, settings.consent_window_hours
+            ),
+            "rows": [],
+            "viewed_cases": 0,
+        }
+
+    # Views, by the customer only — an operator preview writes actor
+    # "operator" for exactly this reason (src/customer/routes.py).
+    view_rows = (await session.execute(
+        select(
+            CaseEvent.recovery_case_id,
+            func.count(CaseEvent.id),
+            func.max(CaseEvent.created_at),
+        )
+        .where(
+            CaseEvent.recovery_case_id.in_(ids),
+            CaseEvent.event_type == "page_viewed",
+            CaseEvent.actor == "customer",
+        )
+        .group_by(CaseEvent.recovery_case_id)
+    )).all()
+    views = {r[0]: (r[1], r[2]) for r in view_rows}
+
+    promise_rows = (await session.execute(
+        select(PromiseToPay)
+        .where(PromiseToPay.recovery_case_id.in_(ids))
+        .order_by(PromiseToPay.promised_at.desc())
+    )).scalars().all()
+    # Newest per case: the rows arrive newest-first, so the first one wins and
+    # every re-promise after a break is correctly ignored here.
+    promises: dict[Any, Any] = {}
+    for row in promise_rows:
+        promises.setdefault(row.recovery_case_id, row)
+
+    disputed = {
+        r[0] for r in (await session.execute(
+            select(CaseDispute.case_id).where(
+                CaseDispute.case_id.in_(ids), CaseDispute.status == "open"
+            )
+        )).all()
+    }
+
+    # Opt-out lives on the customer's ledger, not the case, because it is a
+    # standing instruction across every case that person has.
+    opted_out: set[str] = set()
+    customer_ids = {c.customer_id for c in cases if c.customer_id}
+    if customer_ids:
+        opted_out = {
+            r[0] for r in (await session.execute(
+                select(RetryLedger.customer_id).where(
+                    RetryLedger.customer_id.in_(customer_ids),
+                    RetryLedger.consent_status == "opted_out",
+                )
+            )).all()
+        }
+
+    rows = []
+    for c in cases:
+        seen, last = views.get(c.id, (0, None))
+        promise = promises.get(c.id)
+        rows.append({
+            "case_id": str(c.id),
+            "ref": c.subject_ref,
+            "risk_type": c.risk_type.replace("_", " "),
+            "state": c.state,
+            "outstanding": _money(max(0, c.amount_at_risk - c.amount_recovered)),
+            "recovered": _money(c.amount_recovered) if c.amount_recovered else None,
+            "opened": _ist(_aware(c.opened_at)).strftime("%d %b, %H:%M"),
+            # 0 is a finding, not a blank: a nudge that was delivered and never
+            # opened is the single most useful thing on this page.
+            "views": seen,
+            "last_view": (
+                _ist(_aware(last)).strftime("%d %b, %H:%M") if last else None
+            ),
+            "promise": {
+                "status": promise.status,
+                "due": _ist(_aware(promise.due_at)).strftime("%d %b"),
+                "amount": _money(promise.amount_promised),
+            } if promise else None,
+            "disputed": c.id in disputed,
+            "opted_out": bool(c.customer_id and c.customer_id in opted_out),
+        })
+
+    return {
+        "links_on": links_on,
+        "ttl_hours": min(
+            settings.recovery_link_ttl_hours, settings.consent_window_hours
+        ),
+        "rows": rows,
+        "viewed_cases": sum(1 for r in rows if r["views"]),
+    }

@@ -57,6 +57,25 @@
     </div>
   </section>
 
+  {# ── The customer's own view of this case ───────────────────────────────
+     The whole page below is the engine's side of the story. This is the one
+     line that crosses over: the page the person on the other end was handed.
+     No link is printed — /console/customer explains why, and the POST there
+     mints a fresh hour-long one and audits it. #}
+  <section class="sec">
+    <h2 class="sec-t">What the customer sees</h2>
+    <p class="sec-s">
+      Their page shows this amount, what went wrong in their words, and the
+      ways out of it — pay, promise a date, ask for instalments, or stop
+      hearing from you. Opening it records that <em>you</em> looked, so their
+      click-through figures stay theirs.
+    </p>
+    <form method="post" action="/console/customer/open" style="margin:.9rem 0 0">
+      <input type="hidden" name="case_id" value="{{ data.case.case_id }}">
+      <button class="btn btn-ghost btn-sm" type="submit">Open their page</button>
+    </form>
+  </section>
+
   {# ── The loop, end to end ───────────────────────────────────────────── #}
   <section class="sec">
     <h2 class="sec-t">The decision chain</h2>

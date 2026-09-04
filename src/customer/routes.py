@@ -606,10 +606,25 @@ async def recovery_page(
     # purpose — a metrics write failing must never cost a customer their
     # page. Not written on the 404 path (no case to attribute it to); the
     # /pay path records its own attempt row instead.
+    #
+    # `actor` is the customer UNLESS the viewer arrived from the console's
+    # "open their page" button, which leaves a signed, ten-minute, single-case
+    # marker cookie for exactly this question. Both views are worth recording;
+    # only one is a click-through. Without the split, every operator preview
+    # inflated the nudge CTR in cases.contact_effectiveness(), which counts
+    # page_viewed rows against cases contacted — a figure the console
+    # publishes. The console's own session cookie cannot answer this: it is
+    # scoped to path=/console so that a customer page never carries operator
+    # authority, which also means it never arrives here.
     try:
         from src.cases import log_event
+        from src.merchant.routes import preview_marker_names
 
-        log_event(session, case, "page_viewed", actor="customer", state=state)
+        operator = preview_marker_names(request, case.id)
+        log_event(
+            session, case, "page_viewed",
+            actor="operator" if operator else "customer", state=state,
+        )
         await session.commit()
     except Exception:
         await session.rollback()

@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% from "_console_nav.html" import console_nav %}
+{% from "_console_shared.html" import console_styles %}
+{#
+  /console/customer — the other side of the case.
+
+  Every other console page is the engine's point of view: what it classified,
+  what the policy chose, which guardrail agreed, what it spent. None of them
+  showed the page the customer was actually handed, so an operator could
+  explain the decision and not the experience.
+
+  Two rules this page keeps:
+
+  1. It lists no links. A /recover/<token> URL is a bearer credential; a table
+     of them is a table of live credentials sitting in a browser cache and in
+     every screenshot of this page. One is minted per click instead, for an
+     hour, and audited (routes.console_customer_open).
+  2. It opens the real page rather than re-drawing it. A second rendering of
+     the customer's page would drift from the first the week after it shipped,
+     and the drift would be invisible from here — which is the exact failure
+     this page exists to end.
+#}
+{% block title %}Customer view · Recovery Console{% endblock %}
+{% block head %}{{ console_styles() }}
+<style>
+  .cv-open{border:0;background:var(--ink);color:#fff;font:inherit;font-size:.78rem;
+    font-weight:600;padding:.4rem .75rem;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .cv-open:hover{opacity:.88}
+  .cv-open:disabled{background:var(--line);color:var(--ink-3);cursor:not-allowed}
+  .cv-sig{display:flex;gap:.3rem;flex-wrap:wrap}
+</style>
+{% endblock %}
+
+{% block body %}
+{{ console_nav("customer", merchant_name) }}
+<main id="main" class="wrap">
+  <header class="phead">
+    <div class="peyebrow">Customer view</div>
+    <h1 class="ptitle">What your customer sees</h1>
+    <p class="psub">
+      Every other page here is the engine's side of the case. This is the
+      other one: the page the customer was handed, whether they opened it,
+      and what they did from it.
+    </p>
+  </header>
+
+  {% if not db_ok %}
+    <div class="empty">
+      <b>Can't reach the database.</b>
+      <p>Whether a customer opened their page is read live from the case
+      trail, so there is nothing cached to show instead.</p>
+    </div>
+  {% else %}
+  {% set cv = data.customer %}
+
+  {% if not cv.links_on %}
+    <div class="empty" style="margin-top:1.4rem">
+      <b>Recovery links are switched off in this deployment.</b>
+      <p><span class="mono">RECOVERY_LINK_SECRET</span> is unset, so
+      <span class="mono">mint()</span> returns nothing and every nudge already
+      ships without a link — the customer is told to reply to the message
+      instead. Set the secret to turn the page on; the button below stays
+      disabled until you do.</p>
+    </div>
+  {% endif %}
+
+  {% if not cv.rows %}
+    <div class="empty">
+      <b>No cases yet.</b>
+      <p>A case opens when a charge fails or you push a risk event. The
+      customer's page exists per case, so there is nothing to look at until
+      then.</p>
+    </div>
+  {% else %}
+
+  <section class="sec">
+    <h2 class="sec-t">Opened by the customer</h2>
+    <p class="sec-s">
+      {{ cv.viewed_cases }} of the {{ cv.rows | length }} most recent
+      case{{ "s" if cv.rows | length != 1 }} {{ "have" if cv.viewed_cases != 1 else "has" }}
+      been opened by the person it was sent to. A nudge that was delivered and
+      never opened is a message problem, not a payment problem — which is why
+      that count is on this page and not buried in the funnel. Operator views
+      are recorded separately and never counted here.
+    </p>
+  </section>
+
+  <div class="tw">
+    <table class="ct">
+      <thead><tr>
+        <th>Reference</th><th>Type</th><th>State</th>
+        <th style="text-align:right">Outstanding</th>
+        <th>They opened it</th><th>What they did</th><th>Opened</th><th></th>
+      </tr></thead>
+      <tbody>
+      {% for r in cv.rows %}
+        <tr>
+          <td class="ref"><a href="/console/case/{{ r.case_id }}">{{ r.ref }}</a></td>
+          <td>{{ r.risk_type }}</td>
+          <td><span class="pill {% if r.state == 'recovered' %}pill-g{% elif r.state in ('exhausted','abandoned','expired','opted_out') %}pill-r{% endif %}">{{ r.state }}</span></td>
+          <td class="n">{{ r.recovered if r.recovered else r.outstanding }}</td>
+          <td class="ref">
+            {% if r.views %}
+              {{ r.views }}×{% if r.last_view %} · {{ r.last_view }}{% endif %}
+            {% else %}
+              <span class="faint">not yet</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="cv-sig">
+              {% if r.opted_out %}
+                <span class="pill pill-r" title="A standing instruction across every case for this customer, not just this one">opted out</span>
+              {% endif %}
+              {% if r.disputed %}
+                <span class="pill pill-r" title="Chasing is frozen until the dispute resolves">disputed</span>
+              {% endif %}
+              {% if r.promise %}
+                <span class="pill {% if r.promise.status == 'kept' %}pill-g{% elif r.promise.status == 'broken' %}pill-r{% endif %}"
+                      title="{{ r.promise.amount }} promised">promise {{ r.promise.status }} · {{ r.promise.due }}</span>
+              {% endif %}
+              {% if not (r.opted_out or r.disputed or r.promise) %}
+                <span class="faint">—</span>
+              {% endif %}
+            </div>
+          </td>
+          <td class="ref">{{ r.opened }}</td>
+          <td>
+            <form method="post" action="/console/customer/open" style="margin:0">
+              <input type="hidden" name="case_id" value="{{ r.case_id }}">
+              <button class="cv-open" type="submit"
+                      {% if not cv.links_on %}disabled{% endif %}
+                      title="Mints a fresh link for this case, valid one hour, and records that you opened it">
+                Open their page
+              </button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <section class="sec">
+    <h2 class="sec-t">Why there is no list of links here</h2>
+    <p class="sec-s">
+      A <span class="mono">/recover/…</span> URL <em>is</em> the credential —
+      anyone holding it can see that case and pay it. So this page never
+      prints one. The button mints a fresh link for one case, valid for one
+      hour rather than the usual {{ cv.ttl_hours }}, and writes an audit row
+      naming you before it opens. Someone reading the case trail afterwards
+      can tell your view apart from the customer's, and the click-through
+      figures above stay the customer's alone.
+    </p>
+    <p class="sec-s">
+      It opens in the page's own tab rather than inside this one because
+      <span class="mono">/recover</span> refuses to be framed
+      (<span class="mono">frame-ancestors 'none'</span>) — its pay button is
+      exactly what a UI-redress attack would want. You are looking at the real
+      page, not a copy of it that could drift.
+    </p>
+  </section>
+
+  {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

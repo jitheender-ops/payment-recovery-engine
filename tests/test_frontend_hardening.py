@@ -243,3 +243,22 @@ def test_an_unknown_tour_name_is_a_404_not_a_file_read(monkeypatch: Any) -> None
     import, so it can only ever name one of the shipped screenshots."""
     client = _html_client(monkeypatch)
     assert client.get("/static/tour/nope.webp").status_code == 404
+
+
+def test_the_story_page_does_not_promise_a_command_it_cannot_hand_over(
+    monkeypatch: Any,
+) -> None:
+    """
+    `./run.sh --demo` is real, and on the deployed page it was unrunnable:
+    the section said "one command, no credentials" and named no repository to
+    get the command from, directly above a button into a password wall. Both
+    halves are asserted — the repo is linked, and the page says plainly that
+    this deployment's console is gated.
+    """
+    client = _html_client(monkeypatch)
+    body = client.get("/foundation").text
+    assert "./run.sh --demo" in body
+    assert "github.com/jitheender-ops/payment-recovery-engine" in body
+    assert "behind a password" in body
+    # The old claim, which was about the deployment a reader was looking at.
+    assert "One command, no credentials" not in body

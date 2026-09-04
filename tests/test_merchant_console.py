@@ -14,6 +14,7 @@ against, and only the HTML can prove it did not.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1391,3 +1392,108 @@ def test_the_model_page_renders_its_whole_body(console: Any) -> None:
         assert at != -1, f"/model is missing {mark!r} — template truncated?"
         assert at > last, f"{mark!r} is out of document order"
         last = at
+
+
+# ── Customer view — the other side of the case ───────────────────────────────
+
+
+async def test_the_customer_view_lists_cases_and_never_a_link(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    The page names every case and prints no `/recover/<token>` URL.
+
+    That is the whole security property: such a URL is a bearer credential —
+    whoever holds it can see and pay that case — so a table of them would be a
+    table of live credentials in a browser cache and in every screenshot of
+    this page. One is minted per click instead.
+    """
+    monkeypatch.setenv("RECOVERY_LINK_SECRET", "x" * 32)
+    get_settings.cache_clear()
+    await _seed(db_sessionmaker)
+
+    body = console.get("/console/customer").text
+    assert "What your customer sees" in body
+    # A token, not the word: the page explains the /recover URL in prose on
+    # purpose, and what must never appear is a real one.
+    assert not re.search(r"/recover/[A-Za-z0-9_-]{16,}", body), (
+        "the console printed a live customer link"
+    )
+    # The button that mints one, and the case it names.
+    assert 'action="/console/customer/open"' in body
+
+
+async def test_opening_a_customer_page_redirects_to_the_real_one(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """The operator gets the page itself, not a second rendering of it.
+
+    A copy would drift from the real page the week after it shipped, and the
+    drift would be invisible from the console — which is the exact failure
+    this page exists to end.
+    """
+    monkeypatch.setenv("RECOVERY_LINK_SECRET", "x" * 32)
+    get_settings.cache_clear()
+    async with db_sessionmaker() as s:
+        case = await open_case(
+            s, risk_type="payment_failure", subject_ref="pay_customer_view",
+            amount_at_risk=250000, customer_id="a@b.test",
+        )
+        await s.commit()
+        case_id = str(case.id)
+
+    r = console.post(
+        "/console/customer/open", data={"case_id": case_id}, follow_redirects=False
+    )
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/recover/")
+    # The marker that will label the view, scoped away from everything else.
+    assert "recovery_preview" in r.headers.get("set-cookie", "")
+
+
+async def test_the_customer_view_says_so_when_links_are_switched_off(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    An unset RECOVERY_LINK_SECRET means `mint()` returns None and every nudge
+    already ships without a link. The page states that rather than offering a
+    button that silently does nothing.
+    """
+    monkeypatch.setenv("RECOVERY_LINK_SECRET", "")
+    get_settings.cache_clear()
+    await _seed(db_sessionmaker)
+
+    body = console.get("/console/customer").text
+    assert "switched off in this deployment" in body
+    assert "disabled" in body
+
+
+async def test_a_malformed_case_id_goes_back_to_the_page(console: Any) -> None:
+    """Not a 500. The console stays up on input it did not produce."""
+    r = console.post(
+        "/console/customer/open", data={"case_id": "not-a-uuid"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/console/customer"
+
+
+def test_the_customer_view_needs_a_session(monkeypatch: Any) -> None:
+    """Both halves are gated: the list and the mint."""
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(merchant_router)
+    client = TestClient(app)
+
+    assert client.get(
+        "/console/customer", follow_redirects=False
+    ).status_code == 303
+    assert client.post(
+        "/console/customer/open", data={"case_id": str(uuid.uuid4())},
+        follow_redirects=False,
+    ).status_code == 303
+    get_settings.cache_clear()

@@ -63,8 +63,13 @@
   .fm footer{padding:4rem 0 6rem;color:#666;font-size:.85rem;
     display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
   .fm footer a{color:#8fbfff}
-  .cta{display:inline-block;border:1px solid #8fbfff;color:#8fbfff;
-    padding:.9rem 1.8rem;border-radius:.5rem;text-decoration:none;
+  /* Links in the body inherit the console's green otherwise, which is a
+     different product's accent on a page that has committed to one. */
+  .fm a{color:#8fbfff}
+  /* align-self, because each section is a flex column: without it a CTA
+     stretches to the full measure and stops reading as a button. */
+  .cta{display:inline-block;align-self:flex-start;border:1px solid #8fbfff;
+    color:#8fbfff;padding:.9rem 1.8rem;border-radius:.5rem;text-decoration:none;
     letter-spacing:.06em;font-size:.95rem}
   .cta:hover{background:#8fbfff;color:#0d0d0d}
 </style>
@@ -191,12 +196,26 @@
 
   <section>
     <p class="eyebrow" data-fm>See it</p>
-    <h2>One command, no credentials.</h2>
-    <p class="lede">The demo runs the entire engine offline — seeded book,
-      live sweeps, the console, every page state — against a fake gateway.
-      Nothing leaves the machine.</p>
-    <p style="margin:0"><code style="color:#8fbfff;font-size:1.05rem">./run.sh --demo</code></p>
-    <a class="cta" href="/console" style="margin-top:.6rem">Open the console →</a>
+    <h2>One command, on your own machine.</h2>
+    <p class="lede">Clone the repository and the demo runs the entire engine
+      offline — seeded book, live sweeps, the console, the customer's own
+      page, every state — against a fake gateway. No API keys, no account,
+      nothing leaves the machine.</p>
+    <p style="margin:0"><code style="color:#8fbfff;font-size:1.05rem">git clone …&nbsp;&amp;&amp;&nbsp;./run.sh --demo</code></p>
+    <p class="lede" style="font-size:.95rem">
+      <a href="https://github.com/jitheender-ops/payment-recovery-engine"
+         rel="noopener">github.com/jitheender-ops/payment-recovery-engine</a>
+      — the command above is that repository's, and it prints the console
+      password it generates for you.
+    </p>
+    <p class="lede" style="font-size:.9rem;color:#666">
+      This deployment is the same code with a real gateway behind it, so its
+      console sits behind a password and its customer pages open only from a
+      signed link. What is open here: the
+      <a href="/console#tour">product page and a walk through every console
+      screen</a>, and <a href="/model">the decision model</a>.
+    </p>
+    <a class="cta" href="/console#tour" style="margin-top:.6rem">See the console →</a>
   </section>
 
   <footer>

@@ -32,7 +32,7 @@ from src.config import get_settings
 from src.customer import routes as customer_routes
 from src.customer.routes import router as customer_router
 from src.database import get_session
-from src.models import PaymentFailure, RecoveryCase, RetryAttempt
+from src.models import CaseEvent, PaymentFailure, RecoveryCase, RetryAttempt
 
 SECRET = "recovery-link-test-secret"
 
@@ -840,3 +840,117 @@ async def test_the_recovery_page_has_a_skip_link_and_a_live_region(
     assert 'href="#main"' in html, "no skip link"
     assert 'id="main"' in html, "skip link points at nothing"
     assert 'aria-live="polite"' in html, "the confirming state announces nothing"
+
+
+# ── Whose view was it? ───────────────────────────────────────────────────────
+
+
+async def test_a_plain_visit_is_the_customers_own_click_through(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    assert client.get(f"/recover/{token}").status_code == 200
+
+    async with db_sessionmaker() as s:
+        actors = list((await s.execute(
+            select(CaseEvent.actor).where(
+                CaseEvent.recovery_case_id == case_id,
+                CaseEvent.event_type == "page_viewed",
+            )
+        )).scalars().all())
+    assert actors == ["customer"]
+
+
+async def test_an_operator_preview_is_not_counted_as_a_click_through(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """
+    The console's "open their page" button leaves a signed, single-case,
+    ten-minute marker; the view it produces is the operator's, not the
+    customer's.
+
+    Without this split every operator preview landed in the nudge
+    click-through figure cases.contact_effectiveness() publishes — a metric
+    saying "they opened it" about a page only staff had opened. The console's
+    own session cookie cannot answer the question: it is scoped to
+    path=/console so that a customer page never carries operator authority,
+    which also means it never reaches this route.
+    """
+    from src.merchant.routes import _PREVIEW_COOKIE, _mint_preview_marker
+
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "console-test-password")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    client.cookies.set(_PREVIEW_COOKIE, _mint_preview_marker(case_id))
+    assert client.get(f"/recover/{token}").status_code == 200
+
+    async with db_sessionmaker() as s:
+        actors = list((await s.execute(
+            select(CaseEvent.actor).where(
+                CaseEvent.recovery_case_id == case_id,
+                CaseEvent.event_type == "page_viewed",
+            )
+        )).scalars().all())
+    assert actors == ["operator"]
+
+
+async def test_a_marker_for_another_case_does_not_relabel_this_view(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """The marker names one case. A stale one from the previous preview must
+    not silently suppress the next customer's click-through."""
+    from src.merchant.routes import _PREVIEW_COOKIE, _mint_preview_marker
+
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "console-test-password")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    other = await _seed(db_sessionmaker)
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    client.cookies.set(_PREVIEW_COOKIE, _mint_preview_marker(other))
+    assert client.get(f"/recover/{token}").status_code == 200
+
+    async with db_sessionmaker() as s:
+        actors = list((await s.execute(
+            select(CaseEvent.actor).where(
+                CaseEvent.recovery_case_id == case_id,
+                CaseEvent.event_type == "page_viewed",
+            )
+        )).scalars().all())
+    assert actors == ["customer"]
+
+
+async def test_a_forged_marker_is_ignored(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    """Forging one needs the console password. Without it, it is a customer."""
+    from src.merchant.routes import _PREVIEW_COOKIE
+
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "console-test-password")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    case_id = await _seed(db_sessionmaker)
+    token = recovery_link.mint(case_id)
+    client.cookies.set(_PREVIEW_COOKIE, f"{case_id.hex}.not-a-signature")
+    assert client.get(f"/recover/{token}").status_code == 200
+
+    async with db_sessionmaker() as s:
+        actors = list((await s.execute(
+            select(CaseEvent.actor).where(
+                CaseEvent.recovery_case_id == case_id,
+                CaseEvent.event_type == "page_viewed",
+            )
+        )).scalars().all())
+    assert actors == ["customer"]

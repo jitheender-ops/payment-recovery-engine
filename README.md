@@ -519,7 +519,7 @@ gets eight plain stacked sections with every word intact.
 
 Separate from the ops dashboard and built for a different reader: the merchant
 whose revenue is leaking, not the operator debugging the machinery. One public
-page, eight gated ones, all served by the API itself.
+page, ten gated ones, all served by the API itself.
 
 | Route | Who | What |
 |---|---|---|
@@ -528,12 +528,35 @@ page, eight gated ones, all served by the API itself.
 | `GET /console/accounts` | gated | The buyer directory: who owes you, ranked, and which contact roles are on file. An account with nobody on file says so — a rung that escalates to a role nobody recorded escalates to nobody |
 | `GET /console/account/{id}` | gated | One buyer: contacts by role, open invoices, and what was actually sent per rung. Addresses are masked (`a…p@buyer.in`) |
 | `GET /console/messages` | gated | Every message the engine sends, rendered by the sender's own functions. Not a copy — a preview that could drift from what ships is worse than none |
+| `GET /console/customer` | gated | The other side of every case: the page the customer was handed, whether they opened it, and what they did from it. Lists no links — see below |
+| `POST /console/customer/open` | gated | Mints one fresh hour-long recovery link for one case and opens the real page with it |
 | `GET /console/pipeline` | gated | The funnel, and where the money leaves it |
 | `GET /console/routing` | gated | Which bank clears on which rail |
 | `GET /console/cases` | gated | Every unit of revenue at risk, filterable by state |
 | `GET /console/batch` | gated | Preview a cohort, approve it, execute it, measure it |
 | `GET /console/ops` | gated | Is the machinery running — sweeps, heartbeat, and whether the audit hash chain still verifies |
 | `GET /console/evidence` | gated | Does the agent beat the baseline, with paired CIs |
+
+**The console had the engine's side of every case and not the customer's.**
+It could say which guardrail approved an action, on which rail, with what
+confidence — and could not show the page the person on the other end was
+actually handed. `/console/customer` is that half: per case, whether the
+customer opened their page, whether they promised, disputed or opted out, and
+a button that opens the real page rather than a second rendering of it (a copy
+would drift the week after it shipped, and the drift would be invisible from
+here).
+
+It prints no links. A `/recover/<token>` URL **is** the credential — whoever
+holds it can view and pay that case — so a table of them would be a table of
+live credentials sitting in a browser cache and in every screenshot of the
+page. The button mints one for a single case, valid an hour instead of the
+usual day. And because the console's session cookie is scoped to `/console`
+precisely so a customer page can never carry operator authority, that cookie
+cannot tell the customer page who is looking: the button leaves a signed,
+ten-minute, single-case marker that labels the resulting `page_viewed` row
+`operator`. Without that split, every operator preview would have landed in
+the nudge click-through figure `contact_effectiveness()` publishes — a metric
+claiming "they opened it" about a page only staff had opened.
 
 **Every action the console names, it can perform.** That was not always true:
 the disputes panel said *"chasing is frozen until you uphold or reject"* with no
@@ -837,7 +860,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**885 tests across 59 files, 81% statement coverage over `src/`.** The money
+**895 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

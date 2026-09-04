@@ -828,6 +828,11 @@ async def chase_effectiveness(
                 .where(
                     RetryAttempt.result == "success",
                     CaseEvent.event_type == "page_viewed",
+                    # The customer's own views only. An operator opening the
+                    # same page from the console writes actor="operator"
+                    # (src/customer/routes.py) precisely so it cannot be
+                    # counted as a click-through the nudge earned.
+                    CaseEvent.actor == "customer",
                     *where,
                 )
                 .group_by(RecoveryCase.risk_type, RetryAttempt.attempt_number)

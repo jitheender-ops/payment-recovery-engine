@@ -1435,6 +1435,139 @@ async def console_messages(request: Request) -> Any:
     return await _render_console(request, "console_messages.html", build)
 
 
+# ── Operator-view marker ────────────────────────────────────────────────────
+# The console session cookie is scoped to path=/console on purpose: a customer
+# page must never carry operator authority. That scoping also means the
+# customer route cannot see it, so it cannot tell an operator preview from a
+# real customer visit — and every preview would land in the nudge
+# click-through figures as if the customer had opened their page.
+#
+# So the console sets a second, deliberately tiny cookie on the way out: it
+# grants nothing, names one case, dies in ten minutes, and is signed with the
+# same console secret, so forging one needs the console password. Its only
+# effect is the `actor` on one audit row.
+_PREVIEW_COOKIE = "recovery_preview"
+_PREVIEW_TTL_SECONDS = 600
+
+
+def _mint_preview_marker(case_id: uuid.UUID) -> str:
+    payload = f"{case_id.hex}{SEP}{int(time.time()) + _PREVIEW_TTL_SECONDS}"
+    return f"{b64(payload.encode())}{SEP}{sign(payload, _console_password() or '')}"
+
+
+def preview_marker_names(request: Request, case_id: uuid.UUID) -> bool:
+    """True when this request carries a live console-issued marker for this case.
+
+    Read by src/customer/routes.py to label the view. One failure value for
+    every kind of failure — unset, malformed, forged, expired, someone else's
+    case — because none of them is worth distinguishing.
+    """
+    secret = _console_password()
+    token = request.cookies.get(_PREVIEW_COOKIE)
+    if not secret or not token or token.count(SEP) != 1:
+        return False
+    encoded, signature = token.split(SEP)
+    try:
+        payload = unb64(encoded).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not hmac.compare_digest(
+        sign(payload, secret).encode("ascii"), signature.encode("utf-8", "replace")
+    ):
+        return False
+    if payload.count(SEP) != 1:
+        return False
+    named, _, expiry = payload.partition(SEP)
+    try:
+        if int(expiry) < int(time.time()):
+            return False
+    except ValueError:
+        return False
+    return hmac.compare_digest(named, case_id.hex)
+
+
+@router.get("/console/customer", response_class=HTMLResponse)
+async def console_customer(request: Request) -> Any:
+    """
+    The other side of every case — what the customer sees, and whether they
+    looked.
+
+    The console could explain every decision the engine made and could not
+    show the page the customer was actually handed. This is that half. It
+    lists no links: see console_data.customer_view for why, and the POST
+    below for how one is opened.
+    """
+
+    async def build(session: Any) -> dict[str, Any]:
+        return {"customer": await console_data.customer_view(session)}
+
+    return await _render_console(request, "console_customer.html", build)
+
+
+@router.post("/console/customer/open")
+async def console_customer_open(request: Request) -> Any:
+    """
+    Open one case's customer page, as the customer sees it.
+
+    A `/recover/<token>` URL is a bearer credential, so this mints a fresh one
+    per click rather than the console holding a list of them, caps it at an
+    hour (the shortest useful life — the operator is looking now, not
+    tomorrow), and writes an audit row naming the operator before redirecting.
+    Someone reading the case trail later can see that the page was opened from
+    the console and not by the customer.
+
+    Redirecting rather than framing is not a shortcut: /recover sets
+    `frame-ancestors 'none'` against UI-redress on its own pay button
+    (src/main.py), and a preview is not a reason to weaken that. The operator
+    gets the real page, in a new tab, with no second rendering to drift.
+    """
+    if not _password_configured():
+        return _login_page(request)
+    if not _session_valid(request):
+        return RedirectResponse("/console/login", status_code=303)
+
+    form = await request.form()
+    raw = str(form.get("case_id") or "")
+    try:
+        case_id = uuid.UUID(raw)
+    except ValueError:
+        logger.warning("Customer view: malformed case id %r", raw)
+        return RedirectResponse("/console/customer", status_code=303)
+
+    from src.models import RecoveryCase
+    from src.recovery_link import mint
+
+    async with async_session_factory() as session:
+        case = await session.get(RecoveryCase, case_id)
+        if case is None:
+            return RedirectResponse("/console/customer", status_code=303)
+        token = mint(case.id, ttl_hours=1)
+        if token is None:
+            # RECOVERY_LINK_SECRET is unset, so the feature is off and every
+            # nudge already ships without a link. The page says so; this is
+            # the guard for a form submitted anyway.
+            return RedirectResponse("/console/customer", status_code=303)
+
+    # No audit row is written here. The page itself writes one when it is
+    # actually served, labelled `operator` by the marker below — and one row
+    # per view, whoever is looking, is the trail worth reading. Writing a
+    # second one here would double every operator view in it.
+
+    response = RedirectResponse(f"/recover/{token}", status_code=303)
+    # Scoped to /recover and gone in ten minutes: it exists only so the view
+    # about to be logged there is attributed to you rather than the customer.
+    response.set_cookie(
+        _PREVIEW_COOKIE,
+        _mint_preview_marker(case_id),
+        max_age=_PREVIEW_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=get_settings().app_env == "production",
+        path="/recover",
+    )
+    return response
+
+
 @router.get("/console/ops", response_class=HTMLResponse)
 async def console_ops(request: Request) -> Any:
     """Is the machinery running — sweeps, heartbeat, and what fires next."""
