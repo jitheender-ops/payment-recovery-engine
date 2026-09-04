@@ -428,6 +428,16 @@
   {% endif %}
 {% endif %}
 
+{# The way to everything else this person has open with us. Offered only when
+   there IS something else — a link promising "everything you owe" that leads
+   to a page holding this same one payment is worse than no link. The route
+   mints the token; the template never mints a credential. #}
+{% if mine_link %}
+<p class="small" style="margin-top:var(--sp-3)">
+  <a href="{{ mine_link }}">{{ t('mine_see_all_n', n=mine_count + 1) }}</a>
+</p>
+{% endif %}
+
 <div class="sec"><h2>{{ t('sec_this_payment') }}</h2></div>
 <dl class="register">
   <div><dt>Reference</dt><dd>{{ order_ref }}</dd></div>

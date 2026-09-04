@@ -515,6 +515,37 @@ readable state and the pinned variant lives behind a class JS adds only after
 GSAP is confirmed, so a blocked CDN, `prefers-reduced-motion`, or a phone
 gets eight plain stacked sections with every word intact.
 
+### 🧾 What the customer sees
+
+Three pages, no account, no password — a signed link is the only credential,
+and it is PII-free because URLs end up in SMS logs and browser history.
+
+| Route | What |
+|---|---|
+| `GET /recover/<token>` | One case. What went wrong in the customer's own words, then every way out of it: pay, promise a date, ask to pay in instalments, say something is wrong, or stop hearing from us. English and Hindi |
+| `GET /mine/<token>` | **Everything that person has open with you**, in one place — the total still owed, each case with its state, and a deep link into each |
+| `GET /statement/<token>` | The B2B equivalent: one buyer, every open invoice, aging, per-row links |
+
+**`/mine` exists because three failed orders were three SMS, three links and
+three isolated pages.** No page anywhere could answer *"how much do I actually
+owe you?"* — the commonest question support gets asked — and the B2B side had
+had exactly that page since the receivables layer landed. It is offered on a
+case page only when there **is** something else to see: a link promising
+"everything you owe" that leads to a page holding the same one payment is
+worse than no link.
+
+It shows and links, and does nothing else — no pay button, no promise form, no
+dispute form of its own. Every row deep-links to that case's own page, which
+is the tested money path, for the same reason the statement page has that rule:
+a second surface with its own pay handling is a second thing to get wrong on
+the one path where being wrong means charging someone twice.
+
+Its token is a **third scope** (`mine.<case>.<expiry>`), not a reuse of a case
+token. The page shows more than a case page does, so holding a link to one
+payment must not get you a link to all of them — the same rule the account
+scope already existed for. Both confusions are refused in both directions, and
+a case with no customer on it is a 404 rather than an empty page.
+
 ### 💼 The merchant console
 
 Separate from the ops dashboard and built for a different reader: the merchant
@@ -790,7 +821,11 @@ disk are never ambiguous about which population they describe.
 │   │                     #   knowledge, facts, sarvam.py, webhook.py
 │   ├── merchant/         # The merchant console: routes.py, console_data.py
 │   │                     #   (the read layer), receivables_api.py, templates/
-│   ├── customer/         # The public recovery page (/recover/<token>)
+│   ├── customer/         # The three customer-facing surfaces, all signed-link
+│   │                     #   only: /recover/<token> (one case — pay, promise,
+│   │                     #   instalments, dispute, opt out), /mine/<token>
+│   │                     #   (everything one person owes) and
+│   │                     #   /statement/<token> (one B2B buyer's invoices)
 │   ├── cases.py          # Recovery cases, promises to pay (incl. the UPI
 │   │                     #   Autopay mandate a promise may carry), audit trail
 │   ├── audit_chain.py    # Hash-chained case_events, independently verifiable
@@ -860,7 +895,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**895 tests across 59 files, 81% statement coverage over `src/`.** The money
+**902 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

@@ -247,6 +247,10 @@
   .register dd{margin:0; text-align:right; font-family:var(--mono);
                font-size:.86rem; font-variant-numeric:tabular-nums;
                word-break:break-all}
+  /* break-all above exists for long mono references, which have no word
+     boundaries to break on. A sentence in the same cell inherits it and
+     splits mid-word — "₹1,500 already p / aid" — so prose opts back out. */
+  .register dd .prose{word-break:normal; overflow-wrap:break-word}
 
   details{margin-top:var(--sp-3)}
   /* Kill the native marker in every engine before drawing our own, or Chrome

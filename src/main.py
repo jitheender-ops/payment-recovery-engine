@@ -218,10 +218,12 @@ if not _docs_public:
 @app.middleware("http")
 async def _recovery_page_headers(request: Request, call_next: Any) -> Response:
     response: Response = await call_next(request)
-    # /statement carries the same properties as /recover — a capability token
-    # in the URL, a money page a stranger can reach — so it needs the same
-    # four headers. One tuple, not a second copy of the block.
-    if request.url.path.startswith(("/recover", "/statement")):
+    # /statement and /mine carry the same properties as /recover — a
+    # capability token in the URL, a money page a stranger can reach — so
+    # they need the same four headers. One tuple, not three copies of the
+    # block. A customer surface added without its entry here would be framed,
+    # cached and referrer-leaking on day one, which is why they share a line.
+    if request.url.path.startswith(("/recover", "/statement", "/mine")):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         response.headers["Cache-Control"] = "no-store, private"

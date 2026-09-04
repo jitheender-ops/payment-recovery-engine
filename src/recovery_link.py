@@ -221,6 +221,100 @@ def url_for_account(account_id: uuid.UUID) -> str | None:
     return f"{base}/statement/{token}"
 
 
+# ── Customer scope: every case one person has open ───────────────────────
+#
+# The statement page above solves this for a B2B buyer, because a buyer is an
+# ArAccount with an id. A consumer is not: their identity is
+# `RecoveryCase.customer_id`, a canonical key that is an EMAIL or a PHONE
+# ("email:a@b.in", "phone:9198…"). Putting that in a URL is exactly what this
+# module's opening comment forbids — URLs end up in SMS logs, browser history
+# and referrer headers.
+#
+# So a customer token names a CASE, and the page resolves that case's customer
+# server-side. PII-free, no new table, no new secret.
+#
+# It is a third scope rather than a reuse of the case token on purpose: this
+# link shows more than a case link does, and `mine.<hex>.<expiry>` cannot be
+# produced by anyone holding only a `<hex>.<expiry>` — the signature covers the
+# marker. That is the same rule the account scope exists for: a link to one
+# invoice must not be swappable for a link to everything.
+CUSTOMER_SCOPE = "mine"
+
+
+def mint_customer(case_id: uuid.UUID, *, ttl_hours: int | None = None) -> str | None:
+    """A token for the customer-home page of the person this case belongs to."""
+    settings = get_settings()
+    secret = reveal(settings.recovery_link_secret)
+    if not secret:
+        return None
+    ttl_hours = min(
+        ttl_hours if ttl_hours is not None else settings.recovery_link_ttl_hours,
+        settings.consent_window_hours,
+    )
+    payload = (
+        f"{CUSTOMER_SCOPE}{SEP}{case_id.hex}{SEP}{int(time.time()) + ttl_hours * 3600}"
+    )
+    return f"{b64(payload.encode())}{SEP}{sign(payload, secret)}"
+
+
+def verify_customer(token: str) -> uuid.UUID | None:
+    """
+    The case whose customer this token names, or None if forged, expired,
+    malformed, or scoped to something else. One return value for every
+    failure, same reasoning as verify().
+    """
+    verified = verify_customer_with_expiry(token)
+    return verified[0] if verified else None
+
+
+def verify_customer_with_expiry(token: str) -> tuple[uuid.UUID, datetime] | None:
+    """
+    (case, expiry instant) for a valid customer token, else None.
+
+    The page states its own real deadline for the same reason /recover does:
+    an honest one outperforms a fake countdown, and it is the window we
+    actually enforce.
+    """
+    secret = reveal(get_settings().recovery_link_secret)
+    if not secret or not token or token.count(SEP) != 1:
+        return None
+
+    encoded, signature = token.split(SEP)
+    try:
+        payload = unb64(encoded).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+    if not hmac.compare_digest(
+        sign(payload, secret).encode("ascii"), signature.encode("utf-8", "replace")
+    ):
+        return None
+
+    parts = payload.split(SEP)
+    if len(parts) != 3 or parts[0] != CUSTOMER_SCOPE:
+        return None
+    _, case_hex, expiry = parts
+    try:
+        if int(expiry) < int(time.time()):
+            return None
+    except ValueError:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{32}", case_hex):
+        return None
+    return uuid.UUID(hex=case_hex), datetime.fromtimestamp(int(expiry), tz=UTC)
+
+
+def url_for_customer(case_id: uuid.UUID) -> str | None:
+    """The absolute customer-home link, or None if unconfigured."""
+    token = mint_customer(case_id)
+    if token is None:
+        return None
+    base = get_settings().public_base_url.rstrip("/")
+    if not base:
+        return None
+    return f"{base}/mine/{token}"
+
+
 def url_for(case_id: uuid.UUID) -> str | None:
     """The absolute link to put in a message, or None if unconfigured."""
     token = mint(case_id)

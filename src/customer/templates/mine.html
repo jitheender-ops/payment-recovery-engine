@@ -1,0 +1,127 @@
+{#
+  The customer home: everything one person has open with this merchant.
+
+  /statement has done this for a B2B buyer since the receivables layer
+  landed. A consumer had nothing equivalent — three failed orders meant three
+  SMS, three links and three isolated pages, and no page anywhere could answer
+  "how much do I actually owe you?", which is the commonest question support
+  gets asked.
+
+  Same passbook/register language as /recover and /statement, and the same
+  design rule as the statement: it SHOWS and LINKS and does nothing else. No
+  pay button, no promise form, no dispute form, no plan form — each row
+  deep-links to that case's own recovery page, which is the tested money path.
+  A second surface with its own pay handling would be a second thing to get
+  wrong on the one path where being wrong means charging someone twice.
+  See routes.py::customer_home.
+#}
+{% extends "base.html" %}
+{% block title %}{{ t('mine_title') }} · {{ merchant_name or 'us' }}{% endblock %}
+{% block content %}
+
+{% if merchant_name %}
+<div class="hero">
+  <p class="to">{{ t('mine_title') }} — <strong>{{ merchant_name }}</strong></p>
+</div>
+{% endif %}
+
+{% if open_rows %}
+{# The one figure this page was opened for. Part-payments are already
+   subtracted per case, so it is what is still owed — never the gross, which
+   would overstate the ask on a book with heavy part-payment. #}
+<p class="amount{% if outstanding|length > 9 %} amount-long{% endif %}">{{ outstanding }}</p>
+<p class="quiet small" style="margin:calc(-1 * var(--sp-3)) 0 0">
+  {{ t('mine_total') }} ·
+  {% if open_rows|length == 1 %}{{ t('mine_across_one') }}{% else %}{{ t('mine_across', n=open_rows|length) }}{% endif %}
+</p>
+<p class="quiet small" style="margin-top:var(--sp-2)">{{ t('mine_lede') }}</p>
+
+<div class="sec"><h2>{{ t('mine_open') }}</h2></div>
+<dl class="register">
+  {% for r in open_rows %}
+  <div>
+    <dt>
+      <span class="mono">{{ r.ref }}</span>
+      <span class="quiet small" style="display:block">
+        {% if r.due_when %}
+          {{ t('register_due') }} {{ r.due_when }}{% if r.days_overdue %} · {{ t('days_overdue', days=r.days_overdue) }}{% endif %}
+        {% else %}
+          {{ r.opened }}
+        {% endif %}
+      </span>
+      {# The states that change what this row means. Shown rather than hidden:
+         a row missing from the list would make the total above unexplainable,
+         and a customer who promised a date has earned seeing that we recorded
+         it. #}
+      {% if r.disputed %}
+      <span class="quiet small" style="display:block">{{ t('mine_disputed') }}</span>
+      {% elif r.promised %}
+      <span class="quiet small" style="display:block">{{ t('mine_promised', date=r.promised) }}</span>
+      {% elif r.instalments %}
+      <span class="quiet small" style="display:block">{{ t('mine_plan', n=r.instalments) }}</span>
+      {% endif %}
+    </dt>
+    <dd>
+      {{ r.amount }}
+      {% if r.part_paid %}
+      <span class="quiet small prose" style="display:block; font-family:var(--body)">
+        {{ t('mine_part_paid', amount=r.part_paid) }}</span>
+      {% endif %}
+      {% if r.link %}
+      <span class="small" style="display:block">
+        <a href="{{ r.link }}">{{ t('mine_pay') }}</a></span>
+      {% endif %}
+    </dd>
+  </div>
+  {% endfor %}
+</dl>
+<p class="quiet small" style="margin-top:var(--sp-3)">{{ t('mine_each_opens') }}</p>
+{% else %}
+<div class="sec"><h2>{{ t('mine_nothing') }}</h2></div>
+<p class="quiet">{{ t('mine_nothing_lede') }}</p>
+{% endif %}
+
+{% if settled_rows %}
+<div class="sec"><h2>{{ t('mine_settled') }}</h2></div>
+<p class="quiet small">{{ t('mine_settled_lede') }}</p>
+<dl class="register">
+  {% for r in settled_rows %}
+  <div>
+    <dt>
+      <span class="mono">{{ r.ref }}</span>
+      <span class="quiet small" style="display:block">{{ r.opened }} · {{ r.state }}</span>
+    </dt>
+    <dd>{{ r.amount }}</dd>
+  </div>
+  {% endfor %}
+</dl>
+{% endif %}
+
+{% if expires_line %}
+<p class="quiet small" style="margin-top:var(--sp-3)">{{ t('mine_expires', when=expires_line) }}</p>
+{% endif %}
+<p class="quiet small">{{ t('mine_one_link') }}</p>
+
+<div class="sec"><h2>{{ t('sec_help') }}</h2></div>
+{% if whatsapp %}
+<div class="helprow">
+  <a class="btn btn-quiet" href="https://wa.me/{{ whatsapp }}" rel="nofollow noopener" target="_blank">{{ t('help_whatsapp') }}</a>
+</div>
+{% endif %}
+{% if optout_token %}
+<div class="optout">
+  {# Posts to the oldest case's own route. cases.record_opt_out withdraws
+     consent for the CUSTOMER and closes every open case of theirs, so this
+     already stops contact about everything on this page — minting a
+     customer-scoped write endpoint to reach the same outcome would be new
+     attack surface for no new behaviour. See routes.py::customer_home. #}
+  <form method="post" action="/recover/{{ optout_token }}/optout">
+    <button type="submit">{{ t('opt_out_all') }}</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block footer %}
+  {{ t('mine_footer') }}
+{% endblock %}

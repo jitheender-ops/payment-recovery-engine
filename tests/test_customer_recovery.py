@@ -954,3 +954,115 @@ async def test_a_forged_marker_is_ignored(
             )
         )).scalars().all())
     assert actors == ["customer"]
+
+
+# ── The customer home: everything one person has open ────────────────────────
+
+
+async def _seed_for(
+    sm: async_sessionmaker[AsyncSession], customer_id: str, refs: list[str]
+) -> list[uuid.UUID]:
+    """Several open cases belonging to one person."""
+    ids = []
+    async with sm() as session:
+        for ref in refs:
+            case = RecoveryCase(
+                subject_ref=ref, risk_type="payment_failure", state="open",
+                amount_at_risk=100000, amount_recovered=0, max_attempts=3,
+                attempts_used=0, customer_id=customer_id,
+            )
+            session.add(case)
+            await session.flush()
+            ids.append(case.id)
+        await session.commit()
+    return ids
+
+
+async def test_the_customer_home_shows_every_case_that_person_has(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Three failed orders were three SMS, three links and three isolated pages,
+    and no page could answer "how much do I actually owe you?" — the
+    commonest question support gets. This is that page.
+    """
+    ids = await _seed_for(
+        db_sessionmaker, "email:many@example.com", ["pay_a", "pay_b", "pay_c"]
+    )
+    token = recovery_link.mint_customer(ids[0])
+    r = client.get(f"/mine/{token}")
+    assert r.status_code == 200
+    for ref in ("pay_a", "pay_b", "pay_c"):
+        assert ref in r.text
+    # The total, not the gross of any one of them.
+    assert "3,000" in r.text
+
+
+async def test_the_customer_home_hands_out_no_authority_of_its_own(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """It shows and links. Every row deep-links to that case's own page,
+    which is the tested money path — a second surface with its own pay
+    handling would be a second thing to get wrong where being wrong means
+    charging someone twice."""
+    ids = await _seed_for(db_sessionmaker, "email:two@example.com", ["pay_x", "pay_y"])
+    token = recovery_link.mint_customer(ids[0])
+    body = client.get(f"/mine/{token}").text
+    # No write endpoint of its own except the opt-out, which posts to a case.
+    assert "/mine/" not in body.split("<form")[-1] if "<form" in body else True
+    assert body.count("/recover/") >= 2
+
+
+async def test_a_case_token_cannot_open_the_customer_home(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The page shows more than a case page does, so its token is a third scope
+    and the signature covers the marker: holding a link to one payment does
+    not get you a link to all of them. Same rule the account scope exists for.
+    """
+    ids = await _seed_for(db_sessionmaker, "email:scope@example.com", ["pay_s"])
+    assert client.get(f"/mine/{recovery_link.mint(ids[0])}").status_code == 404
+
+
+async def test_a_customer_token_cannot_open_a_case_page(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """And the confusion is refused in both directions."""
+    ids = await _seed_for(db_sessionmaker, "email:scope2@example.com", ["pay_s2"])
+    token = recovery_link.mint_customer(ids[0])
+    assert client.get(f"/recover/{token}").status_code == 404
+
+
+async def test_the_customer_home_refuses_a_case_with_no_customer(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A merchant risk event can be pushed without a customer id. There is no
+    "everything you owe" for nobody, so it is not an empty page — it is a
+    page that does not exist, answered exactly like a forged token."""
+    async with db_sessionmaker() as session:
+        case = RecoveryCase(
+            subject_ref="pay_anon", risk_type="payment_failure", state="open",
+            amount_at_risk=100000, amount_recovered=0, max_attempts=3,
+            attempts_used=0, customer_id=None,
+        )
+        session.add(case)
+        await session.commit()
+        case_id = case.id
+    assert client.get(
+        f"/mine/{recovery_link.mint_customer(case_id)}"
+    ).status_code == 404
+
+
+async def test_the_case_page_offers_the_home_only_when_there_is_more(
+    client: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A link promising "everything you owe" that leads to a page holding
+    this same one payment is worse than no link."""
+    alone = await _seed_for(db_sessionmaker, "email:alone@example.com", ["pay_only"])
+    assert "/mine/" not in client.get(f"/recover/{recovery_link.mint(alone[0])}").text
+
+    several = await _seed_for(
+        db_sessionmaker, "email:several@example.com", ["pay_1", "pay_2"]
+    )
+    assert "/mine/" in client.get(f"/recover/{recovery_link.mint(several[0])}").text

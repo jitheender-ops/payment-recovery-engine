@@ -149,11 +149,86 @@ CATALOGS: dict[str, dict[str, str]] = {
         # wherever the reader is looking at more than one invoice.
         "opt_out_account": "Don't contact me about this account",
         "opt_out_done": "We've stopped contacting you",
+        # ── The customer home: everything one person has open with us ──────
+        "mine_title": "Everything you owe",
+        "mine_lede": (
+            "Every payment of yours we are still waiting on, in one place. "
+            "Open any one to pay it, promise a date, ask to split it, or tell "
+            "us something is wrong."
+        ),
+        "mine_total": "Still owed in total",
+        "mine_across": "across {n} payments",
+        "mine_across_one": "on one payment",
+        "mine_open": "Open",
+        "mine_settled": "Already settled",
+        "mine_settled_lede": (
+            "Nothing to do here — kept for your records."
+        ),
+        "mine_nothing": "You are all paid up.",
+        "mine_nothing_lede": (
+            "There is nothing outstanding with us right now. If you were "
+            "expecting to see something, reply to the message we sent you."
+        ),
+        "mine_promised": "You promised {date}",
+        "mine_plan": "Paying in {n} parts",
+        "mine_disputed": "Under review — we've paused reminders",
+        "mine_part_paid": "{amount} already paid",
+        "mine_pay": "Open",
+        "mine_expires": "This page works until {when}.",
+        "mine_one_link": (
+            "This link is yours. Anyone you forward it to can see this page, "
+            "so send it on only if you mean to."
+        ),
+        "mine_each_opens": (
+            "Each one opens its own page, where you can pay it, promise a "
+            "date, ask to pay in parts, or tell us something is wrong. "
+            "Nothing is charged from this page."
+        ),
+        "mine_footer": "Questions? Reply to the message we sent you.",
+        "mine_see_all": "See everything you owe us",
+        "mine_see_all_n": "See all {n} payments you have with us",
+        "opt_out_all": "Don't contact me about any of these",
         # language names, shown in the toggle
         "lang_name": "English",
     },
     "hi": {
         "masthead": "भुगतान वसूली",
+        "mine_title": "आपके सभी बकाया",
+        "mine_lede": (
+            "आपके वे सभी भुगतान जिनका हमें इंतज़ार है, एक ही जगह। किसी को भी "
+            "खोलकर भुगतान करें, तारीख़ बताएँ, किस्तों में बाँटने को कहें, या "
+            "कोई दिक़्क़त बताएँ।"
+        ),
+        "mine_total": "कुल बकाया",
+        "mine_across": "{n} भुगतानों पर",
+        "mine_across_one": "एक भुगतान पर",
+        "mine_open": "बकाया",
+        "mine_settled": "निपट चुके",
+        "mine_settled_lede": "यहाँ कुछ करना नहीं है — सिर्फ़ आपके रिकॉर्ड के लिए।",
+        "mine_nothing": "आपका कोई बकाया नहीं है।",
+        "mine_nothing_lede": (
+            "अभी हमारे पास आपका कुछ भी बकाया नहीं है। अगर आपको कुछ दिखना "
+            "चाहिए था, तो हमारे भेजे संदेश का जवाब दें।"
+        ),
+        "mine_promised": "आपने {date} का वादा किया",
+        "mine_plan": "{n} किस्तों में",
+        "mine_disputed": "समीक्षा में — हमने याद दिलाना रोक दिया है",
+        "mine_part_paid": "{amount} पहले ही चुकाया",
+        "mine_pay": "खोलें",
+        "mine_expires": "यह पेज {when} तक चलेगा।",
+        "mine_one_link": (
+            "यह लिंक आपका है। जिसे भी आप इसे भेजेंगे वह यह पेज देख सकेगा, "
+            "इसलिए सोच-समझकर ही आगे भेजें।"
+        ),
+        "mine_each_opens": (
+            "हर एक अपना अलग पेज खोलता है, जहाँ आप भुगतान कर सकते हैं, तारीख़ "
+            "बता सकते हैं, किस्तों में बाँटने को कह सकते हैं, या कोई दिक़्क़त "
+            "बता सकते हैं। इस पेज से कुछ भी नहीं काटा जाता।"
+        ),
+        "mine_footer": "कोई सवाल? हमारे भेजे संदेश का जवाब दें।",
+        "mine_see_all": "अपने सभी बकाया देखें",
+        "mine_see_all_n": "हमारे साथ अपने सभी {n} भुगतान देखें",
+        "opt_out_all": "इनमें से किसी के बारे में मुझसे संपर्क न करें",
         "hero_about": "आपका भुगतान",
         "hero_about_order": "आपका ऑर्डर",
         "hero_about_subscription": "आपकी सब्सक्रिप्शन",

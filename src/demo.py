@@ -548,6 +548,48 @@ def _as_uuid(value: Any) -> uuid.UUID | None:
     return None
 
 
+async def _resolve_customer_homes(session: Any) -> list[dict[str, Any]]:
+    """One /mine link per consumer who actually has more than one case open.
+
+    The page only earns its place when there IS more than one thing on it, so
+    the demo lists the people it is a real answer for rather than minting a
+    link to a page holding a single row.
+    """
+    from sqlalchemy import text
+
+    from src import recovery_link
+
+    try:
+        rows = (await session.execute(text("""
+            SELECT MIN(id) AS case_id, customer_id, COUNT(*) AS n
+            FROM recovery_cases
+            WHERE state = 'open' AND customer_id IS NOT NULL
+            GROUP BY customer_id
+            HAVING COUNT(*) > 1
+            ORDER BY n DESC
+            LIMIT 4
+        """))).all()
+    except Exception:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for case_id, customer_id, count in rows:
+        resolved = _as_uuid(case_id)
+        if resolved is None:
+            continue
+        token = recovery_link.mint_customer(resolved)
+        out.append({
+            # The customer key is an email or a phone. It is the ONE place
+            # this hub would print PII, and it is an offline demo database of
+            # invented people — but the habit is worth keeping, so the label
+            # is the count, not the person.
+            "name": f"A customer with {count} open payments",
+            "count": count,
+            "url": f"/mine/{token}" if token else None,
+        })
+    return out
+
+
 async def _resolve_statements(session: Any) -> list[dict[str, Any]]:
     """One statement link per AR account that actually has open invoices."""
     from sqlalchemy import text
@@ -596,6 +638,7 @@ async def demo_hub(
     settings = get_settings()
     features = await _resolve_features(session)
     statements = await _resolve_statements(session)
+    homes = await _resolve_customer_homes(session)
     base = str(request.base_url).rstrip("/")
     password = reveal(settings.dashboard_password) or "(unset)"
     streamlit = f"http://127.0.0.1:{os.environ.get('STREAMLIT_PORT', '8501')}"
@@ -617,6 +660,13 @@ async def demo_hub(
         for s in statements
     ) or '<div class="row dim"><div><b>No AR account has open invoices</b>'\
          '<span>run the seed again</span></div></div>'
+    home_rows = "".join(
+        card(h["name"], "total still owed, every case, and a deep link into each",
+             h["url"])
+        for h in homes
+    ) or '<div class="row dim"><div><b>Nobody in this database has two open '\
+         'payments</b><span>the page only earns its place when there is more '\
+         'than one</span></div></div>'
     console_rows = "".join(
         card(path, blurb, base + path) for path, blurb in _CONSOLE_PAGES
     )
@@ -662,6 +712,9 @@ is why a real merchant console would never list them.</div>
 
 <h2>The customer's page, one per capability</h2>
 {feature_rows}
+
+<h2>The customer home &mdash; everything one consumer owes, in one place</h2>
+{home_rows}
 
 <h2>Account statements &mdash; every open invoice for one B2B buyer</h2>
 {statement_rows}

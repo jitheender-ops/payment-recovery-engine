@@ -42,13 +42,14 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Request  # noqa: F401
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import rate_limit, recovery_link
 from src.agent.actions import PaymentRail
 from src.auth import client_ip
+from src.cases import ledger_keys
 from src.config import get_settings
 from src.customer.explain import explain
 from src.customer.i18n import Translator, pick
@@ -62,7 +63,12 @@ from src.models import (
     RetryAttempt,
     VoiceCallQueue,
 )
-from src.receivables.models import ArAccount, CaseDispute
+from src.receivables.models import (
+    ArAccount,
+    CaseDispute,
+    PaymentPlan,
+    PlanInstalment,
+)
 from src.receivables.plans import MAX_INSTALMENTS
 
 logger = logging.getLogger(__name__)
@@ -602,6 +608,26 @@ async def recovery_page(
     # for a minute. The ?r=1 flag stops the loop after the single re-check.
     auto_refresh = state == "confirming" and not request.query_params.get("r")
 
+    # Everything else this person has open with us. One COUNT, not a second
+    # page render: the link is worth offering only when it leads somewhere
+    # this page is not already showing.
+    mine_link: str | None = None
+    mine_count = 0
+    keys = ledger_keys(case.customer_id)
+    if keys:
+        mine_count = int(await session.scalar(
+            select(func.count())
+            .select_from(RecoveryCase)
+            .where(
+                RecoveryCase.customer_id.in_(keys),
+                RecoveryCase.state == "open",
+                RecoveryCase.id != case.id,
+            )
+        ) or 0)
+        if mine_count:
+            mine_token = recovery_link.mint_customer(case.id)
+            mine_link = f"/mine/{mine_token}" if mine_token else None
+
     # The click-through signal: one audit row per serve. Best-effort on
     # purpose — a metrics write failing must never cost a customer their
     # page. Not written on the 404 path (no case to attribute it to); the
@@ -693,6 +719,13 @@ async def recovery_page(
             # has made its own promise it will break.
             "autopay_offerable": _mandate_offerable(_outstanding(case)),
             "autopay_amount": _money(_outstanding(case)),
+            # The way to the customer's other open payments, offered only when
+            # there ARE others: a link promising "everything you owe" that
+            # leads to a page holding this same one payment is worse than no
+            # link. Minted here rather than in the template so the template
+            # cannot mint a credential.
+            "mine_link": mine_link,
+            "mine_count": mine_count,
         },
     )
 
@@ -1387,6 +1420,166 @@ async def _start_payment_from_case(
 # /recover/{token} page, which is the tested money path. A second surface
 # with its own pay handling would be a second thing to get wrong on the one
 # path where being wrong means double-charging someone.
+
+
+# ── The customer home ───────────────────────────────────────────────────────
+#
+# A B2B buyer has had /statement since the receivables layer landed: one link,
+# every open invoice, a deep link into each. A consumer had nothing of the
+# kind. Someone whose card failed on three orders got three SMS, three links
+# and three isolated pages, with no way to see what they owed in total or to
+# find yesterday's link again — the commonest support question there is
+# ("how much do I actually owe you?") had no answer on any page we served.
+#
+# SAME DESIGN RULE AS THE STATEMENT, for the same reason: this page SHOWS and
+# LINKS. It takes no payment, records no promise, opens no dispute. Every
+# action deep-links to that case's own /recover page, which is the tested
+# money path. A second surface with its own pay handling would be a second
+# thing to get wrong on the one path where being wrong means charging someone
+# twice.
+
+
+@router.get("/mine/{token}", response_class=HTMLResponse)
+async def customer_home(
+    request: Request, token: str, session: AsyncSession = Depends(get_session)
+) -> Any:
+    """Everything one person has open with this merchant, in one place."""
+    _check_rate_limit(request, kind="page", limit=_PAGE_LIMIT)
+
+    settings = get_settings()
+    lang = pick(request.query_params.get("lang"), request.headers.get("accept-language"))
+    t = Translator(lang)
+
+    def gone() -> Any:
+        # One response for expired, forged, wrong-scope and unknown alike —
+        # see recovery_page() for why they must not be distinguishable.
+        return templates.TemplateResponse(
+            request, "expired.html",
+            {"t": t, "lang": lang, "merchant_name": settings.merchant_name},
+            status_code=404,
+        )
+
+    anchor_case_id = recovery_link.verify_customer(token)
+    if anchor_case_id is None:
+        return gone()
+    anchor_case = await session.get(RecoveryCase, anchor_case_id)
+    if anchor_case is None:
+        return gone()
+
+    # The token names a case; the page is about that case's customer. An
+    # anonymous case (no customer_id — a merchant risk event can be pushed
+    # without one) has no "everything you owe" to show, so it is not a page
+    # with an empty table, it is a page that does not exist.
+    keys = ledger_keys(anchor_case.customer_id)
+    if not keys:
+        return gone()
+
+    cases = list((await session.execute(
+        select(RecoveryCase)
+        .where(RecoveryCase.customer_id.in_(keys))
+        .order_by(RecoveryCase.opened_at.desc())
+    )).scalars().all())
+    if not cases:
+        return gone()
+
+    case_ids = [c.id for c in cases]
+    # One query each rather than one per row: a customer with eight open
+    # payments should not cost twenty-four round trips to render.
+    disputed = set((await session.execute(
+        select(CaseDispute.case_id).where(
+            CaseDispute.case_id.in_(case_ids), CaseDispute.status == "open"
+        )
+    )).scalars().all())
+
+    promises: dict[Any, Any] = {}
+    for row in (await session.execute(
+        select(PromiseToPay)
+        .where(
+            PromiseToPay.recovery_case_id.in_(case_ids),
+            PromiseToPay.status == "pending",
+        )
+        .order_by(PromiseToPay.promised_at.desc())
+    )).scalars().all():
+        promises.setdefault(row.recovery_case_id, row)
+
+    # PaymentPlan is deliberately thin — each instalment is a PromiseToPay
+    # grouped by a plan_instalments row — so the count the customer cares
+    # about ("paying in 3 parts") is a join, not a column.
+    plan_rows = (await session.execute(
+        select(PaymentPlan.case_id, func.count(PlanInstalment.id))
+        .join(PlanInstalment, PlanInstalment.plan_id == PaymentPlan.id, isouter=True)
+        .where(
+            PaymentPlan.case_id.in_(case_ids),
+            PaymentPlan.status == "active",
+        )
+        .group_by(PaymentPlan.case_id)
+    )).all()
+    plans = {row[0]: row[1] for row in plan_rows}
+
+    open_rows: list[dict[str, Any]] = []
+    settled_rows: list[dict[str, Any]] = []
+    outstanding = 0
+    for case in cases:
+        owed = max(0, case.amount_at_risk - case.amount_recovered)
+        settled = case.state in ("recovered", "opted_out", "abandoned", "expired") or (
+            owed == 0
+        )
+        due_when, days_overdue = _aging(case.due_at)
+        promise = promises.get(case.id)
+        instalments = plans.get(case.id)
+        # Each row hands out the same credential that row's own SMS would
+        # have carried, minted the same way. This page grants no authority of
+        # its own over any case.
+        case_token = recovery_link.mint(case.id)
+        entry = {
+            "ref": case.subject_ref,
+            "risk_type": case.risk_type,
+            "state": case.state,
+            "amount": _money(owed if not settled else case.amount_recovered),
+            "part_paid": (
+                _money(case.amount_recovered)
+                if case.amount_recovered and not settled else None
+            ),
+            "opened": _ist(_aware(case.opened_at)).strftime("%d %b %Y"),
+            "due_when": due_when,
+            "days_overdue": days_overdue,
+            "disputed": case.id in disputed,
+            "promised": (
+                _format_promise_due(_aware(promise.due_at)) if promise else None
+            ),
+            "instalments": instalments or None,
+            "link": f"/recover/{case_token}" if case_token else None,
+        }
+        if settled:
+            settled_rows.append(entry)
+        else:
+            outstanding += owed
+            open_rows.append(entry)
+
+    verified = recovery_link.verify_customer_with_expiry(token)
+    return templates.TemplateResponse(
+        request, "mine.html",
+        {
+            "t": t,
+            "lang": lang,
+            "merchant_name": settings.merchant_name,
+            "public_base_url": settings.public_base_url or None,
+            "whatsapp": settings.support_whatsapp or None,
+            "open_rows": open_rows,
+            "settled_rows": settled_rows,
+            "outstanding": _money(outstanding),
+            "page_path": f"/mine/{token}",
+            "expires_line": (
+                _format_expiry(verified[1], lang) if verified else None
+            ),
+            # Same reasoning as the statement's: record_opt_out withdraws
+            # consent for the customer and closes every open case of theirs,
+            # so opting out from one case already covers this whole page.
+            # Minting a customer-scoped write endpoint to reach the same
+            # outcome would be new attack surface for no new behaviour.
+            "optout_token": recovery_link.mint(cases[0].id),
+        },
+    )
 
 
 @router.get("/statement/{token}", response_class=HTMLResponse)

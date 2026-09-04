@@ -262,3 +262,25 @@ def test_the_story_page_does_not_promise_a_command_it_cannot_hand_over(
     assert "behind a password" in body
     # The old claim, which was about the deployment a reader was looking at.
     assert "One command, no credentials" not in body
+
+
+def test_the_customer_home_carries_the_money_page_headers(monkeypatch: Any) -> None:
+    """
+    /mine has a capability token in its URL and a rupee figure on it, so it
+    needs /recover's four headers — not the API's. The three customer
+    surfaces share one path tuple in src/main.py precisely so a fourth cannot
+    be added without them: one added on its own would be framable, cacheable
+    and referrer-leaking on day one.
+
+    Asserted on a rejected token, because the middleware runs on the path and
+    the headers must not depend on the page having been served.
+    """
+    client = _html_client(monkeypatch)
+    for path in ("/recover/x.y", "/statement/x.y", "/mine/x.y"):
+        r = client.get(path)
+        assert r.headers.get("x-frame-options") == "DENY", path
+        assert "frame-ancestors 'none'" in r.headers.get(
+            "content-security-policy", ""
+        ), path
+        assert r.headers.get("cache-control") == "no-store, private", path
+        assert r.headers.get("referrer-policy") == "no-referrer", path
