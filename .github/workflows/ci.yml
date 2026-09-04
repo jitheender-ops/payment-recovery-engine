@@ -4,8 +4,10 @@
 #                ceiling (3.13 — the interpreter development actually runs on).
 #   2. migrate   scripts/check_migrations.py proves the Alembic chain builds a
 #                schema identical to the ORM's, on empty -> head, create_all ->
-#                head (no-op) and head -> base -> head. Runs on SQLite so no
-#                service container is needed; see that script for why.
+#                head (no-op) and head -> base -> head. Runs twice: on SQLite
+#                for speed, and on Postgres because two migrations passed the
+#                SQLite run and then killed the first deploy on SQL only
+#                Postgres type-checks.
 #   3. eval      trains the XGBoost baseline and runs the harness on small
 #                numbers, so the README's results table cannot quietly stop
 #                reproducing. No LLM: the fast mode needs no API keys.
@@ -50,6 +52,19 @@ jobs:
   migrations:
     name: alembic chain vs ORM schema
     runs-on: ubuntu-latest
+    services:
+      # The dialect that deploys. Postgres rejects things SQLite stores
+      # happily — a JSONB server_default SQLAlchemy quoted into '''[]''', a
+      # text literal assigned to a jsonb column — and both shipped, because
+      # the only chain check ran on SQLite.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -63,8 +78,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Migration chain check
+      - name: Migration chain check (SQLite)
         run: python scripts/check_migrations.py
+
+      - name: Migration chain check (Postgres)
+        # Scratch databases are created beside `postgres` and dropped; the
+        # named database is only ever the admin handle.
+        run: >
+          python scripts/check_migrations.py
+          --postgres postgresql://postgres:postgres@localhost:5432/postgres
 
   eval:
     name: train model + eval harness reproduces

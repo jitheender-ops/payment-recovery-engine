@@ -11,18 +11,30 @@ Three paths, because they fail differently and only one of them was ever run:
      catches the opposite drift: a model gains a column, the migration does not.
   3. head -> base -> head, so `downgrade` is something that has actually run.
 
-Runs on SQLite so CI needs no service container. Postgres is what deploys, and
-that dialect is only covered as far as alembic's own SQL generation — what this
-checks is our logic: the inspector guards, the ordering, and completeness
-against the models.
+Runs on SQLite by default, so CI needs no service container for the logic this
+checks: the inspector guards, the ordering, and completeness against the models.
+
+That default was not enough. Twice now a migration passed here and died on the
+first Postgres deploy, on SQL SQLite does not type-check: a JSONB server_default
+SQLAlchemy quoted into `'''[]'''`, and a text literal assigned to a jsonb column
+(`SET credited_refs = '["' || recovered_ref || '"]'`) that Postgres rejects at
+plan time. SQLite stores both happily. So `--postgres` runs the same three paths
+against the dialect that actually deploys; it creates its own scratch databases
+on that server and drops them, so it can be pointed at any Postgres — including
+a dev box — without touching an existing schema.
 
     python scripts/check_migrations.py
+    python scripts/check_migrations.py --postgres postgresql://user:pw@localhost/postgres
 """
 from __future__ import annotations
 
+import argparse
+import os
 import sys
 import tempfile
 from argparse import Namespace
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +74,51 @@ def _config(url: str) -> Config:
         cmd_opts=Namespace(x=[f"url={url}"]),
     )
     return cfg
+
+
+@contextmanager
+def _workspace(postgres_url: str | None) -> Iterator[Callable[[str], str]]:
+    """Hand back a `db(name) -> url` factory over throwaway databases.
+
+    SQLite gets files in a temp directory. Postgres gets real databases created
+    on the target server and dropped on the way out — never the database in the
+    URL itself, which is only ever connected to as the admin handle. A leftover
+    from a killed run is dropped rather than reused, so a half-migrated scratch
+    database cannot make the next run pass.
+    """
+    if postgres_url is None:
+        with tempfile.TemporaryDirectory() as tmp:
+            yield lambda name: f"sqlite:///{tmp}/{name}.db"
+        return
+
+    # AUTOCOMMIT: CREATE/DROP DATABASE cannot run inside a transaction block.
+    admin = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+    base = sa.engine.make_url(postgres_url)
+    made: list[str] = []
+
+    # WITH (FORCE), because the engines this script opens against a scratch
+    # database keep pooled connections alive past the phase that used them and
+    # a plain DROP fails with "is being accessed by other users". Postgres 13+,
+    # which every deploy target here is.
+    drop = 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
+
+    def db(name: str) -> str:
+        dbname = f"migcheck_{os.getpid()}_{name}"
+        with admin.connect() as conn:
+            conn.exec_driver_sql(drop.format(dbname))
+            conn.exec_driver_sql(f'CREATE DATABASE "{dbname}"')
+        made.append(dbname)
+        # render_as_string, not str(): SQLAlchemy's __str__ masks the password
+        # as *** and the scratch database would be unreachable.
+        return base.set(database=dbname).render_as_string(hide_password=False)
+
+    try:
+        yield db
+    finally:
+        for dbname in made:
+            with admin.connect() as conn:
+                conn.exec_driver_sql(drop.format(dbname))
+        admin.dispose()
 
 
 def _snapshot(url: str) -> Snapshot:
@@ -105,11 +162,12 @@ def _diff(chain: Snapshot, orm: Snapshot) -> list[str]:
     return problems
 
 
-def main() -> int:
+def main(postgres_url: str | None = None) -> int:
     failures: list[str] = []
-    with tempfile.TemporaryDirectory() as tmp:
-        chain_url = f"sqlite:///{tmp}/chain.db"
-        orm_url = f"sqlite:///{tmp}/orm.db"
+    print(f"dialect: {'postgresql' if postgres_url else 'sqlite'}")
+    with _workspace(postgres_url) as db:
+        chain_url = db("chain")
+        orm_url = db("orm")
 
         # 1. The deploy path.
         try:
@@ -136,7 +194,7 @@ def main() -> int:
             print(f"FAIL  head -> base -> head: {type(exc).__name__}: {exc}")
 
         # 2. The dev-box path: every guarded step must no-op, not crash.
-        noop_url = f"sqlite:///{tmp}/noop.db"
+        noop_url = db("noop")
         Base.metadata.create_all(sa.create_engine(noop_url))
         try:
             command.upgrade(_config(noop_url), "head")
@@ -155,4 +213,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--postgres",
+        metavar="URL",
+        default=os.environ.get("MIGRATION_CHECK_POSTGRES_URL"),
+        help=(
+            "run the three paths on this Postgres server instead of SQLite. "
+            "Scratch databases are created beside the one named in the URL and "
+            "dropped afterwards; the named database itself is never modified."
+        ),
+    )
+    sys.exit(main(parser.parse_args().postgres))

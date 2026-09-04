@@ -55,12 +55,17 @@ def upgrade() -> None:
         ),
     )
     # Seed from recovered_ref so existing single-capture cases keep their
-    # replay refusal; rows with no capture stay empty-listed. A JSON text
-    # literal, not a jsonb_build_array() call: the same statement must run
-    # on Postgres and on the SQLite the migration chain check uses.
+    # replay refusal; rows with no capture stay empty-listed. Postgres will
+    # not assign text to a jsonb column, so it gets jsonb_build_array (which
+    # also escapes the ref properly); SQLite, used by the migration chain
+    # check, has no such function and takes the JSON text literal.
+    expr = (
+        "jsonb_build_array(recovered_ref)"
+        if op.get_bind().dialect.name == "postgresql"
+        else "'[\"' || recovered_ref || '\"]'"
+    )
     op.execute(
-        "UPDATE recovery_cases "
-        "SET credited_refs = '[\"' || recovered_ref || '\"]' "
+        f"UPDATE recovery_cases SET credited_refs = {expr} "
         "WHERE recovered_ref IS NOT NULL"
     )
 
