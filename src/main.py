@@ -16,8 +16,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 
 from src import scheduler
 from src.auth import require_api_key
@@ -282,6 +282,27 @@ async def og_card() -> Response:
     """The link-preview image. Absolute, cacheable, no secrets in it."""
     return Response(content=_OG_IMAGE, media_type="image/svg+xml",
                     headers={"Cache-Control": "public, max-age=3600"})
+
+
+# The console tour: twelve screenshots of the signed-in console, shown on the
+# public landing so a visitor without the password can see what is behind it.
+# Read from disk per request rather than into memory like the two brand assets
+# above — 650KB of resident bytes to save a page-load disk read on a marketing
+# page is the wrong trade. The name is checked against the directory listing
+# taken at import, so the path segment can only ever be one of these files.
+_TOUR_DIR = Path(__file__).parent / "merchant" / "static" / "tour"
+_TOUR_SHOTS: frozenset[str] = frozenset(p.stem for p in _TOUR_DIR.glob("*.webp"))
+
+
+@app.get("/static/tour/{name}.webp", include_in_schema=False)
+async def tour_shot(name: str) -> FileResponse:
+    if name not in _TOUR_SHOTS:
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        _TOUR_DIR / f"{name}.webp",
+        media_type="image/webp",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/", include_in_schema=False)

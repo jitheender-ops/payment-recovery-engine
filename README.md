@@ -352,9 +352,12 @@ means the build is actually clean. Ctrl-C stops everything.
 3.11 and 3.13 (the floor `pyproject.toml` claims and the ceiling it is developed
 on), applies every Alembic migration over a `create_all` schema to catch the
 drift `create_all` hides, and separately trains the model and runs the eval
-harness so the numbers above cannot quietly stop reproducing. No database
-service: `tests/conftest.py` builds the real schema over a throwaway SQLite
-file, which is the same reason `--verify-only` needs no Postgres.
+harness so the numbers above cannot quietly stop reproducing. The suite itself
+needs no database service — `tests/conftest.py` builds the real schema over a
+throwaway SQLite file, which is the same reason `--verify-only` needs no
+Postgres. The migration job is the one exception: it runs the chain check twice,
+once on SQLite and once against a `postgres:16` service container, because the
+SQLite-only run passed two migrations that then died on the first deploy.
 
 **Requirements:** Python ≥ 3.11, Postgres (`brew services start postgresql@15`
 or `docker compose up -d postgres`), and `cloudflared` or `ngrok` for the public
@@ -581,6 +584,21 @@ Every step is guarded by an inspector check, so it is a no-op on a database
 `create_all` already brought up to date and applies the delta on one that
 predates it. A migration that crashes half the time is a migration nobody runs.
 
+**The chain is checked on both dialects, because one was not enough.**
+`scripts/check_migrations.py` runs empty → head, `create_all` → head (must
+no-op) and head → base → head; it ran on SQLite so CI needed no service
+container, and twice a migration passed it and then killed the first Postgres
+deploy on SQL only Postgres type-checks — a JSONB `server_default` SQLAlchemy
+quoted into `'''[]'''`, and a text literal assigned to a `jsonb` column. SQLite
+stores both without complaint. `--postgres <url>` now runs the same three paths
+against the dialect that deploys, on scratch databases it creates and drops, so
+CI catches that class before Render does:
+
+```bash
+.venv/bin/python scripts/check_migrations.py
+.venv/bin/python scripts/check_migrations.py --postgres postgresql://user:pw@localhost/postgres
+```
+
 | Revision | What it adds |
 |---|---|
 | `0000_initial_schema` | The baseline tables. Added because 0001/0002 only *alter* them — `upgrade head` on an empty database used to succeed and leave you with `recovery_cases` and no `retry_attempts` |
@@ -595,6 +613,9 @@ predates it. A migration that crashes half the time is a migration nobody runs.
 | `0009_risk_event_offer` | `offer_id` on risk events — the merchant incentive relay, cart chases only, never on the first touch |
 | `0010_receivables` | The B2B layer: `ar_accounts`, `ar_contacts`, `ar_contact_log`, `case_disputes`, `payment_plans`, `plan_instalments`, `merchant_alerts` |
 | `0011_voice_call_queue` | `voice_call_queue` — the telephony leg's work items |
+| `0012_case_credited_refs` | `credited_refs` — every capture ever credited to a case, so a replayed capture is refused by membership rather than by `== latest` |
+| `0013_promise_mandate` | The UPI Autopay authorisation a promise may carry, so the scheduler can debit on the promised date instead of hoping |
+| `0014_audit_checkpoints` | `audit_checkpoints` — one keyed anchor per epoch, so verifying the chain costs the recent history rather than all of it |
 
 See [docs/architecture.md](docs/architecture.md) for the full ER diagram and
 [docs/ARCHITECTURE_MAP.md](docs/ARCHITECTURE_MAP.md) for the file-by-file map
@@ -750,6 +771,9 @@ disk are never ambiguous about which population they describe.
 │   ├── cases.py          # Recovery cases, promises to pay (incl. the UPI
 │   │                     #   Autopay mandate a promise may carry), audit trail
 │   ├── audit_chain.py    # Hash-chained case_events, independently verifiable
+│   ├── audit_checkpoint.py # Keyed epoch anchors, so verification is O(recent)
+│   ├── rate_limit.py     # One shared fixed-window limiter: Redis when
+│   │                     #   REDIS_URL is set, in-process when it is not
 │   ├── scheduler.py      # Layer 6: 16 sweeps on one tick — fire, reconcile
 │   │                     #   events + risk events + stale write-aheads, cancel
 │   │                     #   dead + superseded links, expire + remind promises,
@@ -767,12 +791,15 @@ disk are never ambiguous about which population they describe.
 ├── scripts/              # check_deployment (is a live host healthy?),
 │                         #   simulate_webhooks, run_risk_batch, train_xgboost, ...
 ├── alembic/versions/     # Schema migrations (create_all is not an upgrade path)
-├── models/               # Trained XGBoost artefact (gitignored; run.sh builds it)
+├── models/               # The XGBoost artefact is gitignored (run.sh builds it);
+│                         #   its .card.json model card is committed — the binary is
+│                         #   not reviewable, what it was trained on is
 ├── .github/workflows/    # CI: ruff + mypy strict + pytest on 3.11 & 3.13,
 │                         #   migration-chain check, train + eval reproduction
 ├── AGENTS.md             # Ground rules for AI assistants working in this repo
 ├── run.sh                # One command: clean build → verify → run → public URL
 └── docs/                 # architecture.md · failure_cases.md · eval_methodology.md
+                          #   SCALING.md · DEPLOY.md · decline-taxonomy.md
 ```
 
 ## ⚠️ Documented Failure Cases
@@ -804,12 +831,13 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 - **Streamlit + Plotly** — dashboard
 - **Razorpay API** — test-mode webhooks + Payment Links
 - **Jinja2** — the merchant console and the customer recovery page, server-rendered
+- **Redis** *(optional)* — shared fixed-window rate limiting across replicas, behind `REDIS_URL`. Unset, every limiter falls back to the in-process deque it used before, so dev, the demo and the suite need no Redis; see [docs/SCALING.md](docs/SCALING.md)
 - **asyncio** — the Layer 6 scheduler runs in-process; no broker, no second deployment. Swap in a real queue when there is more than one app process.
 - **Render** — web services and Postgres, the whole deployed path (see [docs/DEPLOY.md](docs/DEPLOY.md)); Modal only for the eval harness
 
 ## ✅ Test Coverage
 
-**844 tests across 57 files, 81% statement coverage over `src/`.** The money
+**884 tests across 59 files, 81% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |
@@ -823,12 +851,14 @@ paths are where the coverage went:
 | `guardrail/gate.py` | 98% | Every rule runs; ALL violations reported |
 | `guardrail/rules.py` | 98% | The 12 rules themselves, incl. the true IST clock |
 | `audit_chain.py` | 98% | The hash chain, and what a broken one looks like |
+| `audit_checkpoint.py` | 93% | Anchoring from content, and the rotating re-verification that catches a silent rewrite |
+| `rate_limit.py` | 91% | The Redis path, the in-process fallback, and the degrade when Redis is unreachable |
 | `cases.py` | 97% | Attribution, stopping rules, promises, mandates |
 | `config.py` | 92% | Fail-closed startup, unit guards, demo-mode refusal |
 | `orchestrator.py` | 86% | Write-ahead ordering, guardrail rejection, chase pipeline, the mandate debit |
-| `scheduler.py` | 83% | Sweep order, deferred fire, re-validation, reconciliation |
-| `executor/retry_executor.py` | 82% | Every Razorpay call the engine makes |
-| `merchant/routes.py` | 76% | Console gating and every panel's query |
+| `scheduler.py` | 85% | Sweep order, deferred fire, re-validation, reconciliation, retention pruning |
+| `executor/retry_executor.py` | 81% | Every Razorpay call the engine makes |
+| `merchant/routes.py` | 79% | Console gating and every panel's query |
 | `voice/pipeline.py` | 75% | The four gates, including abstention and injection refusal |
 
 **The tests that exist because money can move without a customer present**
@@ -872,6 +902,63 @@ nothing at all once anything has already read settings.
 
 The engine's first cut could decide; it could not always be trusted about what
 it had decided. The current wave, all CI-verified.
+
+### Two deploys died on SQL that SQLite does not type-check
+
+The migration chain had a gate — three paths, `empty -> head`, `create_all ->
+head`, `head -> base -> head` — and it ran on SQLite, so CI needed no service
+container. Twice that gate went green on a migration Postgres then refused on
+the first deploy:
+
+* `server_default="'[]'"` on a JSONB column. SQLAlchemy renders a plain-string
+  default by quoting it, so what reached Postgres was `'''[]'''` — invalid
+  JSON. `sa.text("'[]'")` passes the literal through.
+* `SET credited_refs = '["' || recovered_ref || '"]'` — a `text` expression
+  assigned to a `jsonb` column. Postgres type-checks that at plan time and
+  raises `DatatypeMismatch` before it looks at a single row, so it fails even
+  on an empty table. `jsonb_build_array(recovered_ref)` returns jsonb natively
+  and escapes the ref properly; SQLite has no such function and keeps the text
+  literal, so the statement is chosen by dialect.
+
+SQLite stores both happily, which is the whole point: the check was passing
+because the dialect it ran on could not see the defect. `check_migrations.py
+--postgres <url>` now runs the same three paths against Postgres — on scratch
+databases it creates beside the one in the URL and drops afterwards, so it is
+safe to point at a dev server — and CI runs both, with a `postgres:16` service
+container on the migrations job. Reintroducing either bug now fails that job.
+
+### The scale tier: the limits, the chain, and the index that never stopped growing
+
+Three mechanisms that were all correct at one worker and one thousand events,
+and none of which stayed correct past that:
+
+* **Rate limits were per process.** Three surfaces (the customer page, the
+  voice webhook, the Plivo bridge) each grew a private deque-in-a-dict limiter,
+  so `render.yaml` had to pin `WEB_CONCURRENCY=1` forever — N workers multiply
+  every per-IP bound by N and turn a safety limit into an advisory. `REDIS_URL`
+  now backs one shared limiter (`INCR` + `EXPIRE`); unset, or unreachable at
+  runtime, it degrades to the exact in-process limiter the call sites had —
+  fail-open to the old bound, never to no bound.
+* **Verifying the audit chain was O(all history).** The `case_events` chain is
+  one global sequence, so a full pass re-reads every row ever written.
+  `audit_checkpoints` anchors it: each epoch is verified *from row content*,
+  then pinned by a signature keyed with the same `AUDIT_CHAIN_SECRET` as the
+  chain. Verification after an anchor recomputes only the tail. A signature
+  alone cannot catch a rewrite of old *content* that leaves stored hashes
+  intact — the first cut of this had exactly that hole and a test found it — so
+  each run also fully re-reads the oldest not-yet-content-verified epoch,
+  catching tampering anywhere within one rotation.
+* **`processed_events` grew forever.** The table exists only to collide on its
+  UNIQUE index; a row's job ends when its event's redelivery window closes
+  (Razorpay retries for at most a day, retention defaults to 30). A bounded
+  sweep prunes past that and reports the count on the tick line, because a
+  retention policy nobody can see is a retention policy nobody trusts.
+
+And the suite stopped phoning home. `conftest.py` strips ambient Razorpay and
+LLM credentials, because two tests had been quietly using real ones when
+`run.sh` had exported them: a live downtime feed flipped the rail selector, and
+a real LLM answer failed the voice grounding floor. A test that passes only
+when someone's shell is configured is not a test.
 
 ### The eval's population was an unstated assumption, aging
 

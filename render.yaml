@@ -139,9 +139,13 @@ services:
         value: INFO
       # One worker on the free plan. Each worker runs its own scheduler loop;
       # they are safe together (both sweeps claim rows with a conditional
-      # UPDATE) but on a 512MB instance the memory matters more. The recovery
-      # page's rate-limit buckets also live per worker, so N workers quietly
-      # multiply every per-IP limit N times.
+      # UPDATE) but on a 512MB instance the memory matters more.
+      #
+      # This used to be load-bearing for a second reason: the rate-limit
+      # buckets lived per worker, so N workers quietly multiplied every per-IP
+      # limit N times. That is no longer true WHEN REDIS_URL is set — the
+      # limiter is then shared across replicas (src/rate_limit.py). Without
+      # Redis the per-process buckets are back and this pin still is the limit.
       - key: WEB_CONCURRENCY
         value: "1"
       # Render terminates TLS at its own proxy, which appends the real client

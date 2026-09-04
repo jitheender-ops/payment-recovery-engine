@@ -267,10 +267,17 @@ broken deployment, which is why the console refuses to render them.
 
 ## Notes
 
-**`WEB_CONCURRENCY=1`.** Two things assume it. Each worker runs its own
+**`WEB_CONCURRENCY=1`.** Two things assumed it. Each worker runs its own
 scheduler loop — safe (every sweep claims rows with a conditional UPDATE) but
-wasteful — and the recovery page's rate-limit buckets are per-process, so N
-workers quietly multiply every per-IP limit by N.
+wasteful — and the recovery page's rate-limit buckets were per-process, so N
+workers quietly multiplied every per-IP limit by N.
+
+The second one is now conditional: set **`REDIS_URL`** and every limiter moves
+to a shared fixed-window counter (`INCR` + `EXPIRE`), so the bound holds across
+replicas and more workers stop being a safety question — see
+[SCALING.md](SCALING.md). Leave it unset and the per-process buckets are exactly
+what they were, which is why this pin stays the default. An unreachable Redis at
+runtime degrades to per-process counting rather than to no limit at all.
 
 **`BEHIND_TRUSTED_PROXY=true` and `TRUSTED_PROXY_HOPS=1`.** Render terminates
 TLS at its proxy and appends the client to `X-Forwarded-For`. Without these the

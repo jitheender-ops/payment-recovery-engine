@@ -168,6 +168,28 @@
   </section>
 
   <section>
+    <p class="eyebrow" data-fm>It has to survive its own success</p>
+    <h2>Auditable at ten events, and at ten million.</h2>
+    <p class="lede">The hash chain that makes every decision provable is one
+      global sequence, so verifying it whole gets slower with every event ever
+      written. It re-anchors instead: <b>signed epoch checkpoints</b> make a
+      verification pass cost the recent history, not all of it — while a
+      rotating pass re-reads the oldest unverified epoch from row content, so a
+      rewrite that leaves every stored hash intact is still caught.</p>
+    <div class="sneak" role="list">
+      <div role="listitem"><b>Verification is O(recent)</b>checkpoints are
+        keyed by the same secret as the chain, so deleting one cannot forge
+        one.</div>
+      <div role="listitem"><b>Limits hold across replicas</b>rate limits move
+        to Redis when it is configured — a second worker no longer silently
+        doubles every per-IP bound.</div>
+      <div role="listitem"><b>The dedup index stays hot</b>processed webhook
+        events are pruned past their redelivery window, on a bounded sweep
+        that reports what it deleted.</div>
+    </div>
+  </section>
+
+  <section>
     <p class="eyebrow" data-fm>See it</p>
     <h2>One command, no credentials.</h2>
     <p class="lede">The demo runs the entire engine offline — seeded book,

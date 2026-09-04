@@ -216,6 +216,23 @@
     #listens .rung{grid-template-columns:1fr;gap:.15rem;margin-left:0!important}
     #listens .rungs{gap:.5rem}
   }
+
+  /* ── Console tour ───────────────────────────────────────────────────────
+     The console is behind a password, so the page that sells it can only
+     describe it. Twelve screenshots of the seeded demo book (synthetic
+     references, no customer anywhere in them) let a visitor see the thing
+     before deciding to ask for the password. A scroll-snap strip, not a
+     carousel: native scrolling already does this, on every device, with the
+     keyboard and the trackpad both, and costs no JS. */
+  .tour{display:flex;gap:1.1rem;overflow-x:auto;scroll-snap-type:x mandatory;
+    padding:.3rem .2rem 1.2rem;-webkit-overflow-scrolling:touch}
+  .tour figure{flex:0 0 min(30rem,82vw);scroll-snap-align:start;margin:0}
+  .tour img{width:100%;height:auto;display:block;aspect-ratio:1440/1013;
+    object-fit:cover;object-position:top center;border:1px solid var(--line);
+    border-radius:var(--r);background:var(--well)}
+  .tour figcaption{margin-top:.75rem}
+  .tour figcaption b{display:block;font-size:.95rem}
+  .tour figcaption span{color:var(--ink-3);font-size:.84rem;line-height:1.55}
 </style>
 {% endblock %}
 
@@ -227,11 +244,15 @@
       <span class="brand-name">{{ merchant_name or "Recovery Engine" }}</span>
     </a>
     <div class="nav-links">
-      <a class="nav-link hide-sm" href="#chasers">The leak</a>
+      {# Five links is what fits on one line at 1280px before the row wraps.
+         "The leak" and "When they reply" came out when the tour and the story
+         went in: both are anchors into sections a visitor scrolls past anyway,
+         and the two that replaced them go somewhere this page cannot. #}
       <a class="nav-link hide-sm" href="#how">How it works</a>
-      <a class="nav-link hide-sm" href="#listens">When they reply</a>
+      <a class="nav-link hide-sm" href="#tour">The console</a>
       <a class="nav-link hide-sm" href="#integrate">Integrate</a>
       <a class="nav-link hide-sm" href="/model">The model</a>
+      <a class="nav-link hide-sm" href="/foundation">The story</a>
       <a class="btn btn-primary btn-sm" href="/console/live">{{ icon("lock", 14) }} Open console</a>
     </div>
   </div>
@@ -249,7 +270,7 @@
       <div class="kpi" style="margin-top:1.3rem;max-width:27rem;display:inline-flex" data-stage="2">
         <div>
           <div class="kpi-label">Proven vs. a fixed 3-retry baseline</div>
-          <div class="kpi-value green">₹11.70L <span style="font-size:1rem;font-weight:500;color:var(--ink-3)">extra net revenue / ₹1Cr failed volume</span></div>
+          <div class="kpi-value green">₹11.71L <span style="font-size:1rem;font-weight:500;color:var(--ink-3)">extra net revenue / ₹1Cr failed volume</span></div>
           <div class="kpi-foot">+11.03pp recovery rate · 95% CI [+10.54, +11.52] · n=25,000, paired under common random numbers — not two overlapping error bars. Reproduce: <span class="mono">eval/runner.py</span></div>
         </div>
       </div>
@@ -516,6 +537,45 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
   </div>
 </section>
 
+<section class="section" id="tour">
+  <div class="wrap">
+    <div class="measure" data-reveal>
+      <h2 class="h2">The console, before you ask for the password.</h2>
+      <p class="lede" style="margin-top:1.1rem">
+        Nine operator pages and the three surfaces a customer actually sees.
+        Every figure below is the seeded demo book — synthetic references, no
+        real customer in any of them.
+      </p>
+    </div>
+
+    {% set tour = [
+      ("live", "Ledger", "Still owed and brought back, and the rails the gateway reports down right now."),
+      ("pipeline", "Pipeline", "Every case by stage, and what the next sweep will do with it."),
+      ("routing", "Routing", "Which rail each attempt went out on, and how each one is clearing."),
+      ("cases", "Cases", "One row per unit of revenue at risk — references are yours, never an email or phone."),
+      ("batch", "Batch", "Run a cohort, then read what the money actually did afterwards."),
+      ("accounts", "Buyers", "The B2B side: accounts, their contacts, and the rung each one sits on."),
+      ("messages", "Messages", "Every nudge that left, in the language it left in."),
+      ("ops", "Engine", "The heartbeat: sweeps, timings, and what the last tick touched."),
+      ("evidence", "Evidence", "The hash-chained audit trail, verifiable without trusting the app."),
+      ("recover", "The recovery page", "What the customer opens — one amount, one button, one opt-out."),
+      ("statement", "The statement", "One consolidated statement per buyer per rung, not four separate messages."),
+      ("voice", "The voice leg", "The call, grounded in case facts, abstaining when it does not know."),
+    ] %}
+    <div class="tour" style="margin-top:2.4rem" tabindex="0" role="group"
+         aria-label="Screenshots of the console, scrollable">
+      {% for shot, title, blurb in tour %}
+      <figure>
+        <img src="/static/tour/{{ shot }}.webp" width="1440" height="1013"
+             loading="lazy" decoding="async"
+             alt="The {{ title }} page of the recovery console.">
+        <figcaption><b>{{ title }}</b><span>{{ blurb }}</span></figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
 <section class="section">
   <div class="wrap" style="text-align:center">
     <h2 class="display" style="font-size:clamp(2.2rem,4.6vw,3.4rem)" data-reveal>See what it has<br>already recovered.</h2>
@@ -532,7 +592,10 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
 <footer>
   <div class="wrap" style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
     <span>{{ merchant_name or "Recovery Engine" }} · payment failure recovery</span>
-    <span class="mono" style="font-size:.74rem">deterministic · constrained · audited</span>
+    <span class="mono" style="font-size:.74rem">
+      <a href="/foundation">The story</a> · <a href="/model">The model</a> ·
+      deterministic · constrained · audited
+    </span>
   </div>
 </footer>
 {% endblock %}

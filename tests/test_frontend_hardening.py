@@ -189,3 +189,57 @@ def test_the_root_redirects_to_the_story(monkeypatch: Any) -> None:
     r = client.get("/", follow_redirects=False)
     assert r.status_code in (302, 307)
     assert r.headers["location"] == "/foundation"
+
+
+def test_the_story_page_is_reachable_from_the_public_pages(
+    monkeypatch: Any,
+) -> None:
+    """`/` redirects here, and for a while that was the ONLY way in: the
+    landing and the model page linked to each other and to the console, and
+    nothing linked back to the story. A front door reachable only by typing
+    the root URL is a page nobody who lands mid-site can find."""
+    client = _html_client(monkeypatch)
+    for path in ("/console", "/model"):
+        assert 'href="/foundation"' in client.get(path).text, path
+
+
+def test_the_headline_rupee_figure_is_one_number_everywhere(
+    monkeypatch: Any,
+) -> None:
+    """₹11,70,505 rounds to ₹11.71L. The landing carried a truncated
+    ₹11.70L while the story page and the README carried ₹11.71L — a reader
+    comparing two pages of the same product found two numbers."""
+    client = _html_client(monkeypatch)
+    for path in ("/console", "/foundation"):
+        body = client.get(path).text
+        assert "₹11.71L" in body, path
+        assert "₹11.70L" not in body, path
+
+
+# ── The console tour ─────────────────────────────────────────────────────────
+
+
+def test_every_tour_screenshot_the_landing_shows_is_actually_served(
+    monkeypatch: Any,
+) -> None:
+    """The twelve tour images shipped in the tree for a release before
+    anything referenced them, and nothing served them either — there is no
+    static mount in this app. Both halves are asserted here: the landing
+    names them, and each name resolves to a real webp."""
+    import re
+
+    client = _html_client(monkeypatch)
+    names = set(re.findall(r'/static/tour/([a-z_]+)\.webp', client.get("/console").text))
+    assert len(names) == 12, f"the landing lost tour shots: {sorted(names)}"
+    for name in sorted(names):
+        r = client.get(f"/static/tour/{name}.webp")
+        assert r.status_code == 200, name
+        assert r.headers["content-type"] == "image/webp", name
+        assert r.content[:4] == b"RIFF", name
+
+
+def test_an_unknown_tour_name_is_a_404_not_a_file_read(monkeypatch: Any) -> None:
+    """The path segment is checked against the directory listing taken at
+    import, so it can only ever name one of the shipped screenshots."""
+    client = _html_client(monkeypatch)
+    assert client.get("/static/tour/nope.webp").status_code == 404

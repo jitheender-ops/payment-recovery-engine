@@ -211,10 +211,13 @@ attribution join key), `promises_to_pay` (kept/broken ledger that feeds
 the next decision), `case_events` (hash-chained audit),
 `voice_call_queue` (the dial intent, written-ahead like every action).
 
-Twelve migrations, every one inspector-guarded and idempotent —
+Fifteen migrations, every one inspector-guarded and idempotent —
 `alembic upgrade head` runs on every container boot and is a no-op on a
 current schema. `scripts/check_migrations.py` proves the chain builds
-exactly the ORM's schema (empty→head, head→base→head, create_all→head).
+exactly the ORM's schema (empty→head, head→base→head, create_all→head),
+on SQLite by default and on Postgres with `--postgres <url>` — the second
+dialect because two migrations passed the SQLite run and then died on the
+first deploy, on SQL only Postgres type-checks.
 
 ---
 
@@ -306,8 +309,9 @@ watches pip + actions daily/weekly.
 ```
 
 All four green is the definition of "done" (AGENTS.md). As of this
-document: **739 tests passing, ruff clean, mypy --strict clean across
-94 files, migration chain consistent, semgrep + gitleaks clean in CI**.
+document: **884 tests passing, ruff clean, mypy --strict clean across
+96 files, migration chain consistent on both SQLite and Postgres, semgrep
++ gitleaks clean in CI**.
 
 ---
 
