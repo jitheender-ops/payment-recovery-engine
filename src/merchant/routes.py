@@ -579,6 +579,7 @@ async def _console_data() -> dict[str, Any] | None:
             ).one()
             exception_rows = (await session.execute(_EXCEPTIONS)).all()
             pending, scheduled = (await session.execute(_INFLIGHT)).one()
+            nav = await _nav_counts(session)
 
             # ── The receivables panel (B2B layer) ────────────────────────
             # Aging buckets, days-to-pay and promise effectiveness from the
@@ -763,6 +764,9 @@ async def _console_data() -> dict[str, Any] | None:
             exceptions=exceptions,
             health=health,
         ),
+        # The navigation's badges. Read in the same session block as
+        # everything else, so the ledger costs one connection, not two.
+        "nav": nav,
     }
 
 
@@ -914,6 +918,10 @@ async def live_console(request: Request) -> Any:
             "merchant_name": settings.merchant_name or None,
             "db_ok": data is not None,
             "data": data,
+            # Lifted out of `data` so the template reads it the same way every
+            # other console page does — the macro takes one argument named
+            # `nav` and must not have to know which page it is on.
+            "nav": (data or {}).get("nav"),
         },
     )
 
@@ -1036,6 +1044,20 @@ def _eval_summary() -> dict[str, Any]:
     }
 
 
+async def _nav_counts(session: Any) -> dict[str, int] | None:
+    """The navigation's badge counts, or None if they could not be read.
+
+    None rather than zeros on failure, and the macro then omits the badges:
+    a "0 disputes" a merchant believes is worse than no badge, and this read
+    runs on every page so it must never be the thing that fails one.
+    """
+    try:
+        return await console_data.nav_counts(session)
+    except Exception:
+        logger.warning("Navigation counts unavailable", exc_info=True)
+        return None
+
+
 async def _render_console(
     request: Request, template: str, build: Any, **extra: Any
 ) -> Any:
@@ -1050,10 +1072,12 @@ async def _render_console(
         return gated
 
     data: dict[str, Any] = {}
+    nav: dict[str, int] | None = None
     db_ok = True
     try:
         async with async_session_factory() as session:
             data = await build(session)
+            nav = await _nav_counts(session)
     except Exception:
         logger.exception("Console page %s could not read the database", template)
         db_ok = False
@@ -1062,7 +1086,7 @@ async def _render_console(
         request, template,
         {
             "merchant_name": get_settings().merchant_name or None,
-            "db_ok": db_ok, "data": data, **extra,
+            "db_ok": db_ok, "data": data, "nav": nav, **extra,
         },
     )
 
@@ -1587,11 +1611,21 @@ async def console_evidence(request: Request) -> Any:
     gated = _gate(request)
     if gated is not None:
         return gated
+    # The page needs no database; its navigation does. Read separately so a
+    # database that is down still renders the evidence — the numbers come off
+    # disk, and there is no reason to lose them to an unrelated outage.
+    nav = None
+    try:
+        async with async_session_factory() as session:
+            nav = await _nav_counts(session)
+    except Exception:
+        logger.warning("Navigation counts unavailable on /console/evidence")
     return templates.TemplateResponse(
         request, "console_evidence.html",
         {
             "merchant_name": get_settings().merchant_name or None,
             "db_ok": True,
+            "nav": nav,
             "data": {"eval": _eval_summary()},
         },
     )

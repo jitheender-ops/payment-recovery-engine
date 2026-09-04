@@ -47,6 +47,13 @@
     --green:#0E7A4D; --green-deep:#0B5E3C;
     --green-tint:rgba(14,122,77,.08); --green-line:rgba(14,122,77,.28);
     --red:#B3261E; --red-tint:rgba(179,38,30,.07);
+    /* Defined late: .pill-r, the ops heartbeat card and the nav badge have
+       all been asking for --red-line since they were written, and an
+       undefined custom property makes the whole declaration invalid at
+       computed-value time — so those borders were silently falling back to
+       whatever came before them. The green side has had its line token from
+       the start; this is its opposite number, same alpha. */
+    --red-line:rgba(179,38,30,.28);
     --sans:"Schibsted Grotesk",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     --mono:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
     --r:16px; --r-sm:10px;

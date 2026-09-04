@@ -1774,3 +1774,50 @@ async def customer_view(
         "rows": rows,
         "viewed_cases": sum(1 for r in rows if r["views"]),
     }
+
+
+async def nav_counts(session: AsyncSession) -> dict[str, int]:
+    """
+    The counts the navigation carries as badges — what needs a person, per
+    section.
+
+    Rendered on every console page, so it is three indexed COUNTs and nothing
+    else: no joins, no per-row work, no reuse of the panel readers (which
+    fetch rows this does not need). A badge that costs a page render is a
+    badge that gets removed six months later.
+
+    Only things automation has DELIBERATELY stopped short of are counted. A
+    number that merely describes volume ("42 open cases") would sit in the
+    navigation forever and teach the reader to ignore the badges — the whole
+    value of a count here is that a non-zero one means someone has to act.
+    """
+    from src.models import VoiceCallQueue
+    from src.receivables.models import AccountTask, CaseDispute
+
+    disputes = int(await session.scalar(
+        select(func.count()).select_from(CaseDispute).where(
+            CaseDispute.status == "open"
+        )
+    ) or 0)
+    tasks = int(await session.scalar(
+        select(func.count()).select_from(AccountTask).where(
+            AccountTask.status == "open"
+        )
+    ) or 0)
+    # Queued and unclaimed: a claimed call is the telephony leg working, which
+    # is not a thing anyone needs to do something about.
+    calls = int(await session.scalar(
+        select(func.count()).select_from(VoiceCallQueue).where(
+            VoiceCallQueue.state == "queued",
+            VoiceCallQueue.claimed_at.is_(None),
+        )
+    ) or 0)
+
+    return {
+        "disputes": disputes,
+        "tasks": tasks,
+        "calls": calls,
+        # What the Ledger badge shows: the worklist is the sum of the things
+        # that will not restart on their own.
+        "needs_you": disputes + tasks + calls,
+    }

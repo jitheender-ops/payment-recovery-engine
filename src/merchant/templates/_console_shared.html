@@ -11,15 +11,61 @@
 
 {% macro console_styles() %}
 <style>
+  /* ── Navigation ──────────────────────────────────────────────────────
+     Two expressions of one structure: a grouped strip where there is
+     horizontal room, a labelled drawer where there is not. See
+     _console_nav.html for why the grouping is not decoration. */
   .subnav-wrap{border-top:1px solid var(--line);background:var(--card)}
   .subnav{max-width:1160px;margin:0 auto;padding:0 clamp(1.25rem,4vw,2.5rem);
-    display:flex;gap:.35rem;overflow-x:auto;scrollbar-width:none}
+    display:flex;gap:0;overflow-x:auto;scrollbar-width:none}
   .subnav::-webkit-scrollbar{display:none}
+  .subnav-group{display:flex;gap:.35rem;flex:none;padding:0 .7rem;
+    border-left:1px solid var(--line)}
+  .subnav-group:first-child{padding-left:0;border-left:none}
+  .subnav-group:last-child{padding-right:0}
   .subnav-item{flex:none;padding:.7rem .85rem;font-size:.87rem;font-weight:500;
     color:var(--ink-3);text-decoration:none;border-bottom:2px solid transparent;
-    white-space:nowrap;transition:color .15s ease}
+    white-space:nowrap;transition:color .15s ease;
+    display:inline-flex;align-items:center;gap:.4rem}
   .subnav-item:hover{color:var(--ink)}
   .subnav-item.is-on{color:var(--green-deep);border-bottom-color:var(--green)}
+
+  /* A badge counts only what will not restart on its own, so a non-zero one
+     always means someone has to act. Never rendered as "0": the absence is
+     the message, and a zero badge trains the reader to stop looking. */
+  .nav-badge{font-family:var(--mono);font-size:.6rem;font-weight:600;
+    line-height:1;padding:.2rem .35rem;border-radius:999px;
+    background:var(--red-tint);color:var(--red);border:1px solid var(--red-line);
+    font-variant-numeric:tabular-nums}
+
+  .navdraw{display:none;border-top:1px solid var(--line);background:var(--card)}
+  .navdraw > summary{list-style:none;cursor:pointer;
+    padding:.75rem clamp(1.25rem,4vw,2.5rem);display:flex;align-items:center;
+    justify-content:space-between;gap:.75rem;font-size:.9rem;font-weight:500;
+    min-height:44px}
+  .navdraw > summary::-webkit-details-marker{display:none}
+  .navdraw > summary::marker{content:""}
+  .navdraw > summary:focus-visible{outline:2px solid var(--green);
+    outline-offset:-2px}
+  .navdraw-now{color:var(--ink)}
+  .navdraw-cue{width:.55rem;height:.55rem;flex:none;border-right:2px solid var(--ink-3);
+    border-bottom:2px solid var(--ink-3);transform:rotate(45deg) translateY(-2px);
+    transition:transform .15s ease}
+  .navdraw[open] .navdraw-cue{transform:rotate(-135deg) translateY(-2px)}
+  .navdraw-body{padding:0 clamp(1.25rem,4vw,2.5rem) .9rem}
+  .navdraw-label{font-family:var(--mono);font-size:.62rem;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);
+    margin:.9rem 0 .2rem}
+  .navdraw-item{display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap;
+    padding:.55rem 0;text-decoration:none;color:var(--ink);
+    border-bottom:1px solid var(--line);min-height:44px}
+  .navdraw-item:last-child{border-bottom:none}
+  .navdraw-item.is-on{color:var(--green-deep);font-weight:600}
+  .navdraw-blurb{color:var(--ink-3);font-size:.78rem;flex:1 1 100%}
+  @media (max-width:720px){
+    .subnav-wrap{display:none}
+    .navdraw{display:block}
+  }
 
   .phead{padding:clamp(2rem,5vh,2.8rem) 0 .3rem}
   .peyebrow{font-family:var(--mono);font-size:.7rem;font-weight:600;
@@ -79,6 +125,33 @@
     color:var(--ink-2);background:var(--well);white-space:nowrap}
   .pill-g{color:var(--green-deep);border-color:var(--green-line);background:var(--green-tint)}
   .pill-r{color:var(--red);border-color:var(--red-line);background:var(--red-tint)}
+  /* Severity carries a WORD as well as a colour. MASTER.md's accessibility
+     rule and plain sense: a merchant with any red-green deficiency reads the
+     label, and a printed page has no colour at all. The dot is the redundant
+     half, not the informative one. */
+  .sev{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--mono);
+    font-size:.66rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    padding:.2rem .5rem .2rem .42rem;border-radius:999px;
+    border:1px solid var(--line-2);background:var(--well);color:var(--ink-2);
+    white-space:nowrap}
+  .sev::before{content:"";width:6px;height:6px;border-radius:50%;
+    background:currentColor;flex:none}
+  .sev-stop{color:var(--red);border-color:var(--red-line);background:var(--red-tint)}
+  .sev-wait{color:#8A5A00;border-color:rgba(138,90,0,.28);background:rgba(138,90,0,.07)}
+  .sev-info{color:var(--green-deep);border-color:var(--green-line);background:var(--green-tint)}
+
+  /* The filter row every list page uses. Anchors, not buttons: a filter is a
+     place you can link someone to, and the back button has to work. */
+  .filters{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:1.4rem}
+  .filters a{font-family:var(--mono);font-size:.72rem;text-decoration:none;
+    color:var(--ink-2);border:1px solid var(--line-2);border-radius:999px;
+    padding:.34rem .72rem;background:var(--card);white-space:nowrap;
+    min-height:32px;display:inline-flex;align-items:center;gap:.35rem}
+  .filters a:hover{border-color:var(--green);color:var(--green-deep)}
+  .filters a.is-on{background:var(--green-tint);border-color:var(--green-line);
+    color:var(--green-deep);font-weight:600}
+  .filters a .n{color:var(--ink-3);font-variant-numeric:tabular-nums}
+  .filters a.is-on .n{color:var(--green-deep)}
 
   .empty{background:var(--card);border:1px solid var(--line);border-radius:12px;
     padding:2rem;margin-top:1.4rem;max-width:62ch}
@@ -88,6 +161,56 @@
     border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:.78rem;
     overflow-x:auto}
 </style>
+{% endmacro %}
+
+{# ── The four shapes every console page reaches for ────────────────────────
+   Written as macros rather than copied markup so a page added later inherits
+   the decisions here — the a11y word beside every severity colour, the
+   "0 is a finding" rule on tiles, the linkable filter — instead of
+   re-litigating them. Add to these rather than hand-rolling a variant.
+   Documented in docs/design-system/recovery-console/MASTER.md. #}
+
+{# A figure with its label and, when there is one, the sentence that makes it
+   mean something. `tone` is "", "green" or "red". #}
+{% macro stat_tile(label, value, foot=None, tone="") %}
+<div class="stat">
+  <div class="stat-l">{{ label }}</div>
+  <div class="stat-v {{ tone }}">{{ value }}</div>
+  {% if foot %}<div class="stat-f">{{ foot }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+{# Why there is nothing here, and what would put something here. Never a
+   blank space and never a bare zero: PRODUCT.md's rule is that an empty
+   ledger says it is empty, because zeros and broken reads look identical. #}
+{% macro empty_state(title, why, hint=None) %}
+<div class="empty">
+  <b>{{ title }}</b>
+  <p>{{ why }}</p>
+  {% if hint %}<code>{{ hint }}</code>{% endif %}
+</div>
+{% endmacro %}
+
+{# Severity as a word plus a colour, never a colour alone.
+   level: "stop" (a person must act) · "wait" (it will resolve, watch it) ·
+   "info" (worth knowing, costs nothing). #}
+{% macro severity_pill(level, label) %}
+<span class="sev sev-{{ level }}">{{ label }}</span>
+{% endmacro %}
+
+{# A row of linkable filters. `options` is [(value, label, count_or_none)];
+   `base` is the path, `param` the query key, `current` the active value.
+   Anchors so every view is a URL someone can send to a colleague. #}
+{% macro filter_bar(base, param, options, current, all_label="all") %}
+<div class="filters" role="navigation" aria-label="Filters">
+  <a href="{{ base }}" class="{{ 'is-on' if not current or current == 'all' }}">{{ all_label }}</a>
+  {% for value, label, count in options %}
+  <a href="{{ base }}?{{ param }}={{ value }}"
+     class="{{ 'is-on' if current == value }}"
+     {% if current == value %}aria-current="page"{% endif %}>{{ label }}{% if count is not none %}
+     <span class="n">{{ count }}</span>{% endif %}</a>
+  {% endfor %}
+</div>
 {% endmacro %}
 
 {# A horizontal bar row: label, proportional bar, value. `frac` is 0..1. #}

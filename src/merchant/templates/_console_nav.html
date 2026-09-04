@@ -7,9 +7,49 @@
   reason to open it. Everything now lives on this site, and this strip is
   what makes that navigable.
 
-  `active` is the slug of the current page.
+  GROUPED, because a flat strip stopped scaling. Ten items already scroll
+  sideways on a phone, and the pages coming (payments, promises, plans,
+  disputes, analytics, safety, activity) roughly double that. The grouping is
+  not decoration: it is the four questions the console answers — where is the
+  money, who owes it, what did we say to them, and can any of this be
+  trusted.
+
+  It is expressed differently at each width because the room differs. Desktop
+  keeps one strip and separates the groups with a hairline; there is no
+  vertical room for labels and doubling the header's height to gain them is a
+  bad trade. Under 720px the strip becomes a disclosure drawer where the
+  labels fit and are worth having. `<details>` and not a script, because the
+  console's rule is that every page is complete without JavaScript, and a
+  navigation that needs JS to open is the worst possible place to break it.
+
+  `active` is the slug of the current page. `nav` is console_data.nav_counts()
+  or None — badges are omitted rather than zeroed when the read failed, since
+  a "0" a merchant trusts is worse than no badge at all.
 #}
-{% macro console_nav(active, merchant_name) %}
+
+{% macro _badge(n) %}{% if n %}<span class="nav-badge" aria-label="{{ n }} need you">{{ n }}</span>{% endif %}{% endmacro %}
+
+{% macro console_nav(active, merchant_name, nav=None) %}
+{% set groups = [
+    ("Recovery", [
+        ("live",     "Ledger",   "Money, worklist, ladder, promises", "needs_you"),
+        ("pipeline", "Pipeline", "Where the money leaves", none),
+        ("routing",  "Routing",  "Which bank, on which rail", none),
+        ("cases",    "Cases",    "Every unit of revenue at risk", none),
+        ("batch",    "Batch",    "Recover across a cohort, and measure it", none),
+    ]),
+    ("Receivables", [
+        ("accounts", "Buyers",   "Who owes you, and who you can reach", "disputes"),
+    ]),
+    ("Customer", [
+        ("messages", "Messages", "What your customers actually read", none),
+        ("customer", "Customer", "The page they open, and whether they did", none),
+    ]),
+    ("Trust", [
+        ("ops",      "Engine",   "Is the machinery running", "calls"),
+        ("evidence", "Evidence", "Does the agent beat the baseline", none),
+    ]),
+] %}
 <nav class="nav">
   <div class="nav-in">
     <a class="brand" href="/console">
@@ -22,24 +62,50 @@
       </form>
     </div>
   </div>
+
+  {# ── Desktop: one strip, groups separated by a hairline ──────────────── #}
   <div class="subnav-wrap">
-    <div class="subnav">
-      {% for slug, label, blurb in [
-          ("live",     "Ledger",   "Money, worklist, ladder, promises"),
-          ("pipeline", "Pipeline", "Where the money leaves"),
-          ("routing",  "Routing",  "Which bank, on which rail"),
-          ("cases",    "Cases",    "Every unit of revenue at risk"),
-          ("batch",    "Batch",    "Recover across a cohort, and measure it"),
-          ("accounts", "Buyers",   "Who owes you, and who you can reach"),
-          ("messages", "Messages", "What your customers actually read"),
-          ("customer", "Customer",  "The page they open, and whether they did"),
-          ("ops",      "Engine",   "Is the machinery running"),
-          ("evidence", "Evidence", "Does the agent beat the baseline"),
-      ] %}
-      <a class="subnav-item {% if active == slug %}is-on{% endif %}"
-         href="/console/{{ slug }}" title="{{ blurb }}">{{ label }}</a>
+    <div class="subnav" role="navigation" aria-label="Console sections">
+      {% for label, items in groups %}
+      <div class="subnav-group">
+        {% for slug, name, blurb, count_key in items %}
+        <a class="subnav-item {% if active == slug %}is-on{% endif %}"
+           href="/console/{{ slug }}" title="{{ blurb }}"
+           {% if active == slug %}aria-current="page"{% endif %}>{{ name }}{{
+             _badge(nav[count_key]) if nav and count_key else "" }}</a>
+        {% endfor %}
+      </div>
       {% endfor %}
     </div>
   </div>
+
+  {# ── Under 720px: a drawer, where the group labels fit ──────────────── #}
+  <details class="navdraw">
+    <summary>
+      <span class="navdraw-now">
+        {%- for label, items in groups -%}{%- for slug, name, blurb, ck in items -%}
+          {%- if active == slug -%}{{ label }} · {{ name }}{%- endif -%}
+        {%- endfor -%}{%- endfor -%}
+      </span>
+      <span class="navdraw-cue" aria-hidden="true"></span>
+    </summary>
+    <div class="navdraw-body">
+      {% for label, items in groups %}
+      <p class="navdraw-label">{{ label }}</p>
+      {% for slug, name, blurb, count_key in items %}
+      <a class="navdraw-item {% if active == slug %}is-on{% endif %}"
+         href="/console/{{ slug }}"
+         {% if active == slug %}aria-current="page"{% endif %}>
+        {# Badge before the blurb: the blurb takes the full row width, so a
+           badge after it wraps onto a third line and stops reading as part
+           of the item it belongs to. #}
+        <span>{{ name }}</span>
+        {{ _badge(nav[count_key]) if nav and count_key else "" }}
+        <span class="navdraw-blurb">{{ blurb }}</span>
+      </a>
+      {% endfor %}
+      {% endfor %}
+    </div>
+  </details>
 </nav>
 {% endmacro %}

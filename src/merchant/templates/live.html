@@ -22,7 +22,7 @@
 #}
 
 {% block body %}
-{{ console_nav("live", merchant_name) }}
+{{ console_nav("live", merchant_name, nav) }}
 
 {% if db_ok and data.has_data %}
 {# The heartbeat sits above everything because it qualifies everything: a

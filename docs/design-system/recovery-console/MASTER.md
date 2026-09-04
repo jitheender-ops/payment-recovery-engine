@@ -53,6 +53,46 @@ decoration; never introduce a second accent.
 - **Code**: dark block (`#161A1E`) on the light page — the one dark surface,
   reserved for the thing you paste.
 
+## Navigation (added 2026-09-04, v2.1)
+
+The console outgrew a flat strip at ten pages. Grouped into the four
+questions it answers — **Recovery · Receivables · Customer · Trust** — and
+expressed twice, because the available room differs:
+
+- **≥720px**: one strip, groups separated by a hairline (`.subnav-group`,
+  `border-left:1px solid var(--line)`). No group labels: there is no vertical
+  room and doubling the header to gain them is a bad trade.
+- **<720px**: a `<details>` drawer (`.navdraw`) where the labels fit and earn
+  their place. `<details>`, never a script — a nav that needs JS to open is
+  the worst place for the no-JS rule to break. Summary shows
+  "Group · Current page"; the chevron is a rotated border, no icon file.
+
+**Badges** (`.nav-badge`) count only what automation has deliberately stopped
+short of — open disputes, open call tasks, unclaimed queued calls. Never
+volume. **Never rendered as "0"**: the absence is the message, and a zero
+badge trains the reader to stop looking at badges. Unreadable counts render
+*no* badge rather than zeros, since a "0 disputes" a merchant believes is
+worse than nothing.
+
+## Shared macros (`_console_shared.html`)
+
+Four shapes every list or detail page reaches for. Use these rather than
+hand-rolling a variant, so a page added later inherits the decisions instead
+of re-litigating them.
+
+- **`stat_tile(label, value, foot, tone)`** — a figure, its label, and the
+  sentence that makes it mean something. `tone` is `""`, `"green"`, `"red"`.
+- **`empty_state(title, why, hint)`** — why there is nothing here and what
+  would put something here. Never a blank space, never a bare zero.
+- **`severity_pill(level, label)`** — `stop` (a person must act) · `wait`
+  (it resolves itself, watch it) · `info`. Carries a **word** as well as a
+  colour: the AA rule and plain sense — a merchant with a colour deficiency
+  reads the label, and print has no colour at all. The dot is redundant by
+  design.
+- **`filter_bar(base, param, options, current)`** — anchors, not buttons. A
+  filter is a place you can link a colleague to, and the back button must
+  work.
+
 ## Motion (native only — no animation library)
 
 - Hero: staged entrance (`data-stage` 1→5), rise + blur-out, `.95s`
@@ -80,6 +120,8 @@ decoration; never introduce a second accent.
 ## Non-negotiables
 
 - Contrast ≥4.5:1 for all text (AA); `--ink-3` is the lightest allowed gray.
+- Status is never carried by colour alone — every severity colour is paired
+  with a word (see `severity_pill`).
 - No eyebrows/kickers above headings; no icon-card grids as page structure;
   chasers render as ledger rows, not cards.
 - Every state styled: hover, focus, error, empty ("ledger is empty"), DB-down

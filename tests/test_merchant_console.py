@@ -32,6 +32,7 @@ from src.cases import open_case, record_promise
 from src.classifier.taxonomy import FailureClass
 from src.config import get_settings
 from src.guardrail.rules import GuardrailRules
+from src.merchant import console_data
 from src.merchant.routes import _eval_headline, _failure_classes
 from src.merchant.routes import router as merchant_router
 from src.models import (
@@ -425,8 +426,17 @@ async def test_folded_pages_render(
     r = console.get(path)
     assert r.status_code == 200
     # The whole point of folding them in: every page reaches every other one.
-    for label in ("Ledger", "Pipeline", "Routing", "Cases", "Engine", "Evidence"):
-        assert f">{label}</a>" in r.text, f"{path} lost the {label} nav link"
+    #
+    # Asserted on the href, not on `>Label</a>`. The exact-markup form broke
+    # the day the Ledger link gained a badge — it was testing one spelling of
+    # the link rather than the link, and the property here is reachability.
+    for slug, label in (
+        ("live", "Ledger"), ("pipeline", "Pipeline"), ("routing", "Routing"),
+        ("cases", "Cases"), ("ops", "Engine"), ("evidence", "Evidence"),
+    ):
+        assert f'href="/console/{slug}"' in r.text, (
+            f"{path} lost the {label} nav link"
+        )
 
 
 @pytest.mark.parametrize("path", _FOLDED)
@@ -1496,4 +1506,92 @@ def test_the_customer_view_needs_a_session(monkeypatch: Any) -> None:
         "/console/customer/open", data={"case_id": str(uuid.uuid4())},
         follow_redirects=False,
     ).status_code == 303
+    get_settings.cache_clear()
+
+
+# ── Navigation: grouping, badges, and the drawer ─────────────────────────────
+
+
+async def test_the_nav_badges_count_only_what_needs_a_person(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    A badge that merely describes volume would sit in the navigation forever
+    and teach the reader to ignore every badge. These count open disputes,
+    open call tasks and unclaimed queued calls — things automation has
+    deliberately stopped short of, which do not restart on their own.
+    """
+    await _seed(db_sessionmaker)
+    async with db_sessionmaker() as s:
+        counts = await console_data.nav_counts(s)
+
+    assert counts["needs_you"] == (
+        counts["disputes"] + counts["tasks"] + counts["calls"]
+    )
+    assert counts["disputes"] >= 1, "the seed opens a dispute"
+    body = console.get("/console/cases").text
+    assert 'class="nav-badge"' in body
+
+
+async def test_a_zero_never_renders_as_a_badge(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The absence is the message. A "0" trains the reader to stop looking."""
+    # Nothing seeded: every count is zero.
+    body = console.get("/console/cases").text
+    assert 'class="nav-badge"' not in body
+
+
+async def test_every_console_page_carries_the_grouped_nav_and_the_drawer(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    Two expressions of one structure: a grouped strip where there is
+    horizontal room, a labelled drawer under 720px where there is not. The
+    drawer is <details>, not script — a navigation that needs JavaScript to
+    open is the worst possible place for the console to break.
+    """
+    await _seed(db_sessionmaker)
+    for path in ("/console/live", "/console/cases", "/console/ops",
+                 "/console/evidence", "/console/customer"):
+        body = console.get(path).text
+        assert 'class="subnav-group"' in body, path
+        assert 'class="navdraw"' in body, path
+        assert "<details" in body, path
+        # The four groups the console is organised around.
+        for label in ("Recovery", "Receivables", "Customer", "Trust"):
+            assert f">{label}</p>" in body, f"{path} lost the {label} group"
+
+
+async def test_the_current_page_is_marked_for_a_screen_reader(
+    console: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Colour alone does not say "you are here"."""
+    await _seed(db_sessionmaker)
+    assert 'aria-current="page"' in console.get("/console/cases").text
+
+
+async def test_the_nav_survives_a_database_it_cannot_read(
+    monkeypatch: Any, db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    The badge read runs on every page, so it must never be the thing that
+    fails one. It degrades to no badges — never to zeros a merchant believes.
+    """
+    async def boom(_session: Any) -> Any:
+        raise RuntimeError("database is gone")
+
+    monkeypatch.setattr("src.merchant.routes.async_session_factory", db_sessionmaker)
+    monkeypatch.setattr(console_data, "nav_counts", boom)
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(merchant_router)
+    client = TestClient(app)
+    client.post("/console/login", data={"password": PASSWORD})
+
+    r = client.get("/console/cases")
+    assert r.status_code == 200
+    assert 'href="/console/live"' in r.text
+    assert 'class="nav-badge"' not in r.text
     get_settings.cache_clear()
