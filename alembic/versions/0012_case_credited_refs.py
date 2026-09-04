@@ -39,13 +39,19 @@ def upgrade() -> None:
     # NOT NULL with a server_default of '[]' from the start: no post-add
     # ALTER (SQLite cannot ALTER COLUMN) and no backfill gap — rows get the
     # empty list the model default would have given them.
+    #
+    # sa.text, not the bare string: SQLAlchemy renders a plain-string
+    # server_default by wrapping it in quotes, so "'[]'" became '''[]''' on
+    # Postgres — invalid JSON, and the first deploy died on it. The migration
+    # chain check runs on SQLite, which does not validate JSON defaults, so
+    # nothing local caught it. sa.text passes the literal through verbatim.
     op.add_column(
         "recovery_cases",
         sa.Column(
             "credited_refs",
             sa.dialects.postgresql.JSONB(),
             nullable=False,
-            server_default="'[]'",
+            server_default=sa.text("'[]'"),
         ),
     )
     # Seed from recovered_ref so existing single-capture cases keep their
