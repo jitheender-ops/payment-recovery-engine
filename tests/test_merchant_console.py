@@ -554,6 +554,7 @@ _FOLDED = [
     "/console/pipeline", "/console/routing", "/console/cases",
     "/console/ops", "/console/evidence", "/console/messages",
     "/console/accounts", "/console/payments", "/console/customer",
+    "/console/batch",
     "/console/receivables", "/console/promises", "/console/plans",
     "/console/disputes", "/console/voice", "/console/safety",
     "/console/activity", "/console/search", "/console/settings",
@@ -575,16 +576,20 @@ def test_every_gated_console_page_is_in_this_list() -> None:
     }
     from fastapi.routing import APIRoute
 
-    app = FastAPI()
-    app.include_router(merchant_router)
+    # merchant_router.routes, NOT app.routes. This FastAPI wraps an included
+    # router in a single _IncludedRouter object instead of flattening its
+    # routes onto the app, so walking app.routes finds no APIRoute at all —
+    # and a set difference against an empty set passes whatever the list says.
+    # The first version of this test was green because it checked nothing.
     static_pages = {
         route.path
-        for route in app.routes
+        for route in merchant_router.routes
         if isinstance(route, APIRoute)
         and "GET" in route.methods
         and route.path.startswith("/console")
         and "{" not in route.path
     }
+    assert static_pages, "route introspection found nothing — the walk is broken"
     missing = static_pages - exempt - set(_FOLDED)
     assert not missing, (
         f"gated console pages outside the contract tests: {sorted(missing)}"

@@ -550,7 +550,7 @@ a case with no customer on it is a 404 rather than an empty page.
 
 Separate from the ops dashboard and built for a different reader: the merchant
 whose revenue is leaking, not the operator debugging the machinery. One public
-page, twenty-two gated ones, all served by the API itself.
+page, twenty-six gated ones, all served by the API itself.
 
 | Route | Who | What |
 |---|---|---|
@@ -928,7 +928,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**1,012 tests across 59 files, 80% statement coverage over `src/`.** The money
+**1,016 tests across 59 files, 80% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |

@@ -284,3 +284,52 @@ def test_the_customer_home_carries_the_money_page_headers(monkeypatch: Any) -> N
         ), path
         assert r.headers.get("cache-control") == "no-store, private", path
         assert r.headers.get("referrer-policy") == "no-referrer", path
+
+
+def test_the_page_count_the_story_advertises_is_the_one_that_exists(
+    monkeypatch: Any,
+) -> None:
+    """
+    /foundation tells a stranger how many console pages the demo contains.
+    That is a restated number, and this repo's rule is that a restated number
+    drifts — so it is checked against the router rather than trusted. Add a
+    console page without updating the copy and this fails, which is the point:
+    the alternative is marketing that quietly becomes false.
+    """
+    import re
+
+    from fastapi.routing import APIRoute
+
+    from src.merchant.routes import router as merchant_router
+
+    # The router itself: this FastAPI wraps an included router rather than
+    # flattening it onto the app, so app.routes carries no APIRoute and any
+    # count taken from it is zero.
+    gated = {
+        route.path
+        for route in merchant_router.routes
+        if isinstance(route, APIRoute)
+        and "GET" in route.methods
+        and route.path.startswith("/console")
+        # The public landing and the login door are not gated pages.
+        and route.path not in ("/console", "/console/login")
+    }
+
+    assert gated, "route introspection found nothing — the walk is broken"
+
+    words = {
+        20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
+        24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
+        27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine",
+        30: "thirty",
+    }
+    expected = words.get(len(gated))
+    assert expected, f"{len(gated)} gated pages — extend the number words"
+
+    body = _html_client(monkeypatch).get("/foundation").text
+    claimed = re.search(r"<b>([a-z-]+) console pages</b>", body)
+    assert claimed, "/foundation stopped stating a page count"
+    assert claimed.group(1) == expected, (
+        f"/foundation says {claimed.group(1)} console pages; the router has "
+        f"{len(gated)} ({expected})"
+    )
