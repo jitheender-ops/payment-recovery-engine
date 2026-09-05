@@ -37,10 +37,22 @@
                   {{ severity_pill('info', 'Active') }}
                 {% elif s.state == 'NOT CONFIGURED' %}
                   {{ severity_pill('stop', 'Not configured') }}
+                {% elif s.state == 'NOT IN USE' %}
+                  {# The gate is real and applies the moment its leg runs.
+                     Nothing runs it on this deployment, and "active" on a page
+                     a compliance reviewer reads would imply otherwise. #}
+                  {{ severity_pill('wait', 'Not in use') }}
                 {% elif s.state == 'broken' %}
                   {{ severity_pill('stop', 'Broken') }}
                 {% else %}
                   {{ s.state }}
+                {% endif %}
+                {# "We checked and it is on" and "this cannot be off" are
+                   different claims; a safety page must not blur them. #}
+                {% if s.source == 'structural' %}
+                <span class="faint" style="display:block;font-size:.66rem;
+                      font-family:var(--mono);letter-spacing:.08em;margin-top:.25rem">
+                  BY CONSTRUCTION</span>
                 {% endif %}
               </td>
               <td>{{ s.detail }}</td>

@@ -928,7 +928,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**1,008 tests across 59 files, 80% statement coverage over `src/`.** The money
+**1,012 tests across 59 files, 80% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |
@@ -1040,6 +1040,19 @@ shared test seed leaves that list empty — the loop never ran. Found by loading
 all twenty-four pages against the seeded demo book, which is now the last step
 of every console change. Shares are computed in the read; nothing in this
 console is computed in a template.
+
+**The Safety Center was asserting nine of its own claims.** Nine safeguards
+rendered a hardcoded "active" with nothing behind it, on the one page a
+compliance reviewer reads. Two were provably wrong: the blackout window is
+empty when its start and end hours match — `is_in_blackout` computes
+`start <= hour < end`, false for every hour, which is how this suite disables
+it — so the page printed "active · 00:00–00:00 IST" for a safeguard that
+fired at no hour of the day; and `voice_chaser_enabled` defaults to **false**,
+so a stock deployment queues no call and the grounding gate was reported as
+guarding a leg that never runs. Both are derived now, and every row says
+whether it came from a live read or is **true by construction** — "we checked
+and it is on" and "this cannot be off" are different claims and a safety page
+must not blur them.
 
 **The PII test covered seven pages out of twenty-two.** Three contract tests
 run over one list — requires a session, renders, leaks no customer identifier

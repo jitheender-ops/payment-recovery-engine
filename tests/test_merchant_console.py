@@ -2420,3 +2420,86 @@ async def test_the_rails_page_renders_once_there_is_a_method_to_draw(
     for row in methods:
         assert 0.0 <= row["frac"] <= 1.0
         assert row["pct"] == pytest.approx(row["frac"] * 100, abs=0.05)
+
+
+# ── The Safety Center must not claim a safeguard it cannot verify ────────────
+
+
+async def test_an_empty_blackout_window_is_not_reported_as_active(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    start == end is an EMPTY window: is_in_blackout computes
+    `start <= hour < end`, false for every hour. It is how this suite disables
+    the blackout and it is a setting an operator can reach — so the page used
+    to print "active · 00:00-00:00 IST" for a safeguard that fires at no hour
+    of the day. On the one page a compliance reviewer reads.
+    """
+    monkeypatch.setenv("RETRY_BLACKOUT_START_HOUR", "0")
+    monkeypatch.setenv("RETRY_BLACKOUT_END_HOUR", "0")
+    get_settings.cache_clear()
+    async with db_sessionmaker() as s:
+        rows = (await console_data.safety_state(s))["safeguards"]
+    blackout = next(r for r in rows if r["name"] == "Blackout window")
+    assert blackout["state"] == "NOT CONFIGURED"
+    assert "no hour is quiet" in blackout["detail"]
+    get_settings.cache_clear()
+
+
+async def test_a_real_blackout_window_is_reported_with_its_size(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """And the honest opposite: 23:00-07:00 is eight quiet hours."""
+    monkeypatch.setenv("RETRY_BLACKOUT_START_HOUR", "23")
+    monkeypatch.setenv("RETRY_BLACKOUT_END_HOUR", "7")
+    get_settings.cache_clear()
+    async with db_sessionmaker() as s:
+        rows = (await console_data.safety_state(s))["safeguards"]
+    blackout = next(r for r in rows if r["name"] == "Blackout window")
+    assert blackout["state"] == "active"
+    assert "8h quiet" in blackout["detail"]
+    get_settings.cache_clear()
+
+
+async def test_voice_grounding_is_not_active_when_no_call_is_ever_placed(
+    db_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: Any
+) -> None:
+    """
+    voice_chaser_enabled defaults to false, so a stock deployment queues no
+    call and the gate guards a leg that never runs. The gate is real; saying
+    "active" implies something is being guarded right now.
+    """
+    monkeypatch.setenv("VOICE_CHASER_ENABLED", "false")
+    get_settings.cache_clear()
+    async with db_sessionmaker() as s:
+        rows = (await console_data.safety_state(s))["safeguards"]
+    voice = next(r for r in rows if r["name"] == "Voice grounding")
+    assert voice["state"] == "NOT IN USE"
+
+    monkeypatch.setenv("VOICE_CHASER_ENABLED", "true")
+    get_settings.cache_clear()
+    async with db_sessionmaker() as s:
+        rows = (await console_data.safety_state(s))["safeguards"]
+    voice = next(r for r in rows if r["name"] == "Voice grounding")
+    assert voice["state"] == "active"
+    get_settings.cache_clear()
+
+
+async def test_every_safeguard_says_whether_it_was_read_or_is_structural(
+    db_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """
+    "We checked and it is on" and "this cannot be off" are different claims,
+    and a safety page must not blur them. Nine rows were asserting "active"
+    with nothing behind the assertion; the ones that genuinely cannot be
+    switched off now say so, and the rest come from a live read.
+    """
+    async with db_sessionmaker() as s:
+        rows = (await console_data.safety_state(s))["safeguards"]
+    assert rows
+    for row in rows:
+        assert row.get("source") in ("read", "structural"), row["name"]
+    structural = {r["name"] for r in rows if r["source"] == "structural"}
+    assert structural == {
+        "Idempotency", "Fire-time re-validation", "Dispute freeze",
+    }, structural

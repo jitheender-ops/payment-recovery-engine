@@ -2465,6 +2465,18 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
     Read from the enforcing modules, never restated in copy. A row that says
     'active' must have come from a live read. A row that says NOT CONFIGURED
     must have come from a check that the thing is actually not configured.
+
+    Each row also carries `source`, because "we checked and it is on" and
+    "this cannot be off" are different claims and a safety page must not blur
+    them:
+
+      "read"       — derived from settings or a live check this call made.
+      "structural" — true by construction. The idempotency key is a UNIQUE
+                     constraint; the guardrail re-runs at fire time because
+                     the scheduler calls it; a dispute freezes its case
+                     because the orchestrator branches on it. There is no
+                     switch, so there is nothing to read — and saying so is
+                     more honest than implying a check happened.
     """
     from src.audit_chain import AuditChainNotKeyedError, verify_chain
     from src.classifier.taxonomy import FailureClass
@@ -2489,6 +2501,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Hard-decline blocklist",
         "description": "Classes the engine will never retry",
         "state": "active",
+        "source": "read",
         "detail": f"{len(hard_declines)} classes blocked",
     })
 
@@ -2498,6 +2511,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Guardrail rules",
         "description": "Every rule runs on every attempt, no short-circuit",
         "state": "active",
+        "source": "read",
         "detail": f"{len(rule_names)} rules enforce",
     })
 
@@ -2506,6 +2520,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Retry cap",
         "description": "Maximum attempts per payment",
         "state": "active",
+        "source": "read",
         "detail": f"{settings.max_retries_per_payment} attempts max",
     })
 
@@ -2514,6 +2529,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Per-customer rate limit",
         "description": f"Max {settings.max_nudges_per_customer_24h} nudges per customer per 24h",
         "state": "active",
+        "source": "read",
         "detail": f"{settings.max_nudges_per_customer_24h}/24h",
     })
 
@@ -2522,17 +2538,33 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Consent window",
         "description": "No retry after this window from the original charge",
         "state": "active",
+        "source": "read",
         "detail": f"{settings.consent_window_hours}h",
     })
 
     # 6. Blackout window
+    #
+    # start == end is an EMPTY window: is_in_blackout() computes
+    # `start <= hour < end`, which is false for every hour. That is how the
+    # suite disables the blackout, and it is a setting an operator can reach —
+    # so a page that printed "active · 00:00-00:00 IST" would be claiming a
+    # safeguard that fires for no hour of the day. Derived from the same
+    # function the rule uses, so the two cannot disagree.
+    from src.guardrail.rules import is_in_blackout as _in_blackout
+
+    blackout_hours = sum(1 for hour in range(24) if _in_blackout(hour, settings))
     safeguards.append({
         "name": "Blackout window",
         "description": "No retries during overnight hours (IST)",
-        "state": "active",
+        "state": "active" if blackout_hours else "NOT CONFIGURED",
+        "source": "read",
         "detail": (
             f"{settings.retry_blackout_start_hour:02d}:00–"
-            f"{settings.retry_blackout_end_hour:02d}:00 IST"
+            f"{settings.retry_blackout_end_hour:02d}:00 IST "
+            f"({blackout_hours}h quiet)"
+            if blackout_hours
+            else "start and end are the same hour — no hour is quiet, "
+                 "retries may fire at any time"
         ),
     })
 
@@ -2541,6 +2573,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Idempotency",
         "description": "Unique key per attempt, UNIQUE constraint in the database",
         "state": "active",
+        "source": "structural",
         "detail": "enforced by schema",
     })
 
@@ -2552,6 +2585,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
             "not just at decision time"
         ),
         "state": "active",
+        "source": "structural",
         "detail": "always on by design",
     })
 
@@ -2560,6 +2594,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Dispute freeze",
         "description": "An open dispute freezes all chasing on that case",
         "state": "active",
+        "source": "structural",
         "detail": "enforced in orchestrator",
     })
 
@@ -2579,6 +2614,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "LLM fallback",
         "description": "XGBoost baseline runs when LLM is unavailable",
         "state": "active" if llm_configured else "NOT CONFIGURED",
+        "source": "read",
         "detail": (
             f"provider: {settings.llm_provider}"
             if llm_configured
@@ -2587,13 +2623,18 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
     })
 
     # 11. Voice grounding
+    # voice_chaser_enabled defaults to FALSE, so on a stock deployment no call
+    # is ever queued and this gate guards a leg that never runs. The gate is
+    # real and applies the moment the leg does — but "active" on a page a
+    # compliance reviewer reads implies something is being guarded right now.
     safeguards.append({
         "name": "Voice grounding",
         "description": (
             "The voice agent answers only from the case's own "
             "facts and abstains rather than inventing"
         ),
-        "state": "active",
+        "state": "active" if settings.voice_chaser_enabled else "NOT IN USE",
+        "source": "read",
         # SUPPORT_FLOOR, not the number 70: this page's whole promise is that
         # it reads the enforcing module. Tuning the gate and leaving a stale
         # figure here would make the safety page the thing that lies.
@@ -2608,6 +2649,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "B2B contact bounds",
         "description": "One contact per account per rung, business hours only",
         "state": "active",
+        "source": "read",
         "detail": (
             f"{len(INVOICE_LADDER)} rungs, Mon–Fri "
             f"{B2B_OPEN_HOUR:02d}:{B2B_OPEN_MINUTE:02d}–"
@@ -2621,6 +2663,7 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
         "name": "Rate limiting",
         "description": "Per-customer contact budget enforcement",
         "state": "active",
+        "source": "read",
         "detail": "shared (Redis)" if redis_configured else "per-process (in-memory)",
     })
 
@@ -2664,6 +2707,8 @@ async def safety_state(session: AsyncSession) -> dict[str, Any]:
     safeguards.append({
         "name": "Audit chain",
         "description": "HMAC hash-chained case events with periodic checkpoints",
+        # The only row backed by an actual verification pass, not a setting.
+        "source": "read",
         "state": (
             "active" if chain_state.get("intact")
             else "NOT CONFIGURED" if not chain_state.get("keyed")
