@@ -847,8 +847,10 @@ disk are never ambiguous about which population they describe.
 │   │                     #    notice at the top of that file)
 │   ├── voice/            # Layer 8: pipeline.py (the 4 gates), dialogue,
 │   │                     #   knowledge, facts, sarvam.py, webhook.py
-│   ├── merchant/         # The merchant console: routes.py, console_data.py
-│   │                     #   (the read layer), receivables_api.py, templates/
+│   ├── merchant/         # The merchant console — 1 public page and 22 gated:
+│   │                     #   routes.py, console_data.py (the read layer),
+│   │                     #   receivables_api.py, templates/ (one per page, plus
+│   │                     #   the _console_nav and _console_shared macros)
 │   ├── customer/         # The three customer-facing surfaces, all signed-link
 │   │                     #   only: /recover/<token> (one case — pay, promise,
 │   │                     #   instalments, dispute, opt out), /mine/<token>
@@ -872,7 +874,8 @@ disk are never ambiguous about which population they describe.
 │   ├── scenario_generator.py
 │   ├── policies/         # No-retry, fixed-retry, XGBoost, LLM
 │   └── runner.py         # Runs all policies, produces results table
-├── dashboard/            # Streamlit ops console (6 views under views/)
+├── dashboard/            # Streamlit ops console (9 views under views/) —
+│                         #   runs locally, not deployed; /console/ replaced it
 ├── tests/                # Pytest suite — real schema over throwaway SQLite
 ├── scripts/              # check_deployment (is a live host healthy?),
 │                         #   simulate_webhooks, run_risk_batch, train_xgboost, ...
@@ -880,8 +883,10 @@ disk are never ambiguous about which population they describe.
 ├── models/               # The XGBoost artefact is gitignored (run.sh builds it);
 │                         #   its .card.json model card is committed — the binary is
 │                         #   not reviewable, what it was trained on is
-├── .github/workflows/    # CI: ruff + mypy strict + pytest on 3.11 & 3.13,
-│                         #   migration-chain check, train + eval reproduction
+├── .github/workflows/    # CI, six jobs: ruff + mypy strict + pytest on 3.11 &
+│                         #   3.13, the migration chain on SQLite AND Postgres,
+│                         #   train + eval reproduction, semgrep, pip-audit,
+│                         #   gitleaks over the full history
 ├── AGENTS.md             # Ground rules for AI assistants working in this repo
 ├── run.sh                # One command: clean build → verify → run → public URL
 └── docs/                 # architecture.md · failure_cases.md · eval_methodology.md
@@ -923,7 +928,7 @@ See [docs/failure_cases.md](docs/failure_cases.md) for the full list. Summary:
 
 ## ✅ Test Coverage
 
-**1,008 tests across 59 files, 81% statement coverage over `src/`.** The money
+**1,008 tests across 59 files, 80% statement coverage over `src/`.** The money
 paths are where the coverage went:
 
 | Module | Coverage | Why it is covered |
@@ -944,7 +949,7 @@ paths are where the coverage went:
 | `orchestrator.py` | 86% | Write-ahead ordering, guardrail rejection, chase pipeline, the mandate debit |
 | `scheduler.py` | 85% | Sweep order, deferred fire, re-validation, reconciliation, retention pruning |
 | `executor/retry_executor.py` | 81% | Every Razorpay call the engine makes |
-| `merchant/routes.py` | 79% | Console gating and every panel's query |
+| `merchant/routes.py` | 82% | Console gating and every page's query |
 | `voice/pipeline.py` | 75% | The four gates, including abstention and injection refusal |
 
 **The tests that exist because money can move without a customer present**
@@ -962,6 +967,17 @@ one file because the *class* of defect is the point.
 `dashboard/` is 0% — the pages are Streamlit scripts whose bodies execute on
 import. `dashboard/auth.py` is the exception, split out precisely so the password
 gate is testable without a Streamlit runtime.
+
+**Two numbers worth stating rather than hiding.** `merchant/console_data.py`
+is at **62%** and `customer/routes.py` at **47%**, and both are large. The
+console's read layer grew from a handful of panels to the reads behind
+twenty-two pages, and the covered half is the half that matters — every page
+is asserted to require a session, to render, and to leak no customer
+identifier — but plenty of individual branches inside those reads are exercised
+only through a page render. The customer routes are lower again because the
+*money* paths there (pay, promise, plan, dispute, opt out) are heavily tested
+while the presentational branches around them are not. Neither number is
+comfortable; publishing a flattering subset would be worse.
 
 **The suite is clock-independent, and was not always.** `chase_case` consults
 two wall clocks (the Mon–Fri 09:30–18:30 IST B2B window and the 23:00–07:00
@@ -988,6 +1004,49 @@ nothing at all once anything has already read settings.
 
 The engine's first cut could decide; it could not always be trusted about what
 it had decided. The current wave, all CI-verified.
+
+### The console went from seven pages to twenty-two, in nine phases
+
+The engine could explain itself in the logs and barely at all on screen. The
+console now covers the whole loop — what failed, what the policy chose, which
+rules the gate ran, what the customer was handed, what the B2B ladder is
+waiting on, what the safeguards are doing, and what the audit trail says. Four
+things that came out of building it are worth more than the page list:
+
+**The navigation was the first thing to break, not the last.** Ten items
+already scrolled sideways on a phone; twenty-one do it on a 1280px screen. The
+strip is grouped now (Recovery · Receivables · Customer · Trust) with a
+hairline between groups where there is horizontal room, and a labelled
+`<details>` drawer under 720px where there is not — no script, because a
+navigation that needs JavaScript to open is the worst possible place for the
+console's no-JS rule to break. Badges count only what automation deliberately
+stopped short of, never volume, and **never render as "0"**: a badge
+describing volume sits there forever and teaches the reader to ignore every
+badge.
+
+**"Why did the engine do that?" is answered rule by rule.** The case page had
+always said *whether* the guardrail approved an attempt; it could not say what
+else was checked, so an approval read as "nothing objected" rather than
+"twelve named rules ran and none of them fired". The roster lives in
+`guardrail/gate.py` beside the checks it describes, and five tests keep it
+honest — a check added without a label, or a label outliving its rule, fails
+the suite. An **abandon runs no rules at all** and says so rather than drawing
+twelve green ticks for work that never happened.
+
+**A page that returned 200 on an empty database and 500 on every real one.**
+`/console/analytics/rails` drew a bar chart from method rows that carried no
+`frac`, and `bar()` does arithmetic on it. It survived review because the
+shared test seed leaves that list empty — the loop never ran. Found by loading
+all twenty-four pages against the seeded demo book, which is now the last step
+of every console change. Shares are computed in the read; nothing in this
+console is computed in a template.
+
+**The PII test covered seven pages out of twenty-two.** Three contract tests
+run over one list — requires a session, renders, leaks no customer identifier
+— and thirteen new pages had quietly landed outside it. The list covers every
+gated page now, and a test walks the router so a page added without being
+listed fails the suite instead of opting itself out of the contract the whole
+console rests on.
 
 ### The batch approved abandons, and only CI could see it
 
