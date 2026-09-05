@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
 {% block title %}The decision layer · Recovery Engine{% endblock %}
+{# A public product page (the foundation page and console both link here),
+   so it is indexable like they are — the console's live pages stay noindex. #}
+{% block robots %}<meta name="robots" content="index, follow">{% endblock %}
+{% block description %}How the Payment Recovery Engine decides: a deterministic classifier, five bounded actions, a 12-rule guardrail between every decision and the money, and the eval harness that measured the result.{% endblock %}
 
 {% block head %}
 <style>
@@ -100,6 +104,10 @@
   #model .lever-retry .fc{border-color:var(--green-line);background:var(--green-tint)}
   #model .lever-retry .fc b{color:var(--green-deep)}
   #model .lever-switch .fc{border-color:var(--line-2);background:var(--well)}
+  /* --ink-3 (#6B7076) clears 4.5:1 on paper but not on the green/well tints
+     these chips sit on (measured 4.29/4.46) — small text on a tinted surface
+     needs the darker grey, or the page fails colour-contrast audit. */
+  #model .fc span{color:var(--ink-2)}
 
   /* ── Acts 2–5 — the mechanism, one pinned stage ─────────────────────── */
   /* Default (no GSAP): four ordinary stacked sections, fully readable. */
@@ -160,7 +168,19 @@
     gap:.7rem;align-items:baseline;padding:.62rem 1.1rem;
     border-bottom:1px solid var(--line);font-size:.75rem}
   #model .rec-row:last-child{border-bottom:none}
-  #model .rec-t{color:var(--ink-3);font-size:.68rem}
+  /* The pending state of a row the scroll has not written yet: a papered-over
+     surface, not dimmed text — every line stays at full contrast whether it
+     has been decided or not. Scoped to .gsap-on (the library adds the class),
+     so the no-JS default is plain rows: what a finished case looks like.
+     GSAP tweens the --pending alpha (1 = unwritten, 0 = written), so the
+     effect scrubs in both directions like the opacity it replaced, without
+     ever touching the text colour. */
+  .gsap-on #model .rec-row[data-fill]{
+    --pending:1;
+    background:linear-gradient(rgba(244,244,239,var(--pending)),rgba(244,244,239,var(--pending))),
+      repeating-linear-gradient(45deg,var(--well) 0 .5rem,var(--card) .5rem 1rem)}
+  .gsap-on #model .rec-row.win{--pending:0;background:var(--green-tint)}
+  #model .rec-t{color:var(--ink-2);font-size:.68rem}
   #model .rec-k{color:var(--ink-3)}
   #model .rec-v{color:var(--ink);overflow-wrap:anywhere;min-width:0}
   #model .rec-v b{color:var(--green-deep);font-weight:600}
@@ -663,14 +683,13 @@ window.addEventListener("load", function () {
   var mech = document.querySelector("#mech");
   var beats = gsap.utils.toArray("#mech .beat");
 
-  // The record's lines, keyed to the beat that writes each one. Set from JS,
-  // never from CSS: with the library absent every line is simply already
-  // there, which is exactly what a finished case looks like.
+  // The record's lines, keyed to the beat that writes each one. Pending rows
+  // wear a striped surface (see the --pending CSS above); the timeline fades
+  // the stripe out as each line is written. Text contrast never changes —
+  // opacity 0.14 here was 1.2:1, and the audit reads below-fold text too.
   var rowsFor = function (i) {
     return gsap.utils.toArray('#mech .rec-row[data-fill="' + i + '"]');
   };
-  var pending = gsap.utils.toArray("#mech .rec-row[data-fill]");
-  gsap.set(pending, { opacity: 0.14 });
 
   var tl = gsap.timeline({
     scrollTrigger: {
@@ -700,7 +719,7 @@ window.addEventListener("load", function () {
   beats.forEach(function (beat, i) {
     if (i === 0) return;
     tl.to(beats[i - 1], { opacity: 0, y: -24, ease: "none", duration: 0.35 }, ">")
-      .to(rowsFor(i), { opacity: 1, stagger: 0.12, ease: "none", duration: 0.35 }, "<")
+      .to(rowsFor(i), { "--pending": 0, stagger: 0.12, ease: "none", duration: 0.35 }, "<")
       .fromTo(beat, { opacity: 0, y: 24 }, { opacity: 1, y: 0, ease: "none", duration: 0.35 }, ">");
 
     // The gate's twelve rules stamp in one at a time as you keep scrolling.

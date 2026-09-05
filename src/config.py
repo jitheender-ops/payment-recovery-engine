@@ -130,6 +130,14 @@ class Settings(BaseSettings):
     # connection, but the session pooler works for DDL too — see the appendix
     # in docs/DEPLOY.md for when that distinction matters.
     db_behind_pooler: bool = False
+    # App-side pool sizing for the direct-Postgres shape (the pooler shape
+    # stays small regardless — the pooler is the pool). The defaults sized a
+    # prototype: a 300-concurrent load run showed request latency tracking
+    # the pool queue while Postgres itself sat mostly idle, because every
+    # in-flight request holds a connection through commit. Raise with
+    # traffic; keep pool+overflow under Postgres' own max_connections.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
 
     # SQLAlchemy statement logging. Off by default: echo logs bound parameters,
     # and those include customer_email / customer_contact / vpa on every
@@ -168,6 +176,12 @@ class Settings(BaseSettings):
     # (temperature-disciplined, JSON-constrained) and the numeric grounding
     # gate still applies — a number absent from the passages is a refusal.
     voice_llm_enabled: bool = False
+    # Per-turn LLM budget for the voice path, separate from the global
+    # LLM_TIMEOUT_SECONDS the decision path uses. A caller is standing
+    # there: a turn that takes 30s is a hangup the caller makes for us,
+    # so the LLM path gets its own, much tighter, budget (2-3s per
+    # src/voice/TODO.md §4). 0 = fall back to the global timeout.
+    voice_llm_turn_timeout_seconds: float = 3.0
     # Opt in to queueing voice follow-up calls after a successful nudge (see
     # orchestrator._queue_voice_call). Default off: a call is the highest-
     # friction touch the engine can make and carries its own compliance
@@ -562,6 +576,36 @@ class Settings(BaseSettings):
                 "If the app is also reachable directly, set TRUSTED_PROXY_IPS "
                 "to your proxies' addresses so a direct connection cannot "
                 "forge the header."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_unroutable_public_base_url(self) -> Settings:
+        """
+        Say once at boot when PUBLIC_BASE_URL has no dot in its host.
+
+        render.yaml sources this from `fromService: {property: host}`, and on
+        this deployment that came back as the bare SERVICE NAME —
+        "recovery-api-b5y3", not "recovery-api-b5y3.onrender.com". _ensure_scheme
+        then made it a well-formed URL, so nothing anywhere complained: the
+        console kept working (it mints links off the REQUEST host), while every
+        link the engine put in an SMS or an email pointed at a host that does
+        not resolve. Zero recovered through a link, and no error to explain it.
+
+        A warning rather than an error: a single-label host is legitimate on an
+        intranet or in a container network, so this must not brick a boot. It
+        just has to stop being silent.
+        """
+        host = self.public_base_url.split("//", 1)[-1].split("/", 1)[0]
+        host = host.split(":", 1)[0]
+        if host and "." not in host and host != "localhost":
+            logger.warning(
+                "PUBLIC_BASE_URL is %r — its host has no dot, so it is a bare "
+                "service name rather than a public hostname. Recovery links "
+                "sent by SMS and email will not resolve for a customer. On "
+                "Render set it to the full external host, e.g. "
+                "https://<service>.onrender.com, or to your custom domain.",
+                self.public_base_url,
             )
         return self
 

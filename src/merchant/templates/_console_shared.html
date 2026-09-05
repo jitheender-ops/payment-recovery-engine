@@ -295,6 +295,7 @@
   <p class="chain-v">
     {{ a.result or "no result recorded" }}{% if a.executed %},
     {{ a.executed }} IST{% endif %}.
+    {% if a.error %}<br><span class="sec-s">The gateway said: {{ a.error }}</span>{% endif %}
   </p>
 </li>
 {% endif %}

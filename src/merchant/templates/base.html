@@ -25,6 +25,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light">
 {% block robots %}<meta name="robots" content="noindex, nofollow">{% endblock %}
+<meta name="description" content="{% block description %}AI-decided, guardrail-bounded payment failure recovery: intelligent retries, promises, Hinglish voice, and B2B receivables — every decision audited.{% endblock %}">
 <title>{% block title %}Recovery Console{% endblock %}</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 {# Previews for the PUBLIC pages under this base (the landing especially):
@@ -38,7 +39,15 @@
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=Spline+Sans+Mono:wght@400;500;600&display=swap">
+{# Non-blocking web fonts: the print-media trick loads the stylesheet off
+   the render path and swaps media on load. First paint uses the system
+   fallbacks already in --sans/--mono, and `display=swap` on the Google
+   side re-swaps when the files land — a marketing page must not wait on
+   a third-party CSS round-trip (it cost 2.2s of LCP on mobile PSI).
+   noscript keeps the synchronous load for the 0-JS case, where blocking
+   order no longer matters. #}
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=Spline+Sans+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=Spline+Sans+Mono:wght@400;500;600&display=swap"></noscript>
 <style>
   :root{
     --paper:#FAFAF7; --card:#FFFFFF; --well:#F4F4EF;

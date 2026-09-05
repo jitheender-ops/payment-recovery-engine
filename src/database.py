@@ -83,7 +83,10 @@ def _engine_kwargs(settings: Settings) -> dict[str, Any]:
             connect_args={"statement_cache_size": 0},
         )
     else:
-        kwargs.update(pool_size=10, max_overflow=20)
+        kwargs.update(
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+        )
     return kwargs
 
 

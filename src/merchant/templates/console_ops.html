@@ -32,9 +32,28 @@
     <div class="stat-v {{ 'red' if data.health.stale else 'green' }}" style="font-size:1.2rem">
       {{ "Stopped" if data.health.stale else "Running" }}</div>
     <div class="stat-f">
-      {% if data.health.last_tick %}Last sweep {{ data.health.last_tick }} IST{% if data.health.counts %} · did {{ data.health.counts }}{% endif %}
+      {% if data.health.last_tick %}Last sweep {{ data.health.last_tick }} IST{% if data.health.counts %} · did
+        {%- set did = data.health.counts.items() | selectattr(1) | list %}
+        {% if did %}{% for k, v in did %}{{ v }} {{ k | replace("_", " ") }}{{ ", " if not loop.last }}{% endfor %}
+        {%- else %} nothing — every queue was empty{% endif %}{% endif %}
       {% else %}No sweep has run yet — check SCHEDULER_ENABLED.{% endif %}</div>
   </div>
+
+  {% if data.ops.executed_failed %}
+  <div class="stat" style="margin-top:1rem;border-color:var(--red-line);background:var(--red-tint)">
+    <div class="stat-l">Gateway calls</div>
+    <div class="stat-v red" style="font-size:1.2rem">
+      {{ "{:,}".format(data.ops.executed_failed) }} failed</div>
+    <div class="stat-f">
+      against {{ "{:,}".format(data.ops.executed_ok) }} that minted a link.
+      {%- if data.ops.executed_ok == 0 %} Nothing has EVER minted — the
+      credentials or the gateway account are the first thing to check, because
+      no amount of chasing recovers money through a link that was never
+      created.{% endif %}
+      {% if data.ops.gateway_last_error %}<br>Most recent:
+      {{ data.ops.gateway_last_error }}{% endif %}</div>
+  </div>
+  {% endif %}
 
   <div class="grid grid-4">
     <div class="stat"><div class="stat-l">Scheduled</div>

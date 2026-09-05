@@ -164,3 +164,20 @@ def test_the_views_directory_is_not_named_pages(monkeypatch: Any) -> None:
         "dashboard/pages/ is Streamlit's magic multipage directory — its modules "
         "become routable URLs that bypass the password gate in app.py"
     )
+
+
+def test_the_lockout_key_reads_an_attribute_streamlit_actually_has() -> None:
+    """
+    `_lockout_key()` runs at module scope on every sign-in attempt, before any
+    test in this file gets a say, and Streamlit's context object is not part of
+    its API contract. It read `st.context.ip` — which does not exist — so the
+    console crashed with an AttributeError the moment a request arrived with no
+    X-Forwarded-For header, i.e. every local run. Nothing here drives Streamlit,
+    so only this asserts the attribute is real.
+    """
+    import streamlit as st
+
+    assert hasattr(st.context, "ip_address")
+    assert "st.context.ip_address" in (
+        (REPO_ROOT / "dashboard" / "app.py").read_text()
+    )

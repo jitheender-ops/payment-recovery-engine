@@ -1253,6 +1253,25 @@ async def message_preview(session: AsyncSession) -> dict[str, Any]:
     }
 
 
+def _attempt_error(details: dict[str, Any] | None) -> str | None:
+    """
+    The human-readable half of RetryAttempt.result_details, or None.
+
+    Two writers, two keys. The executor and the self-serve path write
+    {"error": ...}; the scheduler's stale-pending reconciler writes
+    {"scheduler": ...}. Reading only the first left every reconciled attempt
+    rendering as a bare "failed" with no cause — which is the state this
+    function exists to stop being invisible.
+    """
+    if not details:
+        return None
+    for key in ("error", "scheduler"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 async def operations_panel(session: AsyncSession) -> dict[str, Any]:
     """
     Is the machinery running — the 2am question, not the boardroom one.
@@ -1286,6 +1305,27 @@ async def operations_panel(session: AsyncSession) -> dict[str, Any]:
             PromiseToPay.status == "pending", PromiseToPay.due_at < now
         )
     ) or 0
+
+    # Is the money path itself answering? Every other number on this page is
+    # about OUR queues; none of them move when the gateway refuses every call.
+    # A deployment whose Razorpay credentials are wrong looks identical to a
+    # quiet one from here — sweeps run, queues drain, and not one link mints.
+    # That is exactly how a console reads healthy while nothing works, so the
+    # failures get a number and the newest error gets quoted verbatim.
+    executed_failed = await _count(RetryAttempt.result == "failed")
+    executed_ok = await _count(RetryAttempt.result == "success")
+    last_error_row = (
+        await session.execute(
+            select(RetryAttempt.result_details, RetryAttempt.executed_at)
+            .where(RetryAttempt.result == "failed",
+                   RetryAttempt.executed_at.is_not(None))
+            .order_by(RetryAttempt.executed_at.desc())
+            .limit(1)
+        )
+    ).first()
+    last_error = None
+    if last_error_row is not None:
+        last_error = _attempt_error(last_error_row[0])
 
     mix = (
         await session.execute(
@@ -1345,6 +1385,9 @@ async def operations_panel(session: AsyncSession) -> dict[str, Any]:
         "events_unprocessed": unprocessed,
         "risk_unprocessed": risk_unprocessed,
         "promises_overdue": promises_overdue,
+        "executed_ok": executed_ok,
+        "executed_failed": executed_failed,
+        "gateway_last_error": last_error,
         "decision_mix": [
             {"agent": r.agent_type or "—", "action": r.action_type, "n": r.n} for r in mix
         ],
@@ -1688,6 +1731,15 @@ async def case_detail(session: AsyncSession, case_id: str) -> dict[str, Any] | N
                 "guardrail_passed": a.guardrail_passed,
                 "rejection": a.guardrail_rejection_reason,
                 "result": a.result,
+                # Why it failed, not just that it did. The gateway's own error
+                # is the difference between "the engine is quiet" and "every
+                # payment link this deployment tries to mint is being refused";
+                # without it a broken Razorpay account reads as a slow month.
+                # Only on failure: on success this column holds the short_url.
+                "error": (
+                    _attempt_error(a.result_details)
+                    if a.result != "success" else None
+                ),
                 "executed": (
                     _ist(_aware(a.executed_at)).strftime("%d %b, %H:%M")
                     if a.executed_at else None

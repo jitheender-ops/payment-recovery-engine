@@ -27,9 +27,10 @@ to "making real calls a native speaker would trust."
 
 - [ ] **DoT/TCPB registration** for the calling number and route
       (merchant-side duty; the engine cannot do this).
-- [ ] **AI disclosure at call start** — the greeting must state it is an
-      automated assistant. Update `dialogue.py:GREETING` to include it
-      (currently it says "recovery assistant" but not explicitly "automated").
+- [x] **AI disclosure at call start** — the greeting states it is an
+      automated assistant. `dialogue.py:GREETING` now opens with
+      "automated recovery assistant hoon — ek AI hoon, insaan nahi".
+      (Remaining duty is compliance-side: DoT/TCPB and TRAI DLT below.)
 - [ ] **TRAI DLT template registration** for any SMS the voice flow triggers
       (e.g., the payment-link SMS sent during a call).
 - [ ] **Record the consent trail**: every voice opt-out must be auditable
@@ -55,10 +56,11 @@ to "making real calls a native speaker would trust."
 - [ ] **A/B the extractive vs LLM reply on the same 8 FAQ questions**:
       extractive is accurate but joins two passages verbatim (long for TTS);
       `VOICE_LLM_ENABLED=true` rephrases with the same grounding gate.
-- [ ] **Set per-call token/latency budget**: the LLM path currently uses
-      `max_tokens=300` and the global `LLM_TIMEOUT_SECONDS=30` — voice needs
-      a much tighter turn budget (e.g., 2-3s). Consider a voice-specific
-      timeout setting.
+- [x] **Set per-call token/latency budget**: the LLM path uses
+      `max_tokens=300` and now a voice-specific turn timeout
+      (`VOICE_LLM_TURN_TIMEOUT_SECONDS`, default 3s — the global
+      `LLM_TIMEOUT_SECONDS=30` was a hangup the caller made for us;
+      0 falls back to the global).
 - [ ] **Measure grounding-failure rate on the LLM path**: the numeric gate
       must stay at 0 failures on money amounts. If a rephrase trades Hindi
       words for numbers, the gate abstains — track abstention rate.
@@ -79,8 +81,8 @@ to "making real calls a native speaker would trust."
 
 ## 6. Production hardening (after live rounds)
 
-- [ ] **Rate limit `/voice/turn`** per session/IP — currently only
-      signature-gated. A leaked provider key would allow unbounded calls.
+- [x] **Rate limit `/voice/turn`** per IP — done (src/voice/webhook.py,
+      60 signed turns/IP/window, Redis-backed at scale via src/rate_limit.py).
 - [ ] **Call-context logging**: log turn intent + cited chunk id (never
       transcripts with PII) to the audit chain for compliance review.
 - [ ] **Hangup/handoff policy**: define what happens after 2 abstentions

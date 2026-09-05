@@ -361,3 +361,57 @@ def test_retrieve_matches_hinglish_in_both_scripts() -> None:
     deva = [h.id for h in retrieve("कितना पैसा बाकी है", pipeline._corpus(), k=3)]
     assert "faq:how_much" in roman
     assert "faq:how_much" in deva
+
+
+# ── The LLM turn budget ────────────────────────────────────────────────────
+
+
+async def test_the_llm_turn_gets_the_voice_budget_not_the_global_one(
+    monkeypatch: Any,
+) -> None:
+    """
+    A caller is standing there: the voice LLM path must not inherit the
+    decision path's 30s timeout. src/voice/TODO.md §4 asked for a
+    voice-specific budget; this pins that the clients are built with it,
+    and that 0 falls back to the global setting.
+    """
+    from src.config import get_settings
+    from src.voice import pipeline
+
+    settings = get_settings()
+    seen: dict[str, float] = {}
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            seen.update({k: v for k, v in kwargs.items() if k == "timeout"})
+
+    for mod_name, cls_name in (("anthropic", "AsyncAnthropic"), ("openai", "AsyncOpenAI")):
+        try:
+            real = __import__(mod_name)
+        except ImportError:  # pragma: no cover - both are hard deps
+            continue
+        monkeypatch.setattr(real, cls_name, _Client, raising=False)
+        # The call must fail before any HTTP happens; we only care that the
+        # client was constructed with the voice timeout.
+        try:
+            await pipeline._llm_answer("kitna pending hai?", [], None, "Test")
+        except Exception:
+            pass
+        assert seen["timeout"] == settings.voice_llm_turn_timeout_seconds, (
+            f"{mod_name} client built with the wrong timeout"
+        )
+        seen.clear()
+
+    # 0 = inherit the global timeout, per the setting's contract.
+    monkeypatch.setenv("VOICE_LLM_TURN_TIMEOUT_SECONDS", "0")
+    get_settings.cache_clear()
+    try:
+        real = __import__("openai")
+        monkeypatch.setattr(real, "AsyncOpenAI", _Client, raising=False)
+        try:
+            await pipeline._llm_answer("kitna pending hai?", [], None, "Test")
+        except Exception:
+            pass
+        assert seen["timeout"] == settings.llm_timeout_seconds
+    finally:
+        get_settings.cache_clear()

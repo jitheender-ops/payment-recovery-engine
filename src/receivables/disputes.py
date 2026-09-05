@@ -83,6 +83,17 @@ async def open_dispute(
     session.add(dispute)
     await session.flush()
 
+    # Both, and for different readers. The alert is the merchant's worklist —
+    # deliverable, dismissable, gone once handled. The case event is the audit
+    # chain, which is where "why did chasing stop on this invoice" is answered
+    # months later. Only the RESOLUTION was on the chain, so the trail recorded
+    # the verdict on a dispute it never recorded anyone raising.
+    from src.cases import log_event
+
+    log_event(
+        session, case, "dispute_opened", actor="customer",
+        reason=dispute.reason, dispute_id=str(dispute.id),
+    )
     await raise_alert(
         session,
         event_type="dispute_opened",

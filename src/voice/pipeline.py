@@ -399,6 +399,13 @@ async def _llm_answer(
     from src.config import get_settings, reveal
 
     settings = get_settings()
+    # The caller is standing there: this turn gets the voice budget, not
+    # the decision path's. 0 = inherit the global LLM_TIMEOUT_SECONDS.
+    timeout = (
+        settings.voice_llm_turn_timeout_seconds
+        if settings.voice_llm_turn_timeout_seconds > 0
+        else settings.llm_timeout_seconds
+    )
     passages = [sanitize(h.text) for h in hits]
     if facts is not None:
         passages.extend(facts.as_passages(merchant))
@@ -420,7 +427,7 @@ async def _llm_answer(
 
         client = anthropic.AsyncAnthropic(
             api_key=reveal(settings.anthropic_api_key),
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
         )
         response = await client.messages.create(
             model=settings.llm_model,
@@ -435,7 +442,7 @@ async def _llm_answer(
         client = openai.AsyncOpenAI(
             api_key=reveal(settings.openai_api_key),
             base_url=settings.llm_base_url or None,
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
         )
         completion = await client.chat.completions.create(
             model=settings.llm_model,

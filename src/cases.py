@@ -128,6 +128,7 @@ CaseEventType = Literal[
     "overpayment",
     "closed",
     "opted_out",
+    "dispute_opened",
     "deferred",
     "stopped",
     "reconciled",

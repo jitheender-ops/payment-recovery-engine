@@ -5,7 +5,10 @@
 {% block head %}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&display=swap">
+{# Same non-blocking pattern as base.html — the replica's Archivo must not
+   block first paint of the product page. #}
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&display=swap"></noscript>
 <style>
   /* ── Web replica (hero) ─────────────────────────────────────────────────
      A clickable mock of a merchant's own site, "Tatva" — a fictional grocery
@@ -37,17 +40,22 @@
     color:var(--r-mute);background:none;border:none;cursor:pointer;padding:.4rem .6rem;
     border-bottom:2px solid transparent;white-space:nowrap;transition:color .15s ease}
   .replica-step:hover{color:var(--r-ink)}
-  .replica-step[aria-current="true"]{color:var(--r-accent);border-color:var(--r-accent)}
+  .replica-step[aria-current="true"]{color:#c41f05;border-color:var(--r-accent)}
 
   .replica-mode{display:flex;justify-content:flex-end;padding:.5rem .9rem 0}
-  .replica-mode button{font-family:var(--mono);font-size:.68rem;font-weight:600;color:var(--r-accent);
+  .replica-mode button{font-family:var(--mono);font-size:.68rem;font-weight:600;color:#c41f05;
     background:var(--r-accent-soft);border:1px solid transparent;border-radius:999px;
     padding:.3rem .7rem;cursor:pointer}
   .replica-mode button:hover{border-color:var(--r-accent)}
 
   .replica-body{padding:1.1rem 1.1rem 1.3rem;min-height:19rem;max-height:27rem;overflow-y:auto;
     display:flex;flex-direction:column}
-  .replica-body h4{margin:0 0 .3rem;font-size:1.05rem;font-weight:800;letter-spacing:-.01em}
+  /* .r-h: the replica's screen titles. Real headings once (h4 → h3), now
+     paragraphs that LOOK like headings: the widget lives in the page <header>
+     ahead of the first <h2>, so any heading inside it broke the document's
+     heading order — and these are a mock site's screens, not this document's
+     structure. Styling, not semantics, is all they ever needed. */
+  .replica-body h3,.replica-body .r-h{margin:0 0 .3rem;font-size:1.05rem;font-weight:800;letter-spacing:-.01em}
   .replica-body .rq{color:var(--r-mute);font-size:.82rem;margin:0 0 1rem}
   .replica-body .rmono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
@@ -704,7 +712,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
   function screenLanding() {
     var digits = otpDigits();
     return '' +
-      '<h4>Sign in to ' + esc(MERCHANT) + '</h4>' +
+      '<p class="r-h">Sign in to ' + esc(MERCHANT) + '</p>' +
       '<p class="rq">Your basket is saved. Sign in to check out.</p>' +
       '<input class="r-field" id="rPhone" type="tel" inputmode="numeric" placeholder="Mobile number" ' +
       'aria-label="Mobile number" value="' + esc(S.phone) + '" maxlength="11">' +
@@ -723,7 +731,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
       return k === '' ? '<span class="r-key"></span>' : '<button type="button" class="r-key" data-key="' + esc(k) + '">' + esc(k) + '</button>';
     }).join('');
     return '' +
-      '<h4>Enter the code</h4>' +
+      '<p class="r-h">Enter the code</p>' +
       '<p class="rq">Sent by SMS to ' + esc(phoneDisplay()) + '</p>' +
       '<div class="r-otp-row">' + cells +
       '<input class="r-otp-input" id="rOtpInput" inputmode="numeric" maxlength="6" ' +
@@ -739,7 +747,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
     }).join('');
     var processing = S.pay === 'processing';
     return '' +
-      '<h4>Your basket</h4>' +
+      '<p class="r-h">Your basket</p>' +
       '<div class="r-items">' + rows + '</div>' +
       '<div class="r-total"><span>Total</span><span class="rmono">₹2,480</span></div>' +
       '<button class="r-btn" data-action="checkout" ' + (processing ? 'disabled' : '') + '>' +
@@ -765,7 +773,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
         (reduceMotion ? '' : 'animation:rPulse 1.3s ease-in-out infinite') + '"></span>' +
         '<span class="rt"><b>Working on it</b><span>Order #TV-4471 held · nothing charged</span></span></div>';
     return '' +
-      '<h4>' + headline + '</h4>' +
+      '<p class="r-h">' + headline + '</p>' +
       '<p class="rq">' + body + '</p>' +
       '<ul class="r-reassure">' + reassure.map(function (r, i) {
         return '<li><span class="rn">0' + (i + 1) + '</span><span>' + esc(r) + '</span></li>';
@@ -776,13 +784,13 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
 
   function screenPaylink() {
     if (S.pay !== 'ready' && S.pay !== 'paid') {
-      return '<h4>Not ready yet</h4><p class="rq">We’re still confirming with your bank. Try Basket → Pay first, or check back in a moment.</p>';
+      return '<p class="r-h">Not ready yet</p><p class="rq">We’re still confirming with your bank. Try Basket → Pay first, or check back in a moment.</p>';
     }
     if (S.pay === 'paid') {
-      return '<h4>Already paid</h4><p class="rq">This link is settled — see the Paid tab for the receipt.</p>';
+      return '<p class="r-h">Already paid</p><p class="rq">This link is settled — see the Paid tab for the receipt.</p>';
     }
     return '' +
-      '<h4>Pay by UPI</h4>' +
+      '<p class="r-h">Pay by UPI</p>' +
       '<p class="rq">One tap, no card needed. Expires in 46 minutes.</p>' +
       '<div class="r-total"><span>Amount</span><span class="rmono">₹2,480</span></div>' +
       '<button class="r-btn" data-action="payNow">Pay now</button>';
@@ -790,14 +798,14 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
 
   function screenPaid() {
     if (S.pay !== 'paid') {
-      return '<h4>Nothing paid yet</h4><p class="rq">Walk through Basket → Pay again to see the receipt here.</p>';
+      return '<p class="r-h">Nothing paid yet</h3><p class="rq">Walk through Basket → Pay again to see the receipt here.</p>';
     }
     var receipt = [
       ['Paid via', 'UPI · gpay@okhdfcbank'], ['Payment ID', 'pay_QxS1mD44'],
       ['Attempt', '2 of 3 · switch_rail'], ['Time to money', '11m 04s from failure']
     ];
     return '' +
-      '<h4>Payment cleared</h4>' +
+      '<p class="r-h">Payment cleared</p>' +
       '<p class="rq">₹2,480 · delivery tonight, 7–9pm</p>' +
       '<dl class="r-receipt">' + receipt.map(function (r) {
         return '<div class="rr"><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>';
@@ -819,7 +827,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
         '" data-action="setLang" data-key="' + esc(l) + '">' + esc(l) + '</button>';
     }).join('');
     return '' +
-      '<h4>Account</h4>' +
+      '<p class="r-h">Account</p>' +
       '<p class="rq">How ' + esc(MERCHANT) + ' can reach you</p>' +
       rows +
       '<p class="rq" style="margin-top:.9rem">Language</p>' +
@@ -829,7 +837,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
   function screenCase() {
     var kpis = [['State', 'Recovered'], ['At risk', '₹2,480'], ['Attempts', '2 of 3'], ['Time to money', '11m 04s']];
     return '' +
-      '<h4>Case TV-4471</h4>' +
+      '<p class="r-h">Case TV-4471</p>' +
       '<div class="r-kpis">' + kpis.map(function (k) {
         return '<div class="r-kpi"><div class="l">' + esc(k[0]) + '</div><div class="v">' + esc(k[1]) + '</div></div>';
       }).join('') + '</div>' +
@@ -846,7 +854,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
 
   function screenFunnel() {
     return '' +
-      '<h4>Recovery funnel · 30d</h4>' +
+      '<p class="r-h">Recovery funnel · 30d</p>' +
       '<div class="r-funnel">' + FUNNEL.map(function (f) {
         return '<div class="r-fstage"><div class="fl"><span>' + esc(f[0]) + '</span><span class="v">' + esc(f[1]) + '</span></div>' +
           '<div class="r-fbar"><i style="width:' + f[2] + '%;background:' + (f[0].indexOf('Recovered') === 0 ? 'var(--r-accent)' : 'var(--r-ink)') + '"></i></div></div>';
@@ -856,7 +864,7 @@ X-Risk-Signature: <span class="g">&lt;hmac-sha256 of the raw body&gt;</span>
   function screenOps() {
     var kpis = [['Agent p95', '1.9s'], ['LLM fallbacks', '3'], ['Rejects', '41'], ['Overpayments', '0']];
     return '' +
-      '<h4>Ops health</h4>' +
+      '<p class="r-h">Ops health</p>' +
       '<div class="r-kpis">' + kpis.map(function (k) {
         return '<div class="r-kpi"><div class="l">' + esc(k[0]) + '</div><div class="v">' + esc(k[1]) + '</div></div>';
       }).join('') + '</div>' +

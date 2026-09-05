@@ -696,3 +696,33 @@ async def test_an_invoice_with_no_customer_at_all_still_chases_on_arrival(
         assert fresh.account_id is None, "no customer key, so nothing to group with"
 
     assert calls == ["INV-ANON"], "an account-less invoice should chase on arrival"
+
+
+async def test_a_customer_dispute_lands_on_the_audit_chain(
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """
+    The freeze above is invisible in the trail unless the dispute is on it.
+
+    open_dispute raised a merchant alert and nothing else, while the
+    RESOLUTION wrote a case_event — so the chain recorded a verdict on a
+    dispute it never recorded anyone raising, and "why did chasing stop on
+    this invoice" had no answer on the page that exists to answer it.
+    """
+    from src.models import CaseEvent
+    from src.receivables.disputes import open_dispute
+
+    now = datetime.now(UTC)
+    async with db_sessionmaker() as session:
+        case = await _due_invoice(session, "INV-AUDIT", now=now, days_overdue=8)
+        assert await open_dispute(session, case, reason="billed twice") is not None
+        await session.commit()
+
+        rows = (await session.execute(
+            sa.select(CaseEvent).where(CaseEvent.recovery_case_id == case.id)
+        )).scalars().all()
+
+    opened = [e for e in rows if e.event_type == "dispute_opened"]
+    assert len(opened) == 1, [e.event_type for e in rows]
+    assert opened[0].actor == "customer"
+    assert opened[0].detail["reason"] == "billed twice"

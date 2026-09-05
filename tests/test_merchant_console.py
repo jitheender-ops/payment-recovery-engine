@@ -2508,3 +2508,23 @@ async def test_every_safeguard_says_whether_it_was_read_or_is_structural(
     assert structural == {
         "Idempotency", "Fire-time re-validation", "Dispute freeze",
     }, structural
+
+
+def test_a_failed_attempt_reports_its_reason_whichever_writer_recorded_it() -> None:
+    """
+    Two writers put the cause of a failure under two different keys.
+
+    The executor and the self-serve pay path write {"error": ...}; the
+    scheduler's stale-pending reconciler writes {"scheduler": ...}. The console
+    read only the first, so every reconciled attempt rendered as a bare
+    "failed" with no cause — and a deployment whose gateway refuses every call
+    looked exactly like a quiet month.
+    """
+    from src.merchant.console_data import _attempt_error
+
+    assert _attempt_error({"error": "link failed"}) == "link failed"
+    assert _attempt_error({"scheduler": "stale-pending"}) == "stale-pending"
+    assert _attempt_error({"phase": "order", "error": "401"}) == "401"
+    assert _attempt_error({"phase": "write_ahead"}) is None
+    assert _attempt_error({}) is None
+    assert _attempt_error(None) is None

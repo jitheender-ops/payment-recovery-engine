@@ -56,7 +56,7 @@ def _lockout_key() -> str:
     entries = [e.strip() for e in xff.split(",") if e.strip()]
     if entries:
         return entries[-1]
-    return st.context.ip or os.getenv("REMOTE_ADDR", "")
+    return st.context.ip_address or os.getenv("REMOTE_ADDR", "")
 
 theme.apply()
 
